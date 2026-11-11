@@ -1,0 +1,25 @@
+{
+  "descripcion": "Decisiones locales: un evento queda sustituido por otro. No son datos de SofaScore, que no publica el vínculo. En modo JSON se configuran con SPORTS_DATA_REPLACEMENTS=correcciones/sustituciones.json. Para revertir una, borrar su entrada y reiniciar FastAPI.",
+  "sustituciones": [
+    {
+      "sustituido": 16599956,
+      "vigente": 17118209,
+      "motivo": "FC Cartagena - Real Murcia, J5: el evento original quedó aplazado y el encuentro se jugó y finalizó con otro identificador.",
+      "procedencia": {
+        "decidido_por": "Analista de rj-analyst (instrucción de trabajo)",
+        "fecha": "2026-10-22",
+        "evidencia": "Ambos eventos en la importación 2026-10-22-grupo2-j38: 16599956 aplazado (27-09-2026), 17118209 finalizado 1-0 (07-10-2026); misma competición, temporada, jornada, local y visitante. La fuente no enlaza los dos eventos."
+      }
+    },
+    {
+      "sustituido": 16599919,
+      "vigente": 16969545,
+      "motivo": "UE Sant Andreu - Real Madrid Castilla, J4: el evento original quedó aplazado y el encuentro se jugó y finalizó con otro identificador.",
+      "procedencia": {
+        "decidido_por": "Analista de rj-analyst (instrucción de trabajo)",
+        "fecha": "2026-10-22",
+        "evidencia": "Ambos eventos en la importación 2026-10-22-grupo2-j38: 16599919 aplazado (20-09-2026), 16969545 finalizado 1-1 (23-09-2026); misma competición, temporada, jornada, local y visitante. La fuente no enlaza los dos eventos."
+      }
+    }
+  ]
+}

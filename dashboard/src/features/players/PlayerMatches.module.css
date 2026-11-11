@@ -1,0 +1,106 @@
+.round { color: var(--rj-text-secondary); font-size: var(--rj-text-xs); white-space: nowrap; }
+.observedLayout { display: grid; gap: var(--rj-space-6); min-width: 0; }
+.matchSelector, .selectedDetail { min-width: 0; }
+.selectorHeading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--rj-space-2) var(--rj-space-4); margin-bottom: var(--rj-space-2); }
+.jump { display: grid; justify-self: end; gap: 3px; min-width: 0; width: min(100%, 260px); color: var(--rj-text-secondary); font-size: var(--rj-text-xs); }
+.jump select { font-size: var(--rj-text-sm); }
+.selectedDetail > h2 { margin-bottom: var(--rj-space-4); }
+.cardTop { display: flex; align-items: baseline; justify-content: space-between; gap: var(--rj-space-2); }
+.cardMinutes { color: var(--rj-text-secondary); font-size: var(--rj-text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.venueIcon { display: inline-flex; flex-shrink: 0; color: var(--rj-text-secondary); }
+.cardBottom { display: flex; align-items: center; justify-content: space-between; gap: var(--rj-space-2); }
+.detailFixture { overflow-wrap: anywhere; font-size: var(--rj-text-sm); font-weight: 700; }
+.detailFixture a, .teams a { color: inherit; text-decoration: none; border-radius: var(--rj-radius-sm); }
+.detailFixture a:hover, .teams a:hover { color: var(--rj-purple-900); text-decoration: underline; text-underline-offset: 3px; }
+.detailFixture a:focus-visible, .teams a:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+.detailContext .detailFixture .score { margin-left: 0; }
+.playerBadges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--rj-space-2); }
+.playerBadges > span { padding: 2px 8px; border: 1px solid var(--rj-border-default); border-radius: var(--rj-radius-sm); color: var(--rj-text-secondary); background: var(--rj-bg-card); font-size: var(--rj-text-xs); }
+.statGroups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--rj-space-4); align-items: start; }
+.statColumn { display: grid; gap: var(--rj-space-4); min-width: 0; }
+.statBlock { display: grid; gap: var(--rj-space-3); min-width: 0; padding: var(--rj-space-4) var(--rj-space-5); border: 1px solid var(--rj-border-default); border-radius: var(--rj-radius-sm); background: var(--rj-bg-soft); }
+.statSecondary { margin: 0; }
+.statSecondary > div { display: flex; align-items: baseline; justify-content: space-between; gap: var(--rj-space-3); padding-block: 5px; }
+.statSecondary > div + div { border-top: 1px solid var(--rj-border-default); }
+.statSecondary dt { font-size: var(--rj-text-sm); }
+.statSecondary dd { margin: 0; font-size: var(--rj-text-md); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.statGroups[data-keeper] { grid-template-columns: minmax(0, 240px); }
+.statSecondary dd { position: relative; }
+/* Outside the value's box, so every figure keeps the column's right edge. */
+.noteMark { position: absolute; top: 0; left: 100%; margin-left: 2px; color: var(--rj-text-secondary); font-size: var(--rj-text-xs); font-weight: 600; line-height: 1; }
+.notesLegend { display: grid; gap: 2px; margin: var(--rj-space-3) 0 0; padding: 0; list-style: none; color: var(--rj-text-secondary); font-size: var(--rj-text-xs); }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (max-width: 640px) {
+  .jump { margin-left: auto; }
+  .statGroups { display: flex; flex-direction: column; }
+  .statGroups[data-keeper] { max-width: 240px; }
+  .statColumn { display: contents; }
+  .statBlock { width: 100%; box-sizing: border-box; }
+  .statBlock { padding: var(--rj-space-3) var(--rj-space-4); }
+}
+.matchStrip { display: flex; gap: var(--rj-space-2); overflow-x: auto; padding: 3px; margin: 0; list-style: none; scrollbar-width: thin; scrollbar-color: var(--rj-border-strong) transparent; }
+.matchStrip > li { display: flex; flex: 0 0 160px; min-width: 0; }
+.matchCard { position: relative; display: grid; grid-template-rows: auto 1fr auto; gap: 4px; width: 100%; height: 116px; box-sizing: border-box; padding: var(--rj-space-3); border: 1px solid var(--rj-border-default); border-radius: var(--rj-radius-sm); background: var(--rj-bg-card); color: inherit; text-align: left; font: inherit; transition: background-color var(--rj-motion-fast); }
+.matchCard:focus-within:not(:has(.cardOpponent a:focus)):not(:has(.cardOpponent a:hover)) { background: var(--rj-bg-hover); }
+.matchCard[data-selected="true"] { background: var(--rj-purple-100); border-color: var(--rj-purple-700); box-shadow: inset 0 0 0 1px var(--rj-purple-700); }
+.matchSelect { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+.matchSelect:focus-visible { outline: var(--rj-focus-ring); outline-offset: 1px; }
+.matchCard > :not(.matchSelect) { position: relative; z-index: 1; pointer-events: none; }
+.cardOpponent { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: var(--rj-text-sm); line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
+.cardOpponent a { color: inherit; text-decoration: none; pointer-events: auto; border-radius: var(--rj-radius-sm); cursor: pointer; }
+.cardOpponent a:hover { color: var(--rj-purple-900); text-decoration: underline; text-underline-offset: 3px; }
+.cardOpponent a:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+.matchCard .score { text-align: left; font-size: var(--rj-text-md); font-weight: 700; }
+.history { list-style: none; margin: 0; padding: 0; }
+.masterDetail { display: grid; grid-template-columns: minmax(0, 42fr) minmax(0, 58fr); gap: var(--rj-space-6); align-items: start; }
+.master { min-width: 0; }
+.master .history { max-height: min(680px, 75vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--rj-border-strong) transparent; }
+.desktopDetail { position: sticky; top: var(--rj-space-4); min-width: 0; }
+.inlineDetail { display: none; }
+.historyRow { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr) 48px; gap: 4px var(--rj-space-2); align-items: center; min-width: 0; margin-inline: var(--rj-space-1); padding: var(--rj-space-3) var(--rj-space-3); border-bottom: 1px solid var(--rj-border-default); background: none; text-align: left; font: inherit; color: inherit; transition: background-color var(--rj-motion-fast); }
+.historyRow[data-selectable="true"]:focus-within:not(:has(.teams a:focus)):not(:has(.teams a:hover)) { background: var(--rj-bg-hover); }
+.historyRow[data-selectable="true"] > :not(.matchSelect) { position: relative; z-index: 1; pointer-events: none; }
+.historyRow[data-selected="true"] { background: var(--rj-purple-100); }
+.matchSelect { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.matchSelect:focus-visible { outline: var(--rj-focus-ring); outline-offset: -2px; }
+.historyRow > .round { grid-column: 1; grid-row: 1; }
+.fixture { grid-column: 2; grid-row: 1; }
+.historyRow > .score { grid-column: 3; grid-row: 1; }
+.playerContext { grid-column: 2 / 4; grid-row: 2; display: flex; align-items: center; flex-wrap: wrap; gap: var(--rj-space-3); }
+.fixture { min-width: 0; }
+.teams { font-size: var(--rj-text-sm); font-weight: 600; overflow-wrap: anywhere; }
+.teams a { position: relative; z-index: 2; color: inherit; text-decoration: none; pointer-events: auto; border-radius: var(--rj-radius-sm); cursor: pointer; }
+.teams a:hover { color: var(--rj-purple-900); text-decoration: underline; text-underline-offset: 3px; }
+.teams a:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  .matchCard:hover:not(:has(.cardOpponent a:hover)) { background: var(--rj-bg-hover); }
+  .historyRow[data-selectable="true"]:hover:not(:has(.teams a:hover)) { background: var(--rj-bg-hover); }
+}
+.meta { display: block; margin-top: 3px; font-size: var(--rj-text-xs); color: var(--rj-text-secondary); font-weight: 400; }
+.score { font-size: var(--rj-text-sm); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: center; }
+.role { font-size: var(--rj-text-xs); color: var(--rj-text-secondary); }
+.contribution, .contribution > span { display: flex; align-items: center; gap: 4px; color: var(--rj-purple-700); font-size: var(--rj-text-xs); }
+.contribution { gap: var(--rj-space-2); }
+.detailContext { margin-bottom: var(--rj-space-4); }
+.detailContext .score { margin-left: var(--rj-space-2); }
+.actionsBlock { margin-top: var(--rj-space-5); }
+.actionsBlock h3 { font-size: var(--rj-text-sm); font-weight: 700; margin-bottom: var(--rj-space-2); }
+.actions { list-style: none; padding: 0; margin: 0; }
+.actions li { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: var(--rj-space-2); padding-block: 6px; border-bottom: 1px solid var(--rj-border-default); }
+.minute { font-size: var(--rj-text-sm); color: var(--rj-purple-900); font-variant-numeric: tabular-nums; }
+.actionText { display: flex; align-items: flex-start; gap: 6px; font-size: var(--rj-text-sm); overflow-wrap: anywhere; }
+.actionText > svg { flex-shrink: 0; color: var(--rj-purple-700); margin-top: 2px; }
+.cardIcon { position: relative; flex-shrink: 0; width: 16px; height: 19px; }
+.cardIcon > span { position: absolute; top: 2px; left: 3px; width: 10px; height: 14px; border: 1px solid var(--rj-gold-600); border-radius: 2px; background: var(--rj-gold-300); }
+.cardIcon[data-card="red"] > span, .cardIcon[data-card="second_yellow"] > span:last-child { border-color: var(--rj-danger); background: var(--rj-danger); }
+.cardIcon[data-card="second_yellow"] > span:first-child { left: 0; top: 0; }
+.cardIcon[data-card="second_yellow"] > span:last-child { left: 5px; top: 4px; }
+.fullMatch { display: inline-block; margin-top: var(--rj-space-4); font-size: var(--rj-text-sm); color: var(--rj-purple-900); }
+.fullMatch:focus-visible { outline: var(--rj-focus-ring); outline-offset: 3px; }
+.detailHeading { font-size: var(--rj-text-sm); font-weight: 700; margin-bottom: var(--rj-space-3); }
+@media (max-width: 900px) {
+  .masterDetail { display: block; }
+  .master .history { max-height: none; overflow-y: visible; scrollbar-gutter: auto; }
+  .desktopDetail { display: none; }
+  .inlineDetail { display: block; padding: var(--rj-space-4) 6px var(--rj-space-5); border-bottom: 1px solid var(--rj-border-default); }
+}

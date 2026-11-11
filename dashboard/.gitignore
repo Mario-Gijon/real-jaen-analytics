@@ -1,0 +1,21 @@
+# Dependencias y builds
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Pruebas
+coverage/
+test-results/
+playwright-report/
+
+# Entorno local
+.env*
+!.env.example
+!.env.docker.example
+.DS_Store
+desktop.ini
+
+# Material de trabajo local (capturas, importaciones): nunca en Git
+/artifacts/

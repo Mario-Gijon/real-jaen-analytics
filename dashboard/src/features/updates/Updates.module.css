@@ -1,0 +1,141 @@
+/* Top bar: one state line and one action, at the right end of the bar. */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--rj-space-3);
+  min-width: 0;
+  margin-left: auto;
+}
+.barState {
+  max-width: 260px;
+  overflow: hidden;
+  border-radius: var(--rj-radius-sm);
+  color: rgb(255 255 255 / 0.86);
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.barState:hover {
+  color: var(--rj-text-inverse);
+  text-decoration: underline;
+}
+.barState:focus-visible {
+  outline: 3px solid var(--rj-gold-300);
+  outline-offset: 2px;
+}
+/* Progress announcements for assistive technology, also on phones where the line is hidden. */
+.announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* On the purple bar the action uses the gold of the brand, not the purple primary. */
+.barButton {
+  flex-shrink: 0;
+  border-color: rgb(232 200 103 / 0.7);
+  background: var(--rj-gold-300);
+  color: var(--rj-purple-900);
+}
+.barButton:hover:not(:disabled) {
+  background: var(--rj-gold-50);
+}
+.barButton:focus-visible {
+  outline-color: var(--rj-gold-300);
+}
+
+/* Operator screen. */
+.section {
+  display: grid;
+  gap: var(--rj-space-3);
+  max-width: 720px;
+  margin-bottom: var(--rj-space-8);
+}
+.section h2 {
+  margin: 0;
+  font-size: var(--rj-text-lg);
+}
+.section p {
+  margin: 0;
+}
+.muted {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.ok {
+  color: var(--rj-success);
+  font-weight: 700;
+}
+.problem {
+  color: var(--rj-danger);
+  font-weight: 700;
+}
+/* Published, with resources still pending: not an error, not a plain success. */
+.warn {
+  color: var(--rj-warning);
+  font-weight: 700;
+}
+.coverage {
+  display: grid;
+  gap: var(--rj-space-2);
+}
+.coverage h3 {
+  margin: var(--rj-space-2) 0 0;
+  font-size: var(--rj-text-md);
+}
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-2) var(--rj-space-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--rj-text-sm);
+}
+.pending {
+  display: grid;
+  gap: var(--rj-space-1);
+  margin: 0;
+  padding-left: var(--rj-space-5);
+  font-size: var(--rj-text-sm);
+}
+.matchId {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+}
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.steps li {
+  padding: 4px 10px;
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-pill);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.steps li[aria-current="step"] {
+  border-color: var(--rj-purple-700);
+  background: var(--rj-purple-100);
+  color: var(--rj-purple-900);
+  font-weight: 700;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-3);
+}
+/* Phones: the bar keeps only the action; its state is one tap away at /operador. */
+@media (max-width: 640px) {
+  .barState {
+    display: none;
+  }
+}

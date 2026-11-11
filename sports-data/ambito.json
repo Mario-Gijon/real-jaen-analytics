@@ -1,0 +1,12 @@
+{
+  "descripcion": "Competiciones que sirve esta versión de la API. Cada entrada es una competición en una temporada: el grupo (tournament_id) puede cambiar de una temporada a otra, así que cada temporada se añade como una entrada nueva. Los datos de origen no se modifican: lo excluido sigue en datos/ para trazabilidad.",
+  "competiciones": [
+    {
+      "nombre": "Primera Federación, Grupo 2",
+      "temporada": "26/27",
+      "unique_tournament_id": 17073,
+      "tournament_id": 94191,
+      "season_id": 97382
+    }
+  ]
+}

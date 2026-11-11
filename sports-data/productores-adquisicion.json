@@ -1,0 +1,31 @@
+{
+  "descripcion": "Huellas de producer_rules() (acquisition/recipe.py) aprobadas por revisión. El backend rechaza cualquier bundle con otra huella. Una entrada nueva exige revisar el código del productor que la genera. 'generacion' limita una aprobación a los bundles de esa generación. Está fuera de persistencia/ a propósito: aprobar un productor no cambia las reglas de importación ni la huella que el coordinador exige a la base.",
+  "aprobados": [
+    {
+      "rules_sha256": "e18eba33cfbfd11b6ac39c6046ddacfe4436bb8f0b40775ba6b770f8a8c4d65a",
+      "productor": "acquisition/{pilot_bundle,pilot_transport,sofascore_offline,sdk_adapter,sdk_transport}.py en el commit 69ac18f",
+      "uso": "Solo el bundle real del 28-10-2026 (rj-real-sdk-37b257e89b03), en su propia generación",
+      "generacion": "0e80fdde-95d9-44b0-a2ea-8426bce14b03"
+    },
+    {
+      "rules_sha256": "1e0df6bd30aa1a4a9db510e86e334e83ae220116f2f2f56dbfcd6ff787f815be",
+      "productor": "acquisition/{recipe,group_plan,transport,sdk_adapter,job}.py; reintento de recursos incompletos y IDs nuevos solo para revisión",
+      "uso": "Servicio de adquisición: recetas del piloto y del Grupo 2 sin importar eventos nuevos"
+    },
+    {
+      "rules_sha256": "195a4931adc292872647a6c3c3571a5c1da9f4dd3899abc3ac83796935f3c915",
+      "productor": "Acquisition Grupo 2 con importación explícita de SEND_RESERVE y deduplicación de pendientes mediante conjuntos",
+      "uso": "Huella revisada de la implementación de comentarios españoles tras corregir errores de ejecución; sin cambios en rutas, alcance, límites ni reglas deportivas"
+    },
+    {
+      "rules_sha256": "325fbbb5ccb18b48b0009f70fd4b9ddf46e14ff6cbfb3dbbb70f6288cabd6254",
+      "productor": "Acquisition Grupo 2: comments.jsonl con límite 8 MiB y reserva de capacidad por línea antes de cada consulta",
+      "uso": "Receta sofascore-group2-2627-v1, sin cambios en alcance, presupuesto de solicitudes ni reglas deportivas"
+    },
+    {
+      "rules_sha256": "575528e883b82c0d00ef796c36d5fcf7f3be55a55cab7abca88383a80d714198",
+      "productor": "Grupo 2: verificador de comentarios usa el estado final de detalle, listado de jornada validado o inventario en el mismo orden de prioridad que la receta",
+      "uso": "Receta sofascore-group2-2627-v1; corrige solo la cobertura incremental de comentarios, sin cambiar rutas, alcance, presupuesto ni reglas deportivas"
+    }
+  ]
+}

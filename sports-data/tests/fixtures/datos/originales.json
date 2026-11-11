@@ -1,0 +1,571 @@
+[
+ {
+  "event_id": 1001,
+  "key": "event",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "event": {
+    "id": 1001,
+    "tournament": {
+     "id": 94191,
+     "name": "Primera Federacion, Group 2",
+     "uniqueTournament": {
+      "id": 17073
+     }
+    },
+    "season": {
+     "id": 97382,
+     "year": "26/27"
+    }
+   }
+  }
+ },
+ {
+  "event_id": 1002,
+  "key": "event",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "event": {
+    "id": 1002,
+    "tournament": {
+     "id": 94191,
+     "name": "Primera Federacion, Group 2",
+     "uniqueTournament": {
+      "id": 17073
+     }
+    },
+    "season": {
+     "id": 97382,
+     "year": "26/27"
+    }
+   }
+  }
+ },
+ {
+  "event_id": 1003,
+  "key": "event",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "event": {
+    "id": 1003,
+    "tournament": {
+     "id": 150,
+     "name": "Copa del Rey",
+     "uniqueTournament": {
+      "id": 329
+     }
+    },
+    "season": {
+     "id": 104108,
+     "year": "26/27"
+    }
+   }
+  }
+ },
+ {
+  "event_id": 1004,
+  "key": "event",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "event": {
+    "id": 1004,
+    "tournament": {
+     "id": 94190,
+     "name": "Primera Federacion, Group 1",
+     "uniqueTournament": {
+      "id": 17073
+     }
+    },
+    "season": {
+     "id": 97382,
+     "year": "26/27"
+    }
+   }
+  }
+ },
+ {
+  "event_id": 1001,
+  "key": "statistics",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "statistics": [
+    {
+     "period": "ALL",
+     "groups": [
+      {
+       "groupName": "Match overview",
+       "statisticsItems": [
+        {
+         "key": "ballPossession",
+         "name": "ballPossession",
+         "home": "40",
+         "away": "60",
+         "homeValue": 40,
+         "awayValue": 60
+        },
+        {
+         "key": "expectedGoals",
+         "name": "expectedGoals",
+         "home": "0.8",
+         "away": "1.5",
+         "homeValue": 0.8,
+         "awayValue": 1.5
+        },
+        {
+         "key": "totalShotsOnGoal",
+         "name": "totalShotsOnGoal",
+         "home": "9",
+         "away": "12",
+         "homeValue": 9,
+         "awayValue": 12
+        },
+        {
+         "key": "cornerKicks",
+         "name": "cornerKicks",
+         "home": "4",
+         "away": "5",
+         "homeValue": 4,
+         "awayValue": 5
+        }
+       ]
+      },
+      {
+       "groupName": "Shots",
+       "statisticsItems": [
+        {
+         "key": "expectedGoals",
+         "name": "expectedGoals",
+         "home": "0.8",
+         "away": "1.5",
+         "homeValue": 0.8,
+         "awayValue": 1.5
+        },
+        {
+         "key": "totalShotsOnGoal",
+         "name": "totalShotsOnGoal",
+         "home": "9",
+         "away": "12",
+         "homeValue": 9,
+         "awayValue": 12
+        },
+        {
+         "key": "shotsOnGoal",
+         "name": "shotsOnGoal",
+         "home": "3",
+         "away": "2",
+         "homeValue": 3,
+         "awayValue": 2
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "period": "1ST",
+     "groups": [
+      {
+       "groupName": "Match overview",
+       "statisticsItems": [
+        {
+         "key": "ballPossession",
+         "name": "ballPossession",
+         "home": "45",
+         "away": "55",
+         "homeValue": 45,
+         "awayValue": 55
+        },
+        {
+         "key": "expectedGoals",
+         "name": "expectedGoals",
+         "home": "0.3",
+         "away": "0.7",
+         "homeValue": 0.3,
+         "awayValue": 0.7
+        },
+        {
+         "key": "totalShotsOnGoal",
+         "name": "totalShotsOnGoal",
+         "home": "4",
+         "away": "6",
+         "homeValue": 4,
+         "awayValue": 6
+        },
+        {
+         "key": "shotsOnGoal",
+         "name": "shotsOnGoal",
+         "home": "1",
+         "away": "1",
+         "homeValue": 1,
+         "awayValue": 1
+        },
+        {
+         "key": "cornerKicks",
+         "name": "cornerKicks",
+         "home": "2",
+         "away": "2",
+         "homeValue": 2,
+         "awayValue": 2
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "event_id": 1005,
+  "key": "statistics",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "statistics": [
+    {
+     "period": "ALL",
+     "groups": [
+      {
+       "groupName": "Match overview",
+       "statisticsItems": [
+        {
+         "key": "ballPossession",
+         "name": "ballPossession",
+         "home": "True",
+         "away": "45",
+         "homeValue": true,
+         "awayValue": 45
+        },
+        {
+         "key": "expectedGoals",
+         "name": "expectedGoals",
+         "home": "0.0",
+         "away": "0.9",
+         "homeValue": 0.0,
+         "awayValue": 0.9
+        },
+        {
+         "key": "totalShotsOnGoal",
+         "name": "totalShotsOnGoal",
+         "home": "0",
+         "away": "7",
+         "homeValue": 0,
+         "awayValue": 7
+        },
+        {
+         "key": "shotsOnGoal",
+         "name": "shotsOnGoal",
+         "home": "1",
+         "away": "2",
+         "homeValue": 1,
+         "awayValue": 2
+        }
+       ]
+      },
+      {
+       "groupName": "Shots",
+       "statisticsItems": [
+        {
+         "key": "shotsOnGoal",
+         "name": "shotsOnGoal",
+         "home": "2",
+         "away": "2",
+         "homeValue": 2,
+         "awayValue": 2
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "event_id": 1006,
+  "key": "statistics",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "statistics": []
+  }
+ },
+ {
+  "event_id": 1001,
+  "key": "incidents",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "incidents": [
+    {
+     "incidentType": "period",
+     "text": "FT",
+     "homeScore": 0,
+     "awayScore": 2
+    },
+    {
+     "incidentType": "goal",
+     "incidentClass": "penalty",
+     "time": 30,
+     "isHome": false,
+     "player": {
+      "id": 5001
+     },
+     "assist1": {
+      "id": 5009
+     }
+    },
+    {
+     "incidentType": "goal",
+     "incidentClass": "ownGoal",
+     "time": 60,
+     "isHome": true,
+     "player": {
+      "id": 5013
+     }
+    },
+    {
+     "incidentType": "substitution",
+     "incidentClass": "regular",
+     "time": 70,
+     "isHome": true,
+     "playerIn": {
+      "id": 5012
+     },
+     "playerOut": {
+      "id": 9101
+     }
+    },
+    {
+     "incidentType": "penaltyShootout",
+     "incidentClass": "scored",
+     "isHome": false,
+     "player": {
+      "id": 5001
+     }
+    }
+   ]
+  }
+ },
+ {
+  "event_id": 1001,
+  "key": "lineups",
+  "sub": "",
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "payload": {
+   "confirmed": true,
+   "home": {
+    "players": [
+     {
+      "player": {
+       "id": 5013,
+       "name": "Rival del Autogol",
+       "position": "D",
+       "height": 186,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 4,
+      "substitute": false,
+      "position": "D",
+      "statistics": {
+       "minutesPlayed": 90,
+       "totalShots": 0,
+       "goalAssist": 0,
+       "totalPass": 20,
+       "touches": 40,
+       "ownGoals": 1
+      }
+     },
+     {
+      "player": {
+       "id": 5012,
+       "name": "Rival que Entra",
+       "position": "F",
+       "height": 179,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 18,
+      "substitute": true,
+      "position": "F",
+      "statistics": {
+       "totalShots": 0
+      }
+     }
+    ]
+   },
+   "away": {
+    "players": [
+     {
+      "player": {
+       "id": 5001,
+       "name": "Jugador Sintético Uno",
+       "position": "M",
+       "height": 175,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 10,
+      "substitute": false,
+      "position": "M",
+      "statistics": {
+       "minutesPlayed": 90,
+       "totalShots": 2,
+       "goals": 1,
+       "goalAssist": 0,
+       "totalPass": 30,
+       "accuratePass": 25
+      }
+     },
+     {
+      "player": {
+       "id": 5003,
+       "name": "Jugador Sintético Suplente",
+       "position": "D",
+       "height": 182,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 20,
+      "substitute": true,
+      "position": "D",
+      "statistics": {
+       "totalShots": 0
+      }
+     },
+     {
+      "player": {
+       "id": 5009,
+       "name": "Jugador Sin Clave de Asistencia",
+       "position": "M",
+       "height": 177,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 6,
+      "substitute": false,
+      "position": "M",
+      "statistics": {
+       "minutesPlayed": 90,
+       "totalShots": 0,
+       "totalPass": 40,
+       "accuratePass": 35,
+       "touches": 55
+      }
+     },
+     {
+      "player": {
+       "id": 5010,
+       "name": "Jugador Gol Sin Evento",
+       "position": "F",
+       "height": 180,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 7,
+      "substitute": false,
+      "position": "F",
+      "statistics": {
+       "minutesPlayed": 90,
+       "totalShots": 3,
+       "goals": 1,
+       "goalAssist": 0,
+       "totalPass": 12,
+       "touches": 30
+      }
+     },
+     {
+      "player": {
+       "id": 5011,
+       "name": "Jugador Toques Sin Entrada",
+       "position": "M",
+       "height": 172,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 21,
+      "substitute": true,
+      "position": "M",
+      "statistics": {
+       "totalShots": 0,
+       "statisticsType": {
+        "statisticsType": "player"
+       },
+       "touches": 3,
+       "totalPass": 2
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "event_id": 1003,
+  "key": "lineups",
+  "sub": "",
+  "fetched_at": "2026-10-29T12:00:00+00:00",
+  "payload": {
+   "confirmed": true,
+   "home": {
+    "players": []
+   },
+   "away": {
+    "players": [
+     {
+      "player": {
+       "id": 5001,
+       "name": "Jugador Sintético Uno (Copa)",
+       "position": "F",
+       "height": 199,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 10,
+      "substitute": false,
+      "position": "F",
+      "statistics": {
+       "minutesPlayed": 90
+      }
+     },
+     {
+      "player": {
+       "id": 5002,
+       "name": "Jugador Sólo Copa",
+       "position": "D",
+       "height": 180,
+       "country": {
+        "name": "Spain"
+       },
+       "dateOfBirthTimestamp": 946684800
+      },
+      "shirtNumber": 30,
+      "substitute": false,
+      "position": "D",
+      "statistics": {
+       "minutesPlayed": 90
+      }
+     }
+    ]
+   }
+  }
+ }
+]

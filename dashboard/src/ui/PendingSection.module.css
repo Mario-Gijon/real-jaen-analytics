@@ -1,0 +1,14 @@
+.pending {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  padding: var(--rj-space-8) var(--rj-space-6);
+  border: 1px dashed var(--rj-border-strong);
+  border-radius: var(--rj-radius-md);
+  background: var(--rj-bg-card);
+  color: var(--rj-text-secondary);
+  text-align: center;
+}
+.pending p {
+  max-width: 52ch;
+}

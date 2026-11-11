@@ -1,0 +1,3 @@
+# Direct HTTP runtime dependencies; provided and version-checked against the audited browser runtime image.
+fastapi==0.142.2
+uvicorn==0.54.0

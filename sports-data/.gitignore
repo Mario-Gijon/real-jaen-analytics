@@ -1,0 +1,41 @@
+# Datos importados de SofaScore: se generan con el importador y no se versionan.
+# (Sólo la carpeta de la raíz: tests/fixtures/datos es una muestra sintética versionada.)
+/datos/
+datos_normalizados/
+resultado/
+*.jsonl
+*.jsonl.gz
+# Bases de la persistencia: siempre fuera del repositorio; esto solo evita versionarlas por descuido.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Copias de respaldo y capturas
+*.bak
+*.orig
+backup*/
+capturas/
+screenshots/
+*.png
+*.jpg
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Temporales y registros
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Secretos y configuración privada o del editor
+.env
+.env.*
+*.local
+.vscode/
+.idea/

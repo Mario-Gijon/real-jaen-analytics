@@ -1,0 +1,4 @@
+-r requirements-sql.txt
+fastapi==0.162.0
+pydantic==2.14.2
+uvicorn==0.54.0

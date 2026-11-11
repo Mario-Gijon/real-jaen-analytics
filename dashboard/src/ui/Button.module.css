@@ -1,0 +1,61 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rj-space-2);
+  max-width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--rj-radius-sm);
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background-color var(--rj-motion-fast),
+    border-color var(--rj-motion-fast);
+}
+.button:focus-visible {
+  outline: var(--rj-focus-ring);
+  outline-offset: 3px;
+}
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.button > svg {
+  flex-shrink: 0;
+}
+.sm,
+.md {
+  min-height: var(--rj-control-height);
+  font-size: var(--rj-text-sm);
+}
+.sm {
+  padding: var(--rj-space-2) var(--rj-space-3);
+}
+.md {
+  padding: var(--rj-space-2) var(--rj-space-4);
+}
+.primary {
+  background: var(--rj-action-primary);
+  color: var(--rj-text-inverse);
+}
+.primary:hover:not(:disabled) {
+  background: var(--rj-action-primary-hover);
+}
+.secondary {
+  border-color: var(--rj-purple-300);
+  background: var(--rj-bg-card);
+  color: var(--rj-purple-900);
+}
+.secondary:hover:not(:disabled) {
+  border-color: var(--rj-purple-500);
+  background: var(--rj-bg-hover);
+}
+.ghost {
+  background: transparent;
+  color: var(--rj-purple-900);
+}
+.ghost:hover:not(:disabled) {
+  background: var(--rj-purple-100);
+}

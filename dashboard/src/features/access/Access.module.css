@@ -1,0 +1,109 @@
+/* The access screen: one card, centred horizontally and a little above the middle of the space under the top bar
+   (68 px, and the 32 px padding of the main area above and below). Its top edge is placed at a share of that space,
+   not centred by its height: an error message makes the card grow downwards without moving it. */
+.screen {
+  display: grid;
+  justify-items: center;
+  padding-top: calc((100dvh - 68px - 2 * var(--rj-space-8)) * 0.234);
+}
+.card {
+  display: grid;
+  gap: var(--rj-space-6);
+  width: min(100%, 380px);
+  padding: var(--rj-space-8) var(--rj-space-6) var(--rj-space-6);
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-md);
+  background: var(--rj-bg-card);
+}
+.heading {
+  display: grid;
+  gap: var(--rj-space-2);
+  text-align: center;
+}
+.title {
+  font-size: 1.5rem;
+  text-align: center;
+  font-weight: 750;
+  line-height: 1.2;
+}
+.heading p {
+  color: var(--rj-text-secondary);
+  text-wrap: pretty;
+}
+.form {
+  display: grid;
+  gap: var(--rj-space-2);
+}
+.form label {
+  font-weight: 700;
+}
+.form input {
+  min-width: 0;
+  min-height: var(--rj-control-height);
+  padding: 0 var(--rj-space-3);
+  border: 1px solid var(--rj-control-border);
+  border-radius: var(--rj-radius-sm);
+  font: inherit;
+}
+.form input:focus-visible {
+  outline: var(--rj-focus-ring);
+  outline-offset: 1px;
+}
+.submit {
+  width: 100%;
+  margin-top: var(--rj-space-2);
+}
+.note {
+  margin: var(--rj-space-2) 0 0;
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  text-align: center;
+}
+.problem {
+  margin: 0;
+  color: var(--rj-danger);
+  font-weight: 700;
+}
+.card > .problem {
+  text-align: center;
+}
+
+/* Phones: the shorter top bar and the 24 px padding of the main area. */
+@media (max-width: 640px) {
+  .screen {
+    padding-top: calc((100dvh - 56px - 2 * var(--rj-space-6)) * 0.246);
+  }
+  .card {
+    padding: var(--rj-space-6) var(--rj-space-5) var(--rj-space-5);
+  }
+}
+/* Short phones: less space above, so the card with an error message still fits without scrolling. */
+@media (max-width: 640px) and (max-height: 600px) {
+  .screen {
+    padding-top: calc((100dvh - 56px - 2 * var(--rj-space-6)) * 0.2);
+  }
+}
+
+.signOut {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgb(255 255 255 / 0.35);
+  border-radius: var(--rj-radius-sm);
+  background: transparent;
+  color: var(--rj-text-inverse);
+  cursor: pointer;
+}
+.signOut:hover {
+  background: rgb(255 255 255 / 0.12);
+}
+.signOut:focus-visible {
+  outline: var(--rj-focus-ring);
+  outline-offset: 2px;
+}
+.signOut:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

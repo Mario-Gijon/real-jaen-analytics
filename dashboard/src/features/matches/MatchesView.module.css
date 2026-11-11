@@ -1,0 +1,76 @@
+.scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-3);
+}
+.field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.field > span {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+}
+.competition { width: 240px; }
+.season { width: 130px; }
+.explorer {
+  display: grid;
+  gap: var(--rj-space-4);
+  max-width: 960px;
+  min-width: 0;
+}
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--rj-space-5);
+}
+.roundPicker {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--rj-space-2);
+}
+.roundActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--rj-control-height);
+}
+.roundActions > button {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  gap: 0;
+  border-color: var(--rj-border-default);
+  color: var(--rj-text-secondary);
+}
+.roundActions > button:hover:not(:disabled),
+.roundActions > button:focus-visible {
+  border-color: var(--rj-purple-500);
+  color: var(--rj-purple-700);
+}
+.teamPicker { width: 240px; }
+.surface {
+  min-width: 0;
+  padding: 0 var(--rj-space-5);
+  background: var(--rj-bg-card);
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-md);
+}
+.status { color: var(--rj-text-secondary); font-size: var(--rj-text-sm); }
+.surface .status, .surface .error { padding-block: var(--rj-space-5); }
+.error { display: flex; flex-wrap: wrap; align-items: center; gap: var(--rj-space-3); }
+.unmatched { display: grid; gap: var(--rj-space-2); color: var(--rj-text-secondary); font-size: var(--rj-text-sm); }
+.unmatched a { color: var(--rj-purple-700); font-weight: 700; }
+.unmatched a:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+@media (max-width: 640px) {
+  .scope { display: grid; grid-template-columns: minmax(0, 1fr) 110px; width: 100%; }
+  .competition, .season { width: auto; }
+  .filters { display: grid; gap: var(--rj-space-3); }
+  .roundPicker .field { flex: 1; }
+  .teamPicker { width: auto; }
+  .surface { padding-inline: var(--rj-space-3); }
+}

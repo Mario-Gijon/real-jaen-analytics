@@ -1,0 +1,272 @@
+[
+ {
+  "source": "Sofascore",
+  "match_id": 1001,
+  "kickoff_utc": "2026-08-30T17:15:00+00:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 1,
+  "home_team_id": 9001,
+  "away_team_id": 2841,
+  "home_score": 0,
+  "away_score": 2,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event",
+   "statistics",
+   "lineups",
+   "incidents"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1002,
+  "kickoff_utc": "2026-11-07T15:30:00+00:00",
+  "status": "notstarted",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 11,
+  "home_team_id": 2841,
+  "away_team_id": 9002,
+  "home_score": null,
+  "away_score": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1003,
+  "kickoff_utc": "2026-10-28T19:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 150,
+  "competition": "Copa del Rey",
+  "season_id": 104108,
+  "season": "26/27",
+  "round": 1,
+  "home_team_id": 9003,
+  "away_team_id": 2841,
+  "home_score": 1,
+  "away_score": 1,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event",
+   "lineups"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1004,
+  "kickoff_utc": "2026-09-14T17:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 94190,
+  "competition": "Primera Federacion, Group 1",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 3,
+  "home_team_id": 9004,
+  "away_team_id": 2841,
+  "home_score": 0,
+  "away_score": 0,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1005,
+  "kickoff_utc": "2026-09-06T17:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 2,
+  "home_team_id": 2841,
+  "away_team_id": 9002,
+  "home_score": 1,
+  "away_score": 1,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1006,
+  "kickoff_utc": "2026-09-20T17:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 4,
+  "home_team_id": 2841,
+  "away_team_id": 9001,
+  "home_score": 0,
+  "away_score": 3,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1007,
+  "kickoff_utc": "2026-09-27T17:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 5,
+  "home_team_id": 9002,
+  "away_team_id": 2841,
+  "home_score": null,
+  "away_score": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1008,
+  "kickoff_utc": "2026-10-04T17:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 6,
+  "home_team_id": 9001,
+  "away_team_id": 2841,
+  "home_score": true,
+  "away_score": 0,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1009,
+  "kickoff_utc": "2026-10-11T17:00:00+00:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 7,
+  "home_team_id": 2841,
+  "away_team_id": 9002,
+  "home_score": -1,
+  "away_score": 2,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1010,
+  "kickoff_utc": "2026-10-18T17:00:00+00:00",
+  "status": "inprogress",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 8,
+  "home_team_id": 9001,
+  "away_team_id": 2841,
+  "home_score": 0,
+  "away_score": 0,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1011,
+  "kickoff_utc": "2026-11-14T17:00:00+00:00",
+  "status": "notstarted",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 12,
+  "home_team_id": 9002,
+  "away_team_id": 2841,
+  "home_score": 0,
+  "away_score": 0,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1012,
+  "kickoff_utc": null,
+  "status": "postponed",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 13,
+  "home_team_id": 2841,
+  "away_team_id": 9001,
+  "home_score": null,
+  "away_score": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1013,
+  "kickoff_utc": "2026-09-20T19:00:00+02:00",
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 9,
+  "home_team_id": 9002,
+  "away_team_id": 2841,
+  "home_score": 0,
+  "away_score": 1,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ },
+ {
+  "source": "Sofascore",
+  "match_id": 1014,
+  "kickoff_utc": null,
+  "status": "finished",
+  "tournament_id": 94191,
+  "competition": "Primera Federacion, Group 2",
+  "season_id": 97382,
+  "season": "26/27",
+  "round": 10,
+  "home_team_id": 2841,
+  "away_team_id": 9001,
+  "home_score": 2,
+  "away_score": 0,
+  "fetched_at": "2026-10-21T12:00:00+00:00",
+  "available_sections": [
+   "event"
+  ]
+ }
+]

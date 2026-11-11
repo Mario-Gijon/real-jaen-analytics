@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:video-sync:sports-events:v1",
+  "title": "Video Sync Neutral Sports Events v1",
+  "type": "object",
+  "required": ["contract", "version", "events"],
+  "properties": {
+    "contract": {"const": "video-sync.sports-events"},
+    "version": {"const": 1},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_order", "original_type", "normalized_type", "period"],
+        "properties": {
+          "source_order": {"type": "integer", "minimum": 0},
+          "source_id": {"type": ["string", "integer", "null"]},
+          "original_type": {"type": "string", "minLength": 1},
+          "normalized_type": {
+            "enum": ["match_start", "period_start", "period_end", "match_end", "added_time", "other"]
+          },
+          "period": {"enum": ["first", "second", "unknown", null]},
+          "source_minute": {"type": ["string", "integer", "null"]},
+          "game_clock_seconds": {"type": ["integer", "null"], "minimum": 0},
+          "source_period_name": {"type": ["string", "null"]},
+          "source_text": {"type": ["string", "null"]},
+          "source_position": {"type": ["string", "integer", "number", "null"]}
+        },
+        "additionalProperties": true,
+        "not": {"anyOf": [
+          {"required": ["video_second"]},
+          {"required": ["video_position"]},
+          {"required": ["video_position_seconds"]}
+        ]}
+      }
+    }
+  },
+  "additionalProperties": true
+}

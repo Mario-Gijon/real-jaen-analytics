@@ -1,0 +1,18 @@
+.crest {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--crest-size);
+  height: var(--crest-size);
+}
+.crest img,
+.crest svg {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.crest text {
+  font-family: var(--rj-font-sans);
+  letter-spacing: -0.02em;
+}

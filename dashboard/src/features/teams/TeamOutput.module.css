@@ -1,0 +1,176 @@
+/* One quiet block: attack and defence side by side, context underneath. */
+.output {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-sm);
+  background: var(--rj-bg-soft);
+}
+.units {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.unit {
+  display: grid;
+  align-content: start;
+  gap: var(--rj-space-3);
+  min-width: 0;
+  padding: var(--rj-space-4) var(--rj-space-5);
+}
+.unit + .unit {
+  border-left: 1px solid var(--rj-border-default);
+}
+.unitTitle,
+.contextTitle {
+  color: var(--rj-text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.main,
+.secondary,
+.context dl {
+  margin: 0;
+}
+
+/* Goals and xG: the protagonists. */
+.main {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 210px));
+  gap: var(--rj-space-4);
+}
+.main > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.main dt {
+  order: 2;
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+  font-weight: 600;
+}
+.main dd {
+  display: contents;
+}
+.mainValue {
+  order: 1;
+  font-size: 1.875rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.main .delta {
+  order: 3;
+}
+
+/* Shots: one line each, clearly secondary. */
+.secondary {
+  display: grid;
+  gap: 2px;
+  padding-top: var(--rj-space-2);
+  border-top: 1px dashed var(--rj-border-strong);
+}
+.secondary > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  font-size: var(--rj-text-sm);
+}
+.secondary dt {
+  order: 2;
+  color: var(--rj-text-secondary);
+}
+.secondary dd {
+  order: 1;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.secondary .secondaryDelta {
+  order: 3;
+}
+
+/* Context: lighter than attack and defence. */
+.context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--rj-space-1) var(--rj-space-6);
+  padding: var(--rj-space-2) var(--rj-space-5);
+  border-top: 1px solid var(--rj-border-default);
+}
+.context dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-1) var(--rj-space-6);
+}
+.context dl > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  font-size: var(--rj-text-sm);
+}
+.context dt {
+  color: var(--rj-text-secondary);
+}
+.context dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.delta {
+  color: var(--rj-text-muted);
+  font-size: var(--rj-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.missing {
+  color: var(--rj-text-muted);
+}
+.partial {
+  margin-left: 1px;
+  /* A superscript must not push its value down next to an unmarked one. */
+  line-height: 0;
+  color: var(--rj-warning);
+  font-size: 0.7em;
+  font-weight: 800;
+}
+.note {
+  padding: 0 var(--rj-space-5) var(--rj-space-2);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+}
+
+@media (max-width: 640px) {
+  .units {
+    grid-template-columns: 1fr;
+  }
+  .unit {
+    padding: var(--rj-space-3) var(--rj-space-4);
+  }
+  .unit + .unit {
+    border-top: 1px solid var(--rj-border-default);
+    border-left: 0;
+  }
+  .mainValue {
+    font-size: 1.625rem;
+  }
+  .context {
+    padding: var(--rj-space-2) var(--rj-space-4);
+  }
+  .context dl {
+    gap: 2px var(--rj-space-4);
+  }
+  .note {
+    padding-inline: var(--rj-space-4);
+  }
+}

@@ -1,0 +1,32 @@
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rj-space-4);
+  min-width: 0;
+  margin-bottom: var(--rj-space-6);
+}
+.copy {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.header[data-actions-only] { justify-content: flex-end; }
+.copy h1 {
+  font-size: clamp(1.5rem, 2.5vw, 2rem);
+  font-weight: 750;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.copy p {
+  max-width: 70ch;
+  margin-top: var(--rj-space-2);
+  color: var(--rj-text-secondary);
+  text-wrap: pretty;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rj-space-2);
+}

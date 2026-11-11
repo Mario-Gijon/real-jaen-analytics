@@ -1,0 +1,68 @@
+/*
+ * Real Jaén design tokens. Values come from the RealHive design system
+ * (alvaro-dev, design-system/tokens), trimmed to what this app uses; from here
+ * on this file is the reference.
+ */
+:root {
+  /* Brand */
+  --rj-purple-900: #4b2677;
+  --rj-purple-800: #592888;
+  --rj-purple-700: #6e32a8;
+  --rj-purple-500: #8d5bc1;
+  --rj-purple-300: #b79ad7;
+  --rj-purple-200: #ddd1ec;
+  --rj-purple-100: #f1ebf8;
+  --rj-gold-600: #d4a72c;
+  --rj-gold-300: #e8c867;
+  --rj-gold-50: #fff9e9;
+
+  /* Surfaces and text */
+  --rj-bg-main: #faf8fc;
+  --rj-bg-card: #ffffff;
+  --rj-bg-hover: #f5f0fa;
+  --rj-bg-soft: #f8f5fb;
+  --rj-text-primary: #161525;
+  --rj-text-secondary: #5e6172;
+  --rj-text-muted: #8c8fa0;
+  --rj-text-inverse: #ffffff;
+  --rj-border-default: #e3deea;
+  --rj-border-strong: #d8d1e0;
+
+  /* States */
+  --rj-success: #18865d;
+  --rj-warning: #b57912;
+  --rj-danger: #c83b50;
+
+  /* Typography (system fonts: nothing to download) */
+  --rj-font-sans: "Aptos", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --rj-text-xs: 0.75rem;
+  --rj-text-sm: 0.875rem;
+  --rj-text-md: 1rem;
+  --rj-text-lg: 1.125rem;
+
+  /* Spacing */
+  --rj-space-1: 4px;
+  --rj-space-2: 8px;
+  --rj-space-3: 12px;
+  --rj-space-4: 16px;
+  --rj-space-5: 20px;
+  --rj-space-6: 24px;
+  --rj-space-8: 32px;
+  --rj-space-10: 40px;
+
+  /* Radius and elevation */
+  --rj-radius-sm: 9px;
+  --rj-radius-md: 13px;
+  --rj-radius-pill: 999px;
+  --rj-shadow-sm: 0 5px 16px rgb(51 32 69 / 0.07);
+
+  /* Controls */
+  --rj-action-primary: var(--rj-purple-700);
+  --rj-action-primary-hover: var(--rj-purple-900);
+  --rj-control-height: 44px;
+  --rj-control-border: var(--rj-purple-300);
+  --rj-focus-ring: 3px solid var(--rj-purple-700);
+
+  /* Motion */
+  --rj-motion-fast: 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}

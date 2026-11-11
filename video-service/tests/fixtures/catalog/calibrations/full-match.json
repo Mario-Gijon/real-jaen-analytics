@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "status": "calibrated",
+  "video": {"path": null, "duration_seconds": 9000},
+  "periods": [{"period": "first"}, {"period": "second"}],
+  "segments": [
+    {
+      "segment_id": "S01",
+      "temporal_segment_id": "T01",
+      "period": "first",
+      "football_period": "first",
+      "game_clock_start": 30,
+      "game_clock_end": 2820,
+      "video_start": 1030,
+      "video_end": 3820,
+      "offset_seconds": 1000,
+      "reference_count": 10,
+      "max_residual_seconds": 0.5,
+      "ocr_confidence": "high",
+      "period_confidence": "high",
+      "location_confidence": "high"
+    },
+    {
+      "segment_id": "S02",
+      "temporal_segment_id": "T02",
+      "period": "second",
+      "football_period": "second",
+      "game_clock_start": 2740,
+      "game_clock_end": 5670,
+      "video_start": 4740,
+      "video_end": 7670,
+      "offset_seconds": 2000,
+      "reference_count": 12,
+      "max_residual_seconds": 0.5,
+      "ocr_confidence": "high",
+      "period_confidence": "high",
+      "location_confidence": "high"
+    }
+  ],
+  "coverage": {
+    "percent": 72.5,
+    "supported_references": 22,
+    "video_seconds": 9000,
+    "interpolable_seconds": 6500
+  },
+  "confidence_dimensions": {
+    "ocr": {"level": "high"},
+    "period": {"level": "high"},
+    "location": {"level": "high"}
+  },
+  "uncertainty_zones": []
+}

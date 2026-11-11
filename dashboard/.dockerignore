@@ -1,0 +1,12 @@
+# Allowlist: never send .env.local, Git, host node_modules, builds or data to Docker.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!next.config.ts
+!src/
+!src/**
+!public/
+!public/**
+**/.env*
+**/*.sqlite*

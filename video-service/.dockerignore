@@ -1,0 +1,11 @@
+.venv/
+storage/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+tests/
+output/
+*.mp4
+data/videos.json
+data/calibrations/*.json

@@ -1,0 +1,156 @@
+[
+ {
+  "source": "Sofascore",
+  "player_id": 5001,
+  "name": "Jugador Sintético Uno (Copa)",
+  "usual_position": "F",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 199,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-29T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5002,
+  "name": "Jugador Sólo Copa",
+  "usual_position": "D",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 180,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-29T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5003,
+  "name": "Jugador Sintético Suplente",
+  "usual_position": "D",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 182,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5004,
+  "name": "Jugador Contradictorio",
+  "usual_position": "D",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 178,
+  "preferred_foot": "Right",
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5005,
+  "name": "Jugador Duplicado",
+  "usual_position": "F",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": null,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5006,
+  "name": "Jugador del Rival",
+  "usual_position": "F",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 181,
+  "preferred_foot": "Left",
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5007,
+  "name": "Jugador Lado Erróneo",
+  "usual_position": "M",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 170,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5008,
+  "name": "Jugador Valores Inválidos",
+  "usual_position": "G",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": true,
+  "preferred_foot": 5,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5009,
+  "name": "Jugador Sin Clave de Asistencia",
+  "usual_position": "M",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 177,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5010,
+  "name": "Jugador Gol Sin Evento",
+  "usual_position": "F",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 180,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5011,
+  "name": "Jugador Toques Sin Entrada",
+  "usual_position": "M",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 172,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5012,
+  "name": "Rival que Entra",
+  "usual_position": "F",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 179,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5013,
+  "name": "Rival del Autogol",
+  "usual_position": "D",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 186,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ },
+ {
+  "source": "Sofascore",
+  "player_id": 5014,
+  "name": "Jugador Sin Cobertura",
+  "usual_position": "D",
+  "country": "Spain",
+  "birth_date": "2000-01-01",
+  "height_cm": 181,
+  "preferred_foot": null,
+  "fetched_at": "2026-10-21T12:00:00+00:00"
+ }
+]

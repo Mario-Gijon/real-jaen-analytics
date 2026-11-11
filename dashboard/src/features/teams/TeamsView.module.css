@@ -1,0 +1,150 @@
+.scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-3);
+}
+.field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.field > span {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+}
+.field:first-child {
+  width: 240px;
+}
+.field:last-child {
+  width: 130px;
+}
+.real {
+  display: grid;
+  gap: var(--rj-space-4);
+  min-width: 0;
+}
+.view {
+  display: grid;
+  gap: var(--rj-space-5);
+  min-width: 0;
+}
+.status {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rj-space-3);
+}
+.identityOnly {
+  display: grid;
+  gap: var(--rj-space-3);
+  max-width: 720px;
+  padding: var(--rj-space-5) var(--rj-space-6);
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-md);
+  background: var(--rj-bg-card);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.identityOnly .identity h2 {
+  min-width: 0;
+  color: var(--rj-text-primary);
+  font-size: 1.25rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.identityOnly > p { margin: 0; }
+.identityOnly a { width: fit-content; color: var(--rj-purple-900); }
+.identityOnly a:focus-visible { outline: var(--rj-focus-ring); outline-offset: 3px; }
+.team {
+  display: grid;
+  gap: var(--rj-space-4);
+  min-width: 0;
+  padding: var(--rj-space-5) var(--rj-space-6) var(--rj-space-6);
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-md);
+  background: var(--rj-bg-card);
+}
+.identity {
+  display: flex;
+  align-items: center;
+  gap: var(--rj-space-3);
+  min-width: 0;
+}
+.titles {
+  flex: 1;
+  min-width: 0;
+}
+.titles h2 {
+  overflow: hidden;
+  font-size: 1.25rem;
+  font-weight: 800;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.titles p {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.titles[data-full-name] h2 {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Desktop: the grid is always visible, so there is nothing to unfold. */
+.identity .change {
+  display: none;
+}
+.panel {
+  min-width: 0;
+}
+.panel:focus-visible {
+  outline-offset: 4px;
+}
+
+@media (max-width: 640px) {
+  .scope {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 110px;
+    width: 100%;
+  }
+  .field:first-child,
+  .field:last-child {
+    width: auto;
+  }
+  .view {
+    gap: var(--rj-space-3);
+  }
+  .picker:not([data-open]) {
+    display: none;
+  }
+  .identity .change {
+    display: inline-flex;
+  }
+  .change[aria-expanded="true"] svg {
+    transform: rotate(180deg);
+  }
+  .team {
+    gap: var(--rj-space-3);
+    margin-inline: calc(-1 * var(--rj-space-4));
+    padding: var(--rj-space-4);
+    border-width: 1px 0;
+    border-radius: 0;
+  }
+  .identityOnly {
+    margin-inline: calc(-1 * var(--rj-space-4));
+    padding: var(--rj-space-4);
+    border-width: 1px 0;
+    border-radius: 0;
+  }
+  .titles h2 {
+    font-size: 1.0625rem;
+  }
+  .titles p {
+    font-size: var(--rj-text-xs);
+  }
+}

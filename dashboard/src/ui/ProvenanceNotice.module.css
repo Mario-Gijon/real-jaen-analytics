@@ -1,0 +1,16 @@
+.notice {
+  display: grid;
+  gap: 2px;
+  padding: var(--rj-space-2) var(--rj-space-3);
+  border-left: 3px solid var(--rj-purple-700);
+  background: var(--rj-bg-soft);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.source {
+  color: var(--rj-purple-900);
+  font-size: var(--rj-text-xs);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

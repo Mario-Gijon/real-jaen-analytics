@@ -1,0 +1,17 @@
+.missing {
+  color: var(--rj-text-muted);
+}
+.partial sup {
+  margin-left: 1px;
+  color: var(--rj-warning);
+  font-size: 0.75em;
+  font-weight: 800;
+}
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

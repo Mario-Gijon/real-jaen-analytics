@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path d="M12 4h40a8 8 0 0 1 8 8v32c0 10-10 16-28 16S4 54 4 44V12a8 8 0 0 1 8-8Z" fill="#6e32a8" stroke="#d4a72c" stroke-width="4"/>
+  <path d="M10 42h44v3c0 7-8 11-22 11S10 52 10 45Z" fill="#4b2677"/>
+  <text x="32" y="37" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="21" font-weight="900" fill="#fff">RJ</text>
+</svg>

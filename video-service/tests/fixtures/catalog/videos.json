@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "videos": [
+    {
+      "video_id": "sample-full-match",
+      "display_name": "Synthetic full-match calibration",
+      "match_ref": "fixture-match-full",
+      "origin": "youtube",
+      "source_url": "https://youtu.be/a1B2c3D4e5F",
+      "calibration_file": "calibrations/full-match.json",
+      "synchronization_status": "calibrated"
+    },
+    {
+      "video_id": "sample-limited-match",
+      "display_name": "Synthetic limited-coverage calibration",
+      "match_ref": "fixture-match-limited",
+      "origin": "youtube",
+      "source_url": "https://youtu.be/f6G7h8I9j0K",
+      "calibration_file": "calibrations/limited-match.json",
+      "synchronization_status": "calibrated"
+    }
+  ]
+}

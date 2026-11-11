@@ -1,0 +1,3 @@
+.link { color: inherit; text-decoration: none; }
+.link:hover { color: var(--rj-purple-900); text-decoration: underline; }
+.link:focus-visible { color: var(--rj-purple-900); outline: var(--rj-focus-ring); outline-offset: 2px; }

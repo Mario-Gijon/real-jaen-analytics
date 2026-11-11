@@ -1,0 +1,550 @@
+.performance {
+  display: grid;
+  min-width: 0;
+}
+
+/* Three zones: a strong title and a full-width divider, no nested cards. */
+.zone {
+  display: grid;
+  gap: var(--rj-space-4);
+  min-width: 0;
+  padding: var(--rj-space-6) 0;
+}
+.zone:first-child {
+  padding-top: var(--rj-space-2);
+}
+.zone + .zone {
+  border-top: 1px solid var(--rj-border-strong);
+}
+.zone:last-child {
+  padding-bottom: 0;
+}
+.zoneHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rj-space-2) var(--rj-space-4);
+}
+.zoneTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--rj-space-2);
+  color: var(--rj-purple-900);
+  font-size: 0.9375rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.zoneTitle::before {
+  content: "";
+  width: 4px;
+  height: 1.1em;
+  border-radius: 2px;
+  background: var(--rj-gold-600);
+}
+
+/* TEMPORADA ─────────────────────────────────────────────────────────────── */
+.standing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: var(--rj-space-3) var(--rj-space-6);
+}
+.lead,
+.balance,
+.venues {
+  margin: 0;
+}
+.lead {
+  display: flex;
+  gap: var(--rj-space-5);
+}
+.lead > div {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.lead dt {
+  order: 2;
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+}
+.lead dd {
+  order: 1;
+  margin: 0;
+  color: var(--rj-purple-900);
+  font-size: 2rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+}
+.balance {
+  display: grid;
+  /* One column per item: six, or seven with the goal difference. */
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(44px, 1fr);
+  width: min(100%, 400px);
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-sm);
+  background: var(--rj-bg-card);
+  overflow: hidden;
+}
+.balance > div {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 2px;
+  padding: var(--rj-space-2) var(--rj-space-1);
+}
+.balance > div + div {
+  border-left: 1px solid var(--rj-border-default);
+}
+.balance dt {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+}
+.balance abbr,
+.venues abbr {
+  text-decoration: none;
+}
+.balance dd {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.balance [data-kind="V"] dd {
+  color: var(--rj-success);
+}
+.balance [data-kind="D"] dd {
+  color: var(--rj-danger);
+}
+.venues {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  gap: var(--rj-space-3) var(--rj-space-5);
+  font-size: var(--rj-text-sm);
+}
+.venues > div {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+.venues dt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--rj-text-secondary);
+  font-weight: 700;
+}
+.venues dd {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.venues dd span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+.venues dd abbr {
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+}
+.venues [data-result="win"] {
+  background: rgb(24 134 93 / 0.12);
+  color: var(--rj-success);
+}
+.venues [data-result="draw"] {
+  background: rgb(94 97 114 / 0.12);
+  color: var(--rj-text-secondary);
+}
+.venues [data-result="loss"] {
+  background: rgb(200 59 80 / 0.12);
+  color: var(--rj-danger);
+}
+
+/* Results: part of TEMPORADA, so no title of its own. */
+.form {
+  display: grid;
+  gap: var(--rj-space-2);
+}
+/* One line that scrolls sideways when it no longer fits; no visible scrollbar
+   (each chip is focusable, so the keyboard scrolls it into view). The small
+   padding keeps focus rings from being clipped. */
+.chips {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 2px;
+  margin: -3px;
+  padding: 3px;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: none;
+}
+.chips::-webkit-scrollbar {
+  display: none;
+}
+.chips > li {
+  flex: none;
+}
+.chip {
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.chip:hover,
+.chip[aria-pressed="true"] {
+  background: var(--rj-bg-hover);
+}
+.chip[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 1px var(--rj-purple-300);
+}
+.letter {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+}
+.chip[data-result="win"] .letter {
+  background: var(--rj-success);
+}
+.chip[data-result="draw"] .letter {
+  background: #8a8797;
+}
+.chip[data-result="loss"] .letter {
+  background: var(--rj-danger);
+}
+.detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rj-space-2);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.detailRound {
+  font-weight: 800;
+}
+.detail strong {
+  color: var(--rj-text-primary);
+}
+.detailOpponent, .detailMatch { display: inline-flex; align-items: center; gap: var(--rj-space-2); color: inherit; text-decoration: none; }
+.detailOpponentName { color: inherit; text-decoration: none; border-radius: var(--rj-radius-sm); }
+.detailOpponentName:hover { color: var(--rj-purple-900); text-decoration: underline; text-underline-offset: 3px; }
+.detailOpponentName:focus-visible, .detailMatch:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+.detailMatch:hover { filter: brightness(.96); }
+.score {
+  display: inline-block;
+  min-width: 52px;
+  padding: 1px 8px;
+  border-radius: var(--rj-radius-pill);
+  font-size: var(--rj-text-sm);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+.score[data-result="win"] {
+  background: rgb(24 134 93 / 0.12);
+  color: var(--rj-success);
+}
+.score[data-result="draw"] {
+  background: rgb(94 97 114 / 0.12);
+  color: var(--rj-text-secondary);
+}
+.score[data-result="loss"] {
+  background: rgb(200 59 80 / 0.12);
+  color: var(--rj-danger);
+}
+
+/* RENDIMIENTO ───────────────────────────────────────────────────────────── */
+.periods {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--rj-border-strong);
+  border-radius: var(--rj-radius-pill);
+  background: var(--rj-bg-card);
+}
+.periods button {
+  min-height: 32px;
+  padding: 0 var(--rj-space-3);
+  border: 0;
+  border-radius: var(--rj-radius-pill);
+  background: none;
+  color: var(--rj-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.periods button:hover {
+  color: var(--rj-purple-900);
+}
+.periods button[aria-pressed="true"] {
+  background: var(--rj-purple-700);
+  color: #fff;
+}
+
+/* PARTIDOS ──────────────────────────────────────────────────────────────── */
+.scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.table {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: var(--rj-text-sm);
+}
+.table abbr {
+  text-decoration: none;
+}
+.table td {
+  padding: 7px var(--rj-space-3);
+  border-bottom: 1px solid var(--rj-border-default);
+  white-space: nowrap;
+}
+.table tbody tr { cursor: pointer; transition: background-color var(--rj-motion-fast); }
+.table tbody tr:has(a[data-row-primary]:focus-visible):not(:has(.opponent:hover)) { background: var(--rj-bg-hover); }
+/* A match without a detail to open (real matches not enabled) is not interactive. */
+.table tbody tr[data-linked="false"] { cursor: default; }
+.opponent { display: inline-block; max-width: calc(100% - 30px); color: inherit; font-weight: 700; text-decoration: none; vertical-align: middle; cursor: pointer; }
+.opponent:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+.opponent:hover { color: var(--rj-purple-900); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.matchResult { display: inline-flex; border-radius: var(--rj-radius-pill); text-decoration: none; }
+.matchResult:focus-visible { outline: var(--rj-focus-ring); outline-offset: 2px; }
+.matchResult:hover .score { filter: brightness(.96); }
+.table tbody tr[data-in-period] {
+  background: var(--rj-purple-100);
+}
+@media (hover: hover) and (pointer: fine) {
+  .table tbody tr:hover:not([data-linked="false"]):not(:has(.opponent:hover)) {
+    background: var(--rj-bg-hover);
+  }
+}
+.table tbody tr[data-in-period] > td:first-child {
+  box-shadow: inset 3px 0 0 var(--rj-purple-700);
+}
+.num {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.date {
+  color: var(--rj-text-secondary);
+}
+.opponentName { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.end {
+  text-align: right !important;
+}
+.venueShort {
+  display: none;
+  width: 1.4em;
+  color: var(--rj-text-muted);
+  font-size: var(--rj-text-xs);
+  font-weight: 600;
+}
+.rival {
+  width: 100%;
+  max-width: 0;
+}
+.rival > [data-crest] {
+  vertical-align: middle;
+  margin-inline-end: var(--rj-space-2);
+}
+.empty {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
+}
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 1024px) {
+  .standing,
+  .venues {
+    justify-content: center;
+  }
+  .form {
+    justify-items: center;
+  }
+  .chips {
+    width: fit-content;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .detail {
+    justify-self: center;
+    width: min(100%, 720px);
+    justify-content: center;
+    text-align: center;
+  }
+}
+
+@media (max-width: 640px) {
+  .zone {
+    gap: var(--rj-space-3);
+    padding: var(--rj-space-5) 0;
+  }
+  .standing {
+    gap: var(--rj-space-3) var(--rj-space-5);
+  }
+  .lead dd {
+    font-size: 1.75rem;
+  }
+  .balance {
+    order: 3;
+    width: 100%;
+    grid-auto-columns: minmax(0, 1fr);
+  }
+  .balance dd {
+    font-size: 1.125rem;
+  }
+  .venues {
+    order: 4;
+  }
+  .form,
+  .chips {
+    min-width: 0;
+  }
+  .scroll {
+    overflow-x: visible;
+  }
+  .table {
+    display: block;
+    min-width: 0;
+  }
+  .table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .table tbody {
+    display: block;
+  }
+  .table tbody tr {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: var(--rj-space-2);
+    margin-inline: var(--rj-space-1);
+    padding: var(--rj-space-2) var(--rj-space-2);
+    border-bottom: 1px solid var(--rj-border-default);
+    border-radius: var(--rj-radius-sm);
+  }
+  .table tbody tr > td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    white-space: normal;
+  }
+  .num,
+  .date {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+  }
+  .num {
+    justify-self: start;
+  }
+  .date {
+    justify-self: end;
+    font-size: var(--rj-text-xs);
+  }
+  .date::before {
+    content: "/";
+    margin-inline-end: var(--rj-space-1);
+    color: var(--rj-text-muted);
+  }
+  .table tbody tr > .rival {
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--rj-space-2);
+    width: auto;
+    max-width: none;
+    min-width: 0;
+  }
+  .table tbody tr > .venue {
+    display: none;
+  }
+  .venueShort {
+    display: inline-grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--rj-border-default);
+    border-radius: 6px;
+    background: var(--rj-bg-soft);
+    color: var(--rj-text-secondary);
+    font-size: var(--rj-text-xs);
+    font-weight: 700;
+    line-height: 1;
+    cursor: inherit;
+  }
+  .rival > [data-crest] {
+    width: 22px;
+    height: 22px;
+    margin-inline-end: 0;
+  }
+  .end {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+  }
+  .score {
+    min-width: 0;
+    padding-inline: var(--rj-space-1);
+  }
+  .opponent {
+    display: block;
+    justify-self: start;
+    width: fit-content;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .opponentName {
+    white-space: nowrap;
+  }
+  .table th,
+  .table td {
+    padding-inline: 0;
+  }
+  .venue,
+  .year {
+    display: none;
+  }
+  .venueShort {
+    cursor: inherit;
+  }
+}

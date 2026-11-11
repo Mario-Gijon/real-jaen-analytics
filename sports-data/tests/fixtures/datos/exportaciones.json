@@ -1,0 +1,20 @@
+{
+ "format": 2,
+ "imported_at": "2026-10-22T09:00:00+00:00",
+ "followed_team_ids": [
+  2841
+ ],
+ "exports": [
+  {
+   "id": "E1",
+   "file": "muestra-sintetica.jsonl",
+   "sha256": null,
+   "followed_team_id": 2841,
+   "records": 10,
+   "events": 6,
+   "invalid_fetched_at": 0,
+   "fetched_from": "2026-10-21T12:00:00+00:00",
+   "fetched_to": "2026-10-29T12:00:00+00:00"
+  }
+ ]
+}

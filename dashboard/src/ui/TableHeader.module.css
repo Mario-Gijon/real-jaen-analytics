@@ -1,0 +1,20 @@
+/* Shared by data tables; sorting controls keep their keyboard target and indicators. */
+.header > tr > th {
+  padding: 6px var(--rj-space-3);
+  border-bottom: 1px solid var(--rj-border-strong);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 800;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.header button {
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+@media (max-width: 640px) {
+  .header > tr > th {
+    padding-inline: 5px;
+  }
+}
