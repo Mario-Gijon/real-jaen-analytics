@@ -14,7 +14,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m,uid=10001,gid=10001,mode=0700
     command:
-      ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002", "--reload", "--reload-dir", "/app"]
+      ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
     environment:
       SPORTS_DATA_STORAGE: sql
       SPORTS_DATA_DB: /state/real-jaen.sqlite
@@ -33,7 +33,6 @@ services:
       - type: volume
         source: sports-state
         target: /state
-        volume: {nocopy: true}
       - type: bind
         source: ${RJ_DEV_IMPORT_DIR:?Set RJ_DEV_IMPORT_DIR to a separate copy of import files}
         target: /imports
@@ -58,6 +57,7 @@ services:
     build:
       context: ./acquisition
       dockerfile: Dockerfile
+      target: runtime
       network: none
       additional_contexts:
         implementation: ./acquisition/src/acquisition
@@ -87,14 +87,17 @@ services:
       - type: volume
         source: acquisition-profiles
         target: /profiles
-        volume: {nocopy: true}
       - type: volume
         source: acquisition-jobs
         target: /acquisition-jobs
-        volume: {nocopy: true}
       - type: bind
         source: ./acquisition/src/acquisition
         target: /opt/app/acquisition
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./sports-data/acquisition
+        target: /opt/shared-backend/acquisition
         read_only: true
         bind: {create_host_path: false}
       - type: bind
@@ -127,7 +130,6 @@ services:
       - type: volume
         source: acquisition-profiles
         target: /profiles
-        volume: {nocopy: true}
 
   video-service:
     build:
@@ -223,7 +225,7 @@ services:
         bind: {create_host_path: false}
     ports:
       - "127.0.0.1:${RJ_DEV_DASHBOARD_PORT:-3201}:3000"
-    networks: [sports-data-internal, video-internal]
+    networks: [dashboard-edge, sports-data-internal, video-internal]
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/v1/session').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
@@ -239,6 +241,8 @@ services:
         condition: service_healthy
 
 networks:
+  dashboard-edge:
+    name: rja-dev-dashboard-edge
   sports-data-internal:
     name: rja-dev-sports-data-internal
     internal: true

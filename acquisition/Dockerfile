@@ -2,14 +2,14 @@
 ARG PROFILE_RUNTIME=local/rj-browser-runtime:required
 FROM ${PROFILE_RUNTIME} AS runtime
 USER root
-RUN rm -rf /opt/probe && mkdir -p /profiles /acquisition-jobs && chown 10001:10001 /profiles /acquisition-jobs
+RUN rm -rf /opt/probe && mkdir -p /profiles /acquisition-jobs /opt/shared-backend/acquisition && chown 10001:10001 /profiles /acquisition-jobs
 COPY --from=implementation / /opt/app/acquisition/
 COPY --from=backend api.py queries.py importar.py /opt/app/
 COPY --from=backend acquisition/group_plan.py /opt/app/acquisition/group_plan.py
 COPY --from=backend persistencia/bundle.py persistencia/comentarios.py persistencia/bloqueo.py /opt/app/persistencia/
 COPY requirements-acquisition.txt /opt/requirements-acquisition.txt
 WORKDIR /opt/app
-ENV PYTHONPATH=/opt/app:/opt/scraper PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/shared-backend PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN python -m pip check \
     && python -c "from importlib.metadata import version; required = dict(line.strip().split('==', 1) for line in open('/opt/requirements-acquisition.txt') if line.strip() and not line.lstrip().startswith('#')); assert all(version(package) == expected for package, expected in required.items())"
 USER 10001:10001

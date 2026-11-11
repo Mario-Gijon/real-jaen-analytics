@@ -28,7 +28,6 @@ services:
       - type: volume
         source: sports-state
         target: /state
-        volume: {nocopy: true}
       - type: bind
         source: ${RJ_IMPORT_DIR:?Set the external read-only import directory}
         target: /imports
@@ -70,11 +69,9 @@ services:
       - type: volume
         source: acquisition-profiles
         target: /profiles
-        volume: {nocopy: true}
       - type: volume
         source: acquisition-jobs
         target: /acquisition-jobs
-        volume: {nocopy: true}
       - type: bind
         source: ${RJ_PROD_SECRET_DIR:?Set RJ_PROD_SECRET_DIR outside this repository}/acquisition-token
         target: /run/secrets/acquisition-token
@@ -105,7 +102,6 @@ services:
       - type: volume
         source: acquisition-profiles
         target: /profiles
-        volume: {nocopy: true}
 
   video-service:
     image: ${RJ_VIDEO_SERVICE_IMAGE:?Set a versioned Video Service image}
@@ -175,7 +171,7 @@ services:
         bind: {create_host_path: false}
     ports:
       - "${RJ_DASHBOARD_BIND:-0.0.0.0}:${RJ_DASHBOARD_PORT:-3000}:3000"
-    networks: [sports-data-internal, video-internal]
+    networks: [dashboard-edge, sports-data-internal, video-internal]
     depends_on:
       sports-data:
         condition: service_healthy
@@ -185,6 +181,8 @@ services:
         condition: service_healthy
 
 networks:
+  dashboard-edge:
+    name: rja-prod-dashboard-edge
   sports-data-internal:
     name: rja-prod-sports-data-internal
     internal: true
