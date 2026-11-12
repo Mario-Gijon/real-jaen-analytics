@@ -41,6 +41,8 @@ REFERENCIAS_CODIGO_COMPATIBLES = frozenset({
     '71ede1b31b4c6ca56380d1b702da6b69dc5df8df8a48b9ba264ee04166941404',
     # This release bounds that observation window and reconciles the same durable publication ID; sporting rules stay unchanged.
     '41d545996a790ffbf1116ea906ed48dc37b36570640142833dd8513cb65173b7',
+    # The 7aa6f2a release adds the intended group-v3 verifier dispatch; importer, schema and SQLite rules are unchanged.
+    'eb595d471b92c7bfb0b464800c8d5f02f0b1d62233a49a84fdea0132ac19332b',
     # The 4d46649 development image is the deployed source fingerprint. This release changes only Acquisition
     # package planning/validation in bundle.py and acquisition orchestration; importer, schema and SQLite rules
     # are unchanged, so the confirmed coordinator metadata can adopt the new fingerprint without a migration.

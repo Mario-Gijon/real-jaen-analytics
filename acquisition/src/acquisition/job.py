@@ -39,6 +39,13 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def may_continue_group(*, error, descriptor, report, operation_state):
+    """Only a successfully sealed batch with remaining headroom may start another batch."""
+    from acquisition.group_plan import SEND_RESERVE
+    return bool(error is None and descriptor is not None and report['stopped'] is None
+                and not report['budget_exhausted'] and operation_state['remaining'] > SEND_RESERVE)
+
+
 class StrictBreaker:
     """One attempt per route: any result other than ok opens the breaker and stops the whole job."""
     tripped = False
@@ -214,8 +221,10 @@ def run(folder):
                    sends=report['sends'], requests=report['requests'], sandbox=report['sandbox'],
                    sessions=report['sessions'], launches=report['launches'], browser=report['browser'],
                    events=report['events'], connections=connections, operation_budget=operation_state,
-                   continuation_allowed=bool(group and report['stopped'] is None and not report.get('budget_exhausted')
-                                             and operation_state['remaining'] > group_plan.SEND_RESERVE))
+                   budget_exhausted=bool(report['budget_exhausted']),
+                   continuation_allowed=bool(group and may_continue_group(error=error, descriptor=descriptor,
+                                                                          report=report,
+                                                                          operation_state=operation_state)))
     with (folder / 'report.json').open('wb') as f:
         f.write(encode(summary))
         f.flush()

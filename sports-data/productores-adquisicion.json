@@ -36,6 +36,11 @@
       "rules_sha256": "3eda85ac00f500b5376c77149c636aa2b115786826b919f3c4d428a630ca0fb9",
       "productor": "Grupo 2 group-v3 revisado: huella anterior más manejo de tiempos de observación locales inválidos como desconocidos para planificar ventana y rotación",
       "uso": "Recetas piloto y Grupo 2; mismo alcance, excepciones, máximo de 50 envíos físicos e idempotencia"
+    },
+    {
+      "rules_sha256": "e2c2d1f37f50cd5158e92ded5a91dc5aebae60a7fbb260532d8d7e955e56e9ab",
+      "productor": "Grupo 2 group-v3 revisado: el verificador despacha group-v3 al contrato de grupo y el informe solo permite continuar con un paquete sellado",
+      "uso": "Recetas piloto y Grupo 2; misma ventana de tres jornadas, máximo de 50 envíos físicos, hasta tres recuperaciones históricas e idempotencia"
     }
   ]
 }

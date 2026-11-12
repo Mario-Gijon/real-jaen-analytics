@@ -220,7 +220,8 @@ class Jobs:
         value = json.loads(path.read_bytes())
         # Summary only: physical sends, requests, sandbox, page hosts and sampled connections. No bodies or cookies.
         summary = {k: value.get(k) for k in ('provider', 'started_at', 'finished_at', 'error', 'cancelled', 'stopped',
-                                             'limits', 'sends', 'requests', 'sandbox', 'launches', 'connections')}
+                                             'limits', 'sends', 'requests', 'sandbox', 'launches', 'connections',
+                                             'budget_exhausted')}
         summary['browser'] = {k: (value.get('browser') or {}).get(k) for k in ('total', 'by_host', 'api')}
         summary['operation_budget'] = value.get('operation_budget')
         summary['continuation_allowed'] = value.get('continuation_allowed') is True

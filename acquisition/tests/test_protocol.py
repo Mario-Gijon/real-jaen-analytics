@@ -58,6 +58,7 @@ class Runner:
         if self.mode == 'mismatch':
             descriptor['sha256'] = '0' * 64
         (folder / 'report.json').write_text(json.dumps(dict(descriptor=descriptor, sends=[], requests=[],
+                                                             budget_exhausted=False,
                                                              connections=dict(sockets=[]), browser=dict(total=0))))
         return 0
 
@@ -161,7 +162,20 @@ class Protocol(unittest.TestCase):
         report = self.client.informe(state['id'])
         self.assertEqual(set(report), {'provider', 'started_at', 'finished_at', 'error', 'cancelled', 'stopped', 'limits',
                                        'sends', 'requests', 'sandbox', 'launches', 'connections', 'browser',
-                                       'operation_budget', 'continuation_allowed'})
+                                       'operation_budget', 'budget_exhausted', 'continuation_allowed'})
+
+    def test_failed_group_bundle_does_not_advertise_batch_continuation(self):
+        from acquisition.job import may_continue_group
+        self.assertFalse(may_continue_group(error='Rejected: Incompatible contract', descriptor=None,
+                                            report=dict(stopped=None, budget_exhausted=False),
+                                            operation_state=dict(remaining=9)))
+        descriptor = dict(bytes=100, sha256='a' * 64)
+        self.assertTrue(may_continue_group(error=None, descriptor=descriptor,
+                                           report=dict(stopped=None, budget_exhausted=False),
+                                           operation_state=dict(remaining=9)))
+        self.assertFalse(may_continue_group(error=None, descriptor=descriptor,
+                                            report=dict(stopped=None, budget_exhausted=True),
+                                            operation_state=dict(remaining=0)))
 
     def test_duplicate_request_returns_original_and_conflicts(self):
         inventory = baseline()

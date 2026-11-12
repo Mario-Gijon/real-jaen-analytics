@@ -98,11 +98,10 @@ def check_inventory(value):
     return events
 
 def verify(body,descriptor,baseline,*,context,expected_rules,test_transport=False):
-    """Dispatch on the bundle's contract: 'pilot-v2' (the pilot's rules, unchanged) or 'group-v1' (the Group 2
-    recipe with partial coverage). Returns (manifest, files)."""
+    """Dispatch to the validator for the declared pilot or Group 2 bundle contract."""
     try:
         contract=parse(body).get('manifest',{}).get('contract') if len(body)<=MAX_WIRE else None
-        check=_verify_group if contract in ('group-v1','group-v2') else _verify
+        check=_verify_group if contract in ('group-v1','group-v2','group-v3') else _verify
         return check(body,descriptor,baseline,context=context,expected_rules=expected_rules,test_transport=test_transport)
     except Rejected:raise
     except (ValueError,TypeError,KeyError,AttributeError,IndexError,UnicodeError,OverflowError):raise Rejected('Malformed v2 bundle') from None

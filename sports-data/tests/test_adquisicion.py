@@ -92,6 +92,17 @@ class LimitesYRestriccion(unittest.TestCase):
         comprobar_restriccion(dict(contract='pilot-v2'),
                               dict(limits=dict(attempts=60, sends=70), detail_rounds=[9]))
 
+    def test_el_contrato_group_v3_se_envia_al_verificador_de_grupo(self):
+        from persistencia import bundle
+        body = bundle.encode(dict(manifest=dict(contract='group-v3'), files={}))
+        descriptor = dict(bytes=len(body), sha256=bundle.sha(body))
+        expected = (dict(contract='group-v3'), {})
+        with mock.patch.object(bundle, '_verify_group', return_value=expected) as verify_group:
+            result = bundle.verify(body, descriptor, {}, context=('job', 'request'), expected_rules='rules')
+        self.assertIs(result, expected)
+        verify_group.assert_called_once_with(body, descriptor, {}, context=('job', 'request'),
+                                             expected_rules='rules', test_transport=False)
+
     def test_control_lee_las_tres_variables_o_ninguna(self):
         import control
         self.assertIsNone(control.restriccion({}))
