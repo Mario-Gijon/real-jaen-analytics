@@ -55,16 +55,32 @@ export function CoverageSummary({ coverage, requestedAt }: { coverage: UpdateCov
   const commentsPending = [...commentsPendingById.values()];
   const commentsErrors = coverage.comments.failed.filter(({ reason }) =>
     reason !== "not_found" && reason !== "empty" && reason !== "budget");
+  const pendingByBudget = coverage.pending.length > 0 || coverage.deferredMatchIds.length > 0 || commentsPending.length > 0;
+  const pendingWork = new Set<string>();
+  for (const match of coverage.pending) {
+    for (const resource of match.resources) pendingWork.add(`${match.matchId}:${resource.resource}`);
+  }
+  for (const matchId of coverage.deferredMatchIds) pendingWork.add(`${matchId}:review`);
+  for (const comment of commentsPending) pendingWork.add(`${comment.matchId}:comments`);
+  const rounds = coverage.recentRounds ?? [];
   return (
     <div className={css.coverage}>
       {requestedAt ? <p className={css.muted}>Solicitud recibida el {updateTime(requestedAt)}; la cobertura corresponde a esta operación.</p> : null}
+      {coverage.maxTotalSends !== undefined ? (
+        <p className={css.muted}>
+          Ventana rutinaria: {rounds.length ? `jornadas ${rounds.join(", ")}` : "sin jornadas disputadas todavía"}
+          {coverage.referenceRound ? ` (referencia ${coverage.referenceRound})` : ""}. Envíos físicos reservados:
+          {" "}{coverage.operationSendsUsed ?? coverage.physicalSends ?? 0} de {coverage.maxTotalSends}
+          {coverage.operationSendsRemaining !== undefined ? `; quedan ${coverage.operationSendsRemaining}` : ""}.
+        </p>
+      ) : null}
       <ul className={css.counts}>
         <li><strong>{coverage.newResources}</strong> datos nuevos</li>
         <li><strong>{coverage.keptResources}</strong> datos anteriores conservados</li>
-        {coverage.pending.length ? (
-          <li><strong>{coverage.pending.length}</strong> {coverage.pending.length === 1 ? "partido" : "partidos"} con pendientes</li>
+        {pendingByBudget ? (
+          <li><strong>{pendingWork.size}</strong> {pendingWork.size === 1 ? "elemento pendiente/aplazado" : "elementos pendientes/aplazados"}</li>
         ) : (
-          <li>sin pendientes</li>
+          <li>sin recursos pendientes por presupuesto</li>
         )}
       </ul>
       {coverage.pending.length ? (
@@ -103,12 +119,12 @@ export function CoverageSummary({ coverage, requestedAt }: { coverage: UpdateCov
       ) : null}
       {coverage.restrictedMatchIds.length ? (
         <>
-          <h3>Fuera del alcance de esta actualización</h3>
+          <h3>Fuera de la ventana rutinaria</h3>
           <p className={css.muted}>
-            Esta actualización solo consulta los partidos de {coverage.detailRounds?.length === 1 ? "la jornada" : "las jornadas"}{" "}
-            {(coverage.detailRounds ?? []).join(", ")}. En {coverage.restrictedMatchIds.length}{" "}
-            {coverage.restrictedMatchIds.length === 1 ? "partido" : "partidos"} se detectó un cambio o una revisión pendiente:
-            no se han consultado y se siguen sirviendo sus datos anteriores.
+            {coverage.recentRoundCount ? `La rutina se limita a las ${coverage.recentRoundCount} últimas jornadas disputadas` : "La rutina se limita a la ventana configurada"}.
+            {" "}{coverage.restrictedMatchIds.length}{" "}
+            {coverage.restrictedMatchIds.length === 1 ? "partido queda" : "partidos quedan"}{" "}
+            fuera de esa ventana o de la recuperación histórica selectiva; no se consultaron y se siguen sirviendo sus datos anteriores.
           </p>
           <ul className={css.pending}>
             {coverage.restrictedMatchIds.map((matchId) => (

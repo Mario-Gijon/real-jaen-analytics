@@ -39,7 +39,7 @@ type BackendJob = {
   finished_at: string | null;
   poll_after_seconds: number;
   error: { code: UpdateErrorCode; message: string; retryable: boolean } | null;
-  result: { published_at: string; reused_bundle: boolean; coverage?: BackendCoverage | null } | null;
+  result: { published_at: string; reused_bundle: boolean; changed?: boolean; coverage?: BackendCoverage | null } | null;
 };
 type BackendCoverage = {
   new: number;
@@ -48,6 +48,13 @@ type BackendCoverage = {
   deferred: number[];
   restricted?: number[];
   detail_rounds?: number[] | null;
+  reference_round?: number | null;
+  recent_rounds?: number[];
+  recent_round_count?: number;
+  max_total_sends?: number;
+  operation_sends_used?: number;
+  operation_sends_remaining?: number;
+  physical_sends?: number;
   new_matches: { id: number; replaces: number[] }[];
   names?: Record<string, string>;
   comments?: {
@@ -60,7 +67,9 @@ type BackendCoverage = {
 };
 type BackendStatus = {
   available: boolean;
-  scope: { kind: "pilot" | "group"; label: string; description: string; action: string; round: number | null; match_ids: number[] };
+  scope: { kind: "pilot" | "group"; label: string; description: string; action: string; round: number | null;
+    match_ids: number[]; reference_round?: number | null; recent_rounds?: number[]; recent_round_count?: number;
+    max_total_sends?: number };
   active_job: BackendJob | null;
   last_job: BackendJob | null;
   last_published: { at: string; coverage?: BackendCoverage | null } | null;
@@ -76,6 +85,7 @@ function job(value: BackendJob): UpdateJob {
   const result = value.result && {
     publishedAt: value.result.published_at,
     reusedBundle: value.result.reused_bundle,
+    ...(typeof value.result.changed === "boolean" ? { changed: value.result.changed } : {}),
     coverage: value.result.coverage ? coverage(value.result.coverage) : null,
   };
   if (result) forgetCachesAfter(result.publishedAt);
@@ -105,6 +115,8 @@ function forgetCachesAfter(publishedAt: string) {
 
 function coverage(value: BackendCoverage): UpdateCoverage {
   const emptyComments = new Set(value.comments?.empty ?? []);
+  const hasRollingPolicy = value.max_total_sends !== undefined || value.recent_round_count !== undefined
+    || value.reference_round !== undefined || value.recent_rounds !== undefined;
   return {
     newResources: value.new,
     keptResources: value.kept,
@@ -115,6 +127,15 @@ function coverage(value: BackendCoverage): UpdateCoverage {
     deferredMatchIds: value.deferred.map(publicMatchId),
     restrictedMatchIds: (value.restricted ?? []).map(publicMatchId),
     detailRounds: value.detail_rounds ?? null,
+    ...(hasRollingPolicy ? {
+      referenceRound: value.reference_round ?? null,
+      recentRounds: value.recent_rounds ?? [],
+      recentRoundCount: value.recent_round_count,
+      maxTotalSends: value.max_total_sends,
+      operationSendsUsed: value.operation_sends_used,
+      operationSendsRemaining: value.operation_sends_remaining,
+      physicalSends: value.physical_sends,
+    } : {}),
     newMatches: value.new_matches.map((m) => ({ matchId: publicMatchId(m.id), replaces: m.replaces.map(publicMatchId) })),
     matchNames: Object.fromEntries(Object.entries(value.names ?? {}).map(([id, name]) => [publicMatchId(Number(id)), name])),
     comments: {
@@ -131,6 +152,8 @@ function coverage(value: BackendCoverage): UpdateCoverage {
 
 function scope(value: BackendStatus["scope"]): UpdateScope {
   if (value.kind !== "pilot" && value.kind !== "group") throw new ControlUnavailableError("Alcance desconocido");
+  const hasRollingPolicy = value.max_total_sends !== undefined || value.recent_round_count !== undefined
+    || value.reference_round !== undefined || value.recent_rounds !== undefined;
   return {
     kind: value.kind,
     label: value.label,
@@ -138,6 +161,12 @@ function scope(value: BackendStatus["scope"]): UpdateScope {
     actionLabel: value.action,
     round: value.round,
     matchIds: value.match_ids.map(publicMatchId),
+    ...(hasRollingPolicy ? {
+      referenceRound: value.reference_round ?? null,
+      recentRounds: value.recent_rounds ?? [],
+      recentRoundCount: value.recent_round_count,
+      maxTotalSends: value.max_total_sends,
+    } : {}),
   };
 }
 

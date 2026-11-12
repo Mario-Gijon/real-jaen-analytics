@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from .profile import ProfileError, atomic_json, sync_dir
+from .operation_budget import OperationBudget
 
 PREFIX = '/internal/v1/acquisitions'
 RECIPES = {'sofascore-pilot-16599363-v1', 'sofascore-group2-2627-v1'}
@@ -101,8 +102,13 @@ class Jobs:
         with closing(self.db()) as c, c:
             c.execute('UPDATE job SET state=?,data=? WHERE id=?', (item['state'], json.dumps(item), item['id']))
 
-    def submit(self, request, recipe, inventory):
+    def submit(self, request, recipe, inventory, operation_id):
         from persistencia.bundle import check_inventory, encode
+        try:
+            if str(uuid.UUID(operation_id)) != operation_id:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise Conflict() from None
         check_inventory(inventory)
         digest = inventory['sha256']
         with self.guard, closing(self.db()) as c, c:
@@ -110,11 +116,28 @@ class Jobs:
             row = c.execute('SELECT data FROM job WHERE request=?', (request,)).fetchone()
             if row:
                 item = json.loads(row[0])
-                if (item['recipe_id'], item['inventory_sha256']) != (recipe, digest): raise Conflict()
+                if ((item['recipe_id'], item['inventory_sha256']) != (recipe, digest)
+                        or item.get('operation_id', item['request_id']) != operation_id):
+                    raise Conflict()
                 return item, False
+            if recipe == 'sofascore-group2-2627-v1':
+                # Establish the durable manual-operation ledger before any worker can send. If this operation has
+                # prior batches, a missing ledger is ambiguous and must fail closed instead of starting at zero.
+                from acquisition.operation_budget import OperationBudget, OperationBudgetError
+                prior = [json.loads(raw) for (raw,) in c.execute('SELECT data FROM job').fetchall()]
+                had_batches = any(item.get('operation_id') == operation_id for item in prior)
+                maximum = self.extra.get('max_total_sends', 50)
+                ledger = self.root / 'operations' / (operation_id + '.json')
+                if had_batches and (not ledger.is_file() or ledger.is_symlink()):
+                    raise Conflict()
+                try:
+                    OperationBudget(self.root / 'operations', operation_id, maximum).snapshot()
+                except OperationBudgetError:
+                    raise Conflict() from None
             if self.blocked or c.execute("SELECT 1 FROM job WHERE state IN ('queued','running','cancelling')").fetchone():
                 raise Conflict()
-            item = dict(id=str(uuid.uuid4()), request_id=request, recipe_id=recipe, inventory_sha256=digest,
+            item = dict(id=str(uuid.uuid4()), request_id=request, recipe_id=recipe, operation_id=operation_id,
+                        inventory_sha256=digest,
                         generation_id=inventory['generation_id'], provider=self.provider, state='queued', phase='queued',
                         progress=0, error=None, started_at=now())
             folder = self.root / 'work' / item['id']
@@ -151,7 +174,8 @@ class Jobs:
         folder = self.root / 'work' / ident
         try:
             item = self.update(ident, state='running', phase='collecting', progress=1)
-            spec = dict(job_id=ident, request_id=item['request_id'], recipe_id=item['recipe_id'], provider=self.provider,
+            spec = dict(job_id=ident, request_id=item['request_id'], operation_id=item['operation_id'],
+                        recipe_id=item['recipe_id'], provider=self.provider,
                         inventory_sha256=item['inventory_sha256'], started_at=item['started_at'],
                         transport_root=str(self.root / 'transport'), **self.extra)
             session = self.owner.session() if self.owner is not None else nullcontext(None)
@@ -190,7 +214,7 @@ class Jobs:
                 self.save(item)
 
     def report(self, ident):
-        self.get(ident)
+        item = self.get(ident)
         path = self.root / 'work' / ident / 'report.json'
         if not path.exists(): raise Conflict()
         value = json.loads(path.read_bytes())
@@ -198,6 +222,8 @@ class Jobs:
         summary = {k: value.get(k) for k in ('provider', 'started_at', 'finished_at', 'error', 'cancelled', 'stopped',
                                              'limits', 'sends', 'requests', 'sandbox', 'launches', 'connections')}
         summary['browser'] = {k: (value.get('browser') or {}).get(k) for k in ('total', 'by_host', 'api')}
+        summary['operation_budget'] = value.get('operation_budget')
+        summary['continuation_allowed'] = value.get('continuation_allowed') is True
         return summary
 
     def bundle(self, ident):
@@ -215,10 +241,7 @@ class Jobs:
 
 
 def reductions(environ):
-    """Limits of this installation for the group recipe, which can only lower the production maxima:
-    ACQ_MAX_ATTEMPTS (logical attempts of the transport), ACQ_MAX_SENDS (physical sends of the adapter) and
-    ACQ_DETAIL_ROUNDS (comma-separated rounds whose matches may be consulted; listings are not restricted). Anything
-    else refuses to start."""
+    """Installation ceilings for one batch and one manual operation. Static detail-round overrides are rejected."""
     from acquisition import group_plan
     out = {}
     for name, key, ceiling in (('ACQ_MAX_ATTEMPTS', 'max_attempts', group_plan.MAX_ATTEMPTS),
@@ -230,12 +253,16 @@ def reductions(environ):
             out[key] = int(raw)
     if out.get('max_attempts', 0) > out.get('max_sends', group_plan.MAX_SENDS):
         raise SystemExit('ACQ_MAX_ATTEMPTS cannot exceed the physical sends')
-    raw = environ.get('ACQ_DETAIL_ROUNDS')
-    if raw:
-        parts = raw.split(',')
-        if not all(p.strip().isdigit() and 1 <= int(p) <= 38 for p in parts):
-            raise SystemExit('ACQ_DETAIL_ROUNDS must list rounds from 1 to 38')
-        out['detail_rounds'] = sorted({int(p) for p in parts})
+    if environ.get('ACQ_DETAIL_ROUNDS'):
+        raise SystemExit('ACQ_DETAIL_ROUNDS is obsolete; the group uses its rolling round window')
+    recent = environ.get('ACQ_UPDATE_RECENT_ROUNDS', str(group_plan.DEFAULT_RECENT_ROUNDS))
+    if not recent.isdigit() or not 1 <= int(recent) <= group_plan.MAX_RECENT_ROUNDS:
+        raise SystemExit(f'ACQ_UPDATE_RECENT_ROUNDS must be from 1 to {group_plan.MAX_RECENT_ROUNDS}')
+    total = environ.get('ACQ_UPDATE_MAX_TOTAL_SENDS', '50')
+    if not total.isdigit() or not 1 <= int(total) <= 50:
+        raise SystemExit('ACQ_UPDATE_MAX_TOTAL_SENDS must be from 1 to 50')
+    out['recent_round_count'] = int(recent)
+    out['max_total_sends'] = int(total)
     return out
 
 

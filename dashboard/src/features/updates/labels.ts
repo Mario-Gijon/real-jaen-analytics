@@ -43,6 +43,7 @@ export const REASON_LABELS: Record<UpdatePendingReason, string> = {
 /** A completed update that published while some resources stayed pending. */
 export const hasPending = (job: UpdateJob) => job.status === "completed" && (
   (job.result?.coverage?.pending.length ?? 0) > 0 ||
+  (job.result?.coverage?.deferredMatchIds.length ?? 0) > 0 ||
   (job.result?.coverage?.comments.pendingMatchIds.length ?? 0) > 0 ||
   (job.result?.coverage?.comments.emptyMatchIds.length ?? 0) > 0 ||
   (job.result?.coverage?.comments.failed.length ?? 0) > 0
@@ -56,6 +57,11 @@ export function jobLine(job: UpdateJob): string {
   }
   if (job.status === "completed" && job.result) {
     if (hasPending(job)) return `Actualización completada con pendientes (${updateTime(job.result.publishedAt)})`;
+    if (job.result.changed === false) {
+      return job.result.reusedBundle
+        ? `Sin cambios; se reutilizó la última publicación verificada (${updateTime(job.result.publishedAt)})`
+        : `Revisión completada sin cambios (${updateTime(job.result.publishedAt)})`;
+    }
     return `Publicado el ${updateTime(job.result.publishedAt)}${job.result.reusedBundle ? ", sin volver a consultar" : ""}`;
   }
   if (job.status === "cancelled") {

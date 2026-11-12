@@ -21,10 +21,12 @@ from persistencia.bundle import (MAX_COMMENTS_FILE, MAX_LINE, PATHS, PILOT, SECT
 REVISION='611e436a1528b0f487aa56a045f023e8ae8ae098'
 
 def producer_rules():
-    names=('recipe.py','group_plan.py','transport.py','sdk_adapter.py','job.py',
+    names=('recipe.py','group_plan.py','transport.py','sdk_adapter.py','operation_budget.py','service.py','app.py','job.py',
            '../persistencia/bundle.py','../persistencia/comentarios.py')
     sources={n:sha((Path(__file__).parent/n).resolve().read_bytes()) for n in names}
-    return fingerprint(dict(sources=sources,scraper=REVISION,policy=dict(window_s=259200,interval_s=21600)))
+    return fingerprint(dict(sources=sources,scraper=REVISION,
+                            policy=dict(window_s=259200,interval_s=21600,recent_rounds_max=3,
+                                        max_total_sends=50,max_historical_recoveries=3)))
 
 def seed_cache(store,baseline):
     """Explicit initialization from backend-selected evidence, not an empty-profile fallback."""
@@ -375,17 +377,28 @@ async def _collect_group_comments(store,transport,scope,baseline,output,*,listin
     return summary,evidence
 
 def collect_group(store,transport,scope,baseline,output,*,now,cancelled=lambda:False,budget=None,listed_at=None,
-                  limits=None,detail_rounds=None):
+                  limits=None,detail_rounds=None,recent_round_count=3,max_total_sends=50,operation_id=None,
+                  operation_budget=None):
     """One manual update of the group. A refusal or the breaker stops it without a bundle; an exhausted budget or an
     unanswered resource leaves that resource pending and the rest is sealed. limits: dict(attempts, sends) of this
-    job (the production maxima unless the installation lowers them); detail_rounds: the only rounds whose matches may
-    be consulted (None: any). Both are declared in the manifest and checked by the verifier."""
+    job (the production maxima unless the installation lowers them). The rolling window is derived after listing;
+    detail_rounds is retained only to reject stale static configuration."""
     from sofascore_scraper.services.pipeline import FetchPipeline
     from sofascore_scraper.services.planning import WorkItem
     from sofascore_scraper.store import Ref
     from persistencia.bundle import verify as verify_bundle
-    from .group_plan import MAX_ATTEMPTS, MAX_SENDS, PLANNED_ATTEMPTS, SEND_RESERVE, plan_matches, rounds_to_list
+    from .group_plan import (DEFAULT_RECENT_ROUNDS, MAX_ATTEMPTS, MAX_SENDS, MAX_HISTORICAL_RECOVERIES,
+                             PLANNED_ATTEMPTS, SEND_RESERVE, plan_matches, reference_round, recent_rounds as window,
+                             rounds_to_list)
     check_inventory(baseline)
+    if detail_rounds is not None:
+        raise ValueError('Static detail rounds are obsolete for the Group 2 policy')
+    if operation_id is None:
+        operation_id=transport.context['request_id']
+    if type(recent_round_count) is not int:
+        recent_round_count=DEFAULT_RECENT_ROUNDS
+    if type(max_total_sends) is not int or not 1<=max_total_sends<=50:
+        raise ValueError('Invalid operation send ceiling')
     limits=dict(limits or dict(attempts=MAX_ATTEMPTS,sends=MAX_SENDS))
     output=Path(output)
     context=(transport.context['job_id'],transport.context['request_id']);test=transport.mode=='loopback-fixture'
@@ -415,8 +428,10 @@ def collect_group(store,transport,scope,baseline,output,*,now,cancelled=lambda:F
             remaining_attempts=max(0,attempt_limit-len(transport.state['attempts']))
             remaining_sends=max(0,transport.remaining_sends()-SEND_RESERVE)
             essential_budget=min(remaining_attempts,remaining_sends)
+            reference=reference_round(baseline,listed)
+            recent=window(reference,recent_round_count)
             essential,deferred=plan_matches(
-                baseline,listed,now,budget=essential_budget,detail_rounds=detail_rounds,
+                baseline,listed,now,budget=essential_budget,recent_rounds=recent,
                 reasons=('pending','finished','changed'))
             for p in essential:scope.admit(p['id'],p['keys'])
             items=[WorkItem(Ref.event(p['id']),'refill',tuple((k,'') for k in p['keys']),'football',p['reason']) for p in essential]
@@ -424,39 +439,58 @@ def collect_group(store,transport,scope,baseline,output,*,now,cancelled=lambda:F
             if cancelled():raise InterruptedError('cancelled')
             if refused(transport):raise Stopped('Refusal/breaker while consulting: nothing is published')
 
-            comments_summary,comments_evidence=await _collect_group_comments(
-                store,transport,scope,baseline,output,listing=listing,planned=essential,
-                attempt_limit=attempt_limit,detail_rounds=detail_rounds)
-            if cancelled():raise InterruptedError('cancelled')
-
-            # Routine refreshes are deliberately last: comments for new finals and the historical backlog use the
-            # shared remaining budget first. If a comments refusal stopped the adapter, preserve the valid sporting
-            # work already completed and defer every routine refresh without making another request.
-            refresh_candidates,refresh_capped=plan_matches(
-                baseline,listed,now,budget=PLANNED_ATTEMPTS,detail_rounds=detail_rounds,reasons=('refresh',))
-            deferred.update(refresh_capped)
-            refresh=[]
+            # Routine refreshes inside the rolling window precede comments, as declared by the manual policy.
             logical_left=max(0,attempt_limit-len(transport.state['attempts']))
             sends_left=max(0,transport.remaining_sends()-SEND_RESERVE)
-            if transport.comments_stop_after_sport:
-                deferred.update({p['id']:'budget' for p in refresh_candidates})
-            else:
-                for candidate in refresh_candidates:
-                    if candidate['cost']>logical_left or candidate['cost']>sends_left:
-                        deferred[candidate['id']]='budget'
-                        continue
-                    logical_left-=candidate['cost'];sends_left-=candidate['cost']
-                    refresh.append(candidate)
-                for p in refresh:scope.admit(p['id'],p['keys'])
-                refresh_items=[WorkItem(Ref.event(p['id']),'refill',tuple((k,'') for k in p['keys']),'football',p['reason'])
-                               for p in refresh]
-                if refresh_items:await pipeline.run(refresh_items,cancelled=cancelled)
-                if cancelled():raise InterruptedError('cancelled')
-                if refused(transport):raise Stopped('Refusal/breaker while refreshing: nothing is published')
+            refresh,refresh_deferred=plan_matches(baseline,listed,now,budget=min(logical_left,sends_left),
+                                                  recent_rounds=recent,reasons=('refresh',))
+            deferred.update(refresh_deferred)
+            for p in refresh:scope.admit(p['id'],p['keys'])
+            refresh_items=[WorkItem(Ref.event(p['id']),'refill',tuple((k,'') for k in p['keys']),'football',p['reason'])
+                           for p in refresh]
+            if refresh_items:await pipeline.run(refresh_items,cancelled=cancelled)
+            if cancelled():raise InterruptedError('cancelled')
+            if refused(transport):raise Stopped('Refusal/breaker while refreshing: nothing is published')
 
-            planned=essential+refresh
+            comments_summary,comments_evidence=await _collect_group_comments(
+                store,transport,scope,baseline,output,listing=listing,planned=essential+refresh,
+                attempt_limit=attempt_limit,detail_rounds=None)
+            if cancelled():raise InterruptedError('cancelled')
+
+            # Historical gaps are recoverable, but at most three unique old matches per manual operation. The
+            # durable operation ledger keeps those slots across continuation batches and service restarts.
+            history_state=operation_budget.snapshot() if operation_budget is not None else {'history_matches':[]}
+            history_ids=set(history_state['history_matches'])
+            history_left=max(0,MAX_HISTORICAL_RECOVERIES-len(history_ids))
+            logical_left=max(0,attempt_limit-len(transport.state['attempts']))
+            sends_left=max(0,transport.remaining_sends()-SEND_RESERVE)
+            history,history_deferred=plan_matches(
+                baseline,listed,now,budget=min(logical_left,sends_left),recent_rounds=recent,
+                history_limit=history_left,history_ids=history_ids,reasons=('history',))
+            deferred.update(history_deferred)
+            if operation_budget is not None:
+                accepted=[]
+                for candidate in history:
+                    if operation_budget.reserve_history(candidate['id'],MAX_HISTORICAL_RECOVERIES):
+                        accepted.append(candidate)
+                    else:
+                        deferred[candidate['id']]='restricted'
+                history=accepted
+            for p in history:scope.admit(p['id'],p['keys'])
+            history_items=[WorkItem(Ref.event(p['id']),'refill',tuple((k,'') for k in p['keys']),'football',p['reason'])
+                           for p in history]
+            if history_items and not transport.comments_stop_after_sport:
+                await pipeline.run(history_items,cancelled=cancelled)
+            elif history_items:
+                deferred.update({p['id']:'budget' for p in history})
+            if cancelled():raise InterruptedError('cancelled')
+            if refused(transport):raise Stopped('Refusal/breaker while recovering history: nothing is published')
+
+            planned=essential+refresh+history
             state.update(listing=listing,planned=planned,deferred=deferred,near=near,far=far,limits=limits,
-                         detail_rounds=detail_rounds,comments_summary=comments_summary,
+                         detail_rounds=None,recent_round_count=recent_round_count,reference_round=reference,
+                         recent_rounds=recent,max_total_sends=max_total_sends,operation_id=operation_id,
+                         operation_budget=operation_budget,comments_summary=comments_summary,
                          comments_evidence=comments_evidence)
         import asyncio
         try:
@@ -475,6 +509,7 @@ def collect_group(store,transport,scope,baseline,output,*,now,cancelled=lambda:F
         return descriptor
 
 def assemble_group(store,baseline,transport,workspace,*,now,listing,planned,deferred,near,far,limits,detail_rounds,
+                   recent_round_count,reference_round,recent_rounds,max_total_sends,operation_id,operation_budget,
                    comments_summary,comments_evidence):
     """The bundle of a group job. Per resource: new data (a successful attempt with data), the previous original kept
     (not consulted, or consulted without data), pending (no data, with its reason) or not applicable (match not
@@ -574,12 +609,25 @@ def assemble_group(store,baseline,transport,workspace,*,now,listing,planned,defe
         pair=(d['event_id'],d['resource'])
         evidence=dict(file='calendar.jsonl',line=lines[d['event_id']]) if d['resource']=='calendar' else refs.get(pair)
         coverage.append(dict(d,evidence=evidence))
+    adapter=getattr(transport,'adapter',None)
+    physical_sends=(sum(1 for row in adapter.sends if row.get('sent')) if adapter is not None
+                    else len(transport.state['attempts']))
+    if operation_budget is not None:
+        operation_state=operation_budget.snapshot()
+        operation_used=operation_state['used']
+        if operation_state['operation_id']!=operation_id or operation_state['maximum']!=max_total_sends:
+            raise Stopped('Operation budget identity changed')
+    else:
+        operation_used=physical_sends
     plan=dict(now=iso(now),rounds=dict(near=near,far=far,failed=sorted(listing.failed)),
               planned=[dict(id=p['id'],reason=p['reason'],keys=list(p['keys'])) for p in planned],
               deferred={str(k):v for k,v in sorted(deferred.items())},
               new_matches=new_matches(baseline,{i:row for i,(row,_) in listed.items()}),
-              limits=dict(limits),detail_rounds=detail_rounds,comments=comments_summary)
-    m=dict(schema=2,contract='group-v2',**{k:transport.context[k] for k in ('job_id','request_id','inventory_sha256')},
+              limits=dict(limits),detail_rounds=None,comments=comments_summary,
+              recent_round_count=recent_round_count,reference_round=reference_round,recent_rounds=recent_rounds,
+              max_total_sends=max_total_sends,operation_sends_used=operation_used,
+              physical_sends=physical_sends,operation_id=operation_id)
+    m=dict(schema=2,contract='group-v3',**{k:transport.context[k] for k in ('job_id','request_id','inventory_sha256')},
            recipe_id='sofascore-group2-2627-v1',provider_revision=REVISION,transport=transport.mode,
            generation_id=baseline['generation_id'],rules_sha256=producer_rules(),policy=dict(window_s=259200,interval_s=21600),
            started_at=transport.state['started_at'],finished_at=iso(transport.clock()),

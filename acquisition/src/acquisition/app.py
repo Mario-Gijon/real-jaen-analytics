@@ -89,12 +89,14 @@ def create_app(*, jobs=None, token=None):
                 from persistencia.bundle import parse
                 length = int(request.headers.get('content-length', '0'))
                 data = parse(await _body(request, length))
-                if (not isinstance(data, dict) or set(data) != {'request_id', 'recipe_id', 'inventory'}
-                        or not all(isinstance(data[k], str) for k in ('request_id', 'recipe_id'))
+                if (not isinstance(data, dict) or set(data) != {'request_id', 'operation_id', 'recipe_id', 'inventory'}
+                        or not all(isinstance(data[k], str) for k in ('request_id', 'operation_id', 'recipe_id'))
                         or not isinstance(data['inventory'], dict) or data['recipe_id'] not in RECIPES
-                        or str(uuid.UUID(data['request_id'])) != data['request_id']):
+                        or str(uuid.UUID(data['request_id'])) != data['request_id']
+                        or str(uuid.UUID(data['operation_id'])) != data['operation_id']):
                     raise ValueError()
-                item, new = request.app.state.jobs.submit(data['request_id'], data['recipe_id'], data['inventory'])
+                item, new = request.app.state.jobs.submit(data['request_id'], data['recipe_id'], data['inventory'],
+                                                          data['operation_id'])
                 return _response(202 if new else 200, item)
 
             match = re.fullmatch(PREFIX + r'/([0-9a-f-]{36})(/cancel|/bundle|/report)?', target)

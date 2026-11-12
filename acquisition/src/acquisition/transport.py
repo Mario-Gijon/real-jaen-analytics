@@ -169,8 +169,16 @@ class Transport:
                     elif status==404:reason='404'
                     elif status>=500:reason='5xx'
                     else:reason='redirect' if 300<=status<400 else 'http'
-                except (OSError,urllib.error.URLError):reason='network'
-                except ValueError:reason='parse'
+                except ValueError:
+                    reason='parse'
+                except Exception as error:
+                    from .sdk_adapter import BudgetExhausted
+                    if isinstance(error, BudgetExhausted):
+                        reason='budget'
+                    elif isinstance(error, (OSError,urllib.error.URLError)):
+                        reason='network'
+                    else:
+                        raise
                 now=self.clock();a.update(finished_at=iso(now),status=status,
                                          payload_sha256=fingerprint(payload.get('event',payload) if isinstance(payload,dict) else payload) if payload is not None else None)
                 from sofascore_scraper.services.pipeline import body_state
@@ -181,6 +189,13 @@ class Transport:
                     atomic_json(self.path,self.state);atomic_json(self.retry_path,self.retry)
                     answer=Outcome('ok',data=payload,http_status=status,fetched_at=datetime.fromisoformat(a['finished_at']),via='curl')
                     self.memo[path]=answer;return answer
+                if reason=='budget':
+                    self.retry[path]=dict(reason='budget',next_at=self.clock(),admin=False)
+                    atomic_json(self.path,self.state);atomic_json(self.retry_path,self.retry)
+                    answer=Outcome('failed',reason='budget',http_status=None,
+                                   fetched_at=datetime.fromisoformat(a['finished_at']))
+                    self.memo[path]=answer
+                    return answer
                 self.breaker.record(reason if reason in ('403','429','5xx','network','parse') else 'other')
                 previous=self.retry.get(path,{}).get('failures',0)+1
                 base=900 if reason in ('429','parse','empty','404','redirect','http') else min(900,30*2**min(previous-1,5))

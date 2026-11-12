@@ -194,6 +194,23 @@ describe("update routes", () => {
       matchNames: { "sofascore-match-16599967": "Real Jaén – CE Europa" } });
   });
 
+  it("maps the group-v3 rolling window and operation-wide budget without changing legacy coverage", async () => {
+    const cookie = await session();
+    const done = backendJob({ status: "completed", phase: "finished", cancellable: false, published: true,
+      result: { published_at: "2026-11-12T16:00:00+00:00", reused_bundle: false,
+        changed: false,
+        coverage: { new: 2, kept: 9, pending: [], deferred: [16599970], restricted: [], detail_rounds: null,
+          reference_round: 11, recent_rounds: [9, 10, 11], recent_round_count: 3, max_total_sends: 50,
+          operation_sends_used: 17, operation_sends_remaining: 33, physical_sends: 8,
+          new_matches: [], comments: { new: [], kept: [], pending: [], failed: [] } } } });
+    backend(() => json(done));
+    const params = { params: Promise.resolve({ updateId: JOB_ID }) };
+    const body = (await (await job(request(`/api/v1/updates/${JOB_ID}`, { cookie }), params)).json()) as UpdateJob;
+    expect(body.result?.changed).toBe(false);
+    expect(body.result?.coverage).toMatchObject({ referenceRound: 11, recentRounds: [9, 10, 11], recentRoundCount: 3,
+      maxTotalSends: 50, operationSendsUsed: 17, operationSendsRemaining: 33, physicalSends: 8 });
+  });
+
   it("show the last publication's coverage after a later update failed, only with a session", async () => {
     const failed = backendJob({ status: "failed", phase: "finished", cancellable: false, finished_at: "2026-10-28T19:00:00+00:00",
       error: { code: "ACQUISITION_FAILED", message: "rechazada", retryable: false } });

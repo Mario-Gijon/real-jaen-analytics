@@ -14,6 +14,11 @@ export type UpdateScope = {
   /** Pilot only: its round and match. */
   round: number | null;
   matchIds: string[];
+  /** Group policy values; absent for the fixed pilot. */
+  referenceRound?: number | null;
+  recentRounds?: number[];
+  recentRoundCount?: number;
+  maxTotalSends?: number;
 };
 
 /** Why a resource stayed pending: never absence, never zero. */
@@ -39,6 +44,16 @@ export type UpdateCoverage = {
   restrictedMatchIds: string[];
   /** The only rounds whose matches this update could consult; `null` without a restriction. */
   detailRounds: number[] | null;
+  /** Dynamic routine window declared by group-v3 bundles. */
+  referenceRound?: number | null;
+  recentRounds?: number[];
+  recentRoundCount?: number;
+  maxTotalSends?: number;
+  /** Persistently reserved physical sends across every batch of this manual operation. */
+  operationSendsUsed?: number;
+  operationSendsRemaining?: number;
+  /** Physical sends reserved by this batch, including browser challenge pages. */
+  physicalSends?: number;
   /** Matches new to the competition; `replaces`: unfinished matches with the same pairing, for a manual decision. */
   newMatches: { matchId: string; replaces: string[] }[];
   /** "Home – Away" of the matches above, from the data just published. */
@@ -86,7 +101,7 @@ export type UpdateJob = {
   pollAfterSeconds: number;
   error: { code: UpdateErrorCode; message: string; retryable: boolean } | null;
   /** `reusedBundle`: the completed update only republished verified data without consulting again. */
-  result: { publishedAt: string; reusedBundle: boolean; coverage: UpdateCoverage | null } | null;
+  result: { publishedAt: string; reusedBundle: boolean; changed?: boolean; coverage: UpdateCoverage | null } | null;
 };
 
 /** `GET /api/v1/updates/current` (any session: the same session that consults the data can update them). */

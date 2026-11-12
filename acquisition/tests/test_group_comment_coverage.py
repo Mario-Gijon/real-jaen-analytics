@@ -148,6 +148,16 @@ class GroupCommentCoverageTests(unittest.TestCase):
         with self.assertRaisesRegex(Rejected, 'Comments listing identity mismatch'):
             self.verify()
 
+    def test_three_old_pending_comments_remain_eligible_under_dynamic_window(self):
+        ids=(201,202,203)
+        baseline=dict(comments_enabled=True,events=[dict(id=i,current=True,replaced_by=None,home=10,away=20,
+                      status='finished',tournament_id=94191,season_id=97382) for i in ids],records=[],comments=[])
+        expected={i:dict(id=i,current=True,home=10,away=20,status='finished') for i in ids}
+        calendar={i:({'id':i,'status':{'type':'finished'}},{'status':'finished','round':4}) for i in ids}
+        result=_verify_group_comments(dict(new=[],kept=[],pending=list(ids),failed=[]),[],baseline,expected,set(ids),
+                                      calendar,[],{},[],[1],{}, {},dynamic_policy=True)
+        self.assertIsNone(result)
+
 
 if __name__ == '__main__':
     unittest.main()

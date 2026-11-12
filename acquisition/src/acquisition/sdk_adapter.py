@@ -52,6 +52,10 @@ class AdapterStopped(RuntimeError):
     pass
 
 
+class BudgetExhausted(OSError):
+    """The durable operation allowance refused a request before it left the container."""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -79,7 +83,8 @@ def loopback(host):
 
 
 class SdkAdapter:
-    def __init__(self, profile, paths, *, api=API, site=SITE, max_sends=None, require_sandbox=False, local_test=False):
+    def __init__(self, profile, paths, *, api=API, site=SITE, max_sends=None, operation_budget=None, job_id=None,
+                 require_sandbox=False, local_test=False):
         api, site = api.rstrip('/'), site.rstrip('/')
         if local_test:
             if not all(urlsplit(u).scheme in ('http', 'https') and loopback(urlsplit(u).hostname) for u in (api, site)):
@@ -98,10 +103,12 @@ class SdkAdapter:
             self.permits = allowed.__contains__
             max_sends = max_sends if max_sends is not None else 2 * len(allowed) + 2
         self.max_sends = max_sends
+        self.operation_budget, self.job_id = operation_budget, job_id
         self.require_sandbox, self.local_test = require_sandbox, local_test
         parts = urlsplit(api)
         self.api_scheme, self.api_host, self.api_prefix = parts.scheme, parts.hostname, parts.path
-        self.lock = threading.Lock()
+        self.site_host = urlsplit(site).hostname
+        self.lock = threading.RLock()
         self.stopped = None
         self.sends, self.requests, self.browser, self.events, self.sessions = [], [], [], [], []
         # Exact bodies are kept only for the current logical SDK request, then persisted by SdkTransport.
@@ -110,6 +117,8 @@ class SdkAdapter:
         self.launches = 0
         self.page_challenges = 0
         self.sandbox = None
+        self.budget_exhausted = False
+        self._bridge_pending = []
 
     # --- estado ------------------------------------------------------------------------------------------
     def stop(self, reason):
@@ -123,9 +132,12 @@ class SdkAdapter:
             self.events.append(dict(at=now(), kind=kind, detail=detail))
 
     def remaining_sends(self):
-        """Physical sends this adapter may still make (curl and the browser's fetch(), sent or not refused)."""
+        """Physical sends left locally and in the durable, operation-wide ledger."""
         with self.lock:
-            return self.max_sends - len([s for s in self.sends if s.get('sent')])
+            local = self.max_sends - len([s for s in self.sends if s.get('sent')])
+        if self.operation_budget is not None:
+            return min(local, self.operation_budget.snapshot()['remaining'])
+        return local
 
     def report(self):
         with self.lock:
@@ -133,14 +145,17 @@ class SdkAdapter:
             for b in self.browser:
                 key = f"{b['scheme']}://{b['host']}"
                 hosts[key] = hosts.get(key, 0) + 1
+            sends = [{k: v for k, v in entry.items() if not k.startswith('_')} for entry in self.sends]
+            operation_budget = self.operation_budget.snapshot() if self.operation_budget is not None else None
             return dict(api=self.api, site=self.site, profile=str(self.profile), stopped=self.stopped,
-                        sends=list(self.sends), requests=list(self.requests), launches=self.launches,
+                        sends=sends, requests=list(self.requests), launches=self.launches,
                         sessions=list(self.sessions), sandbox=self.sandbox, events=list(self.events),
                         browser=dict(total=len(self.browser), by_host=hosts,
                                      api=sum(1 for b in self.browser if b['api']),
                                      documents=[(b['host'], b['path'], b.get('status'), b.get('failed'))
                                                 for b in self.browser if b['navigation']]),
-                        processes_remaining=list(self.processes_remaining))
+                        processes_remaining=list(self.processes_remaining), operation_budget=operation_budget,
+                        budget_exhausted=self.budget_exhausted)
 
     # --- envíos físicos ------------------------------------------------------------------------------------
     def relative(self, url):
@@ -160,14 +175,113 @@ class SdkAdapter:
                 refused = 'ruta no permitida'
             elif len([s for s in self.sends if s.get('sent')]) >= self.max_sends:
                 refused = 'presupuesto de envíos agotado'
+                self.budget_exhausted = True
+            reservation = None
+            if refused is None and self.operation_budget is not None:
+                try:
+                    reservation = self.operation_budget.reserve_send(job_id=self.job_id, channel=channel, path=rel)
+                except Exception:
+                    refused = 'registro del presupuesto no disponible'
+                    self.stop(refused)
+                else:
+                    if not reservation['allowed']:
+                        refused = 'presupuesto total de la operación agotado'
+                        self.budget_exhausted = True
             entry.update(sent=refused is None, refused=refused)
+            entry['_url'] = url
+            if reservation is not None and reservation.get('allowed'):
+                entry['_operation_index'] = reservation['index']
+            if channel == 'bridge' and refused is None:
+                self._bridge_pending.append(entry)
             self.sends.append(entry)
-        if refused is not None and refused != 'adaptador detenido':
+        if refused is not None and refused not in ('adaptador detenido', 'presupuesto de envíos agotado',
+                                                   'presupuesto total de la operación agotado'):
             self.stop(f'{refused}: {entry["path"]}')
         return entry
 
-    def after_send(self, entry, status, text=None, error=None):
+    def _provider_host(self, host):
+        if self.local_test:
+            return host == self.site_host
+        return host == 'sofascore.com' or (host or '').endswith('.sofascore.com')
+
+    def before_browser_send(self, url):
+        parsed = urlsplit(url)
+        path = parsed.path or '/'
+        refused = None
+        with self.lock:
+            if self.stopped is not None:
+                refused = 'adaptador detenido'
+            elif parsed.scheme not in ('http', 'https') or not self._provider_host(parsed.hostname):
+                refused = 'origen de navegador no permitido'
+            elif path.startswith(self.api_prefix):
+                # API fetches normally have a reservation from BrowserBridge._api_fetch. A redirect or a second
+                # provider-side fetch without that reservation still consumes its own physical slot.
+                bridge_entry = next((entry for entry in self._bridge_pending
+                                     if entry.get('_url') == url and not entry.get('_route_seen')), None)
+                if bridge_entry is not None:
+                    bridge_entry['_route_seen'] = True
+                    return bridge_entry
+                rel = path[len(self.api_prefix):] if not parsed.query else None
+                if rel is None or not (self.permits(rel) or rel == PROBE_PATH):
+                    refused = 'ruta de API no permitida'
+            if refused is None and len([s for s in self.sends if s.get('sent')]) >= self.max_sends:
+                refused = 'presupuesto de envíos agotado'
+                self.budget_exhausted = True
+            reservation = None
+            if refused is None and self.operation_budget is not None:
+                try:
+                    reservation = self.operation_budget.reserve_send(job_id=self.job_id, channel='browser-page', path=path)
+                except Exception:
+                    refused = 'registro del presupuesto no disponible'
+                    self.stop(refused)
+                else:
+                    if not reservation['allowed']:
+                        refused = 'presupuesto total de la operación agotado'
+                        self.budget_exhausted = True
+            entry = dict(at=now(), channel='browser-page', path=path, sent=refused is None, refused=refused,
+                         _url=url)
+            if reservation is not None and reservation.get('allowed'):
+                entry['_operation_index'] = reservation['index']
+            self.sends.append(entry)
+        if refused is not None and refused not in ('adaptador detenido', 'presupuesto de envíos agotado',
+                                                   'presupuesto total de la operación agotado'):
+            self.stop(f'{refused}: {path}')
+        return entry
+
+    async def block_browser_websocket(self, route):
+        """The metered transport has no WebSocket API; close before the handshake can leave the browser."""
+        parsed = urlsplit(route.url)
+        detail = f'{parsed.hostname}{parsed.path}'
+        self.event('browser-websocket-blocked', detail)
+        self.stop(f'conexión WebSocket del navegador bloqueada: {detail}')
+        await route.close(code=1008, reason='WebSocket is outside the metered acquisition transport')
+
+    def _match_send(self, url):
+        return next((entry for entry in reversed(self.sends)
+                     if entry.get('_url') == url and entry.get('sent') and entry.get('status') is None), None)
+
+    def _finish_send(self, entry, status=None, error=None):
         entry.update(finished_at=now(), status=status, error=error)
+        index = entry.get('_operation_index')
+        if index is not None and self.operation_budget is not None:
+            try:
+                self.operation_budget.complete_send(index, status=status, error=error)
+            except Exception:
+                # The reservation itself was already durable. A failed annotation can never free or duplicate it.
+                pass
+
+    def after_send(self, entry, status, text=None, error=None):
+        if entry.get('sent'):
+            self._finish_send(entry, status=status, error=error)
+            with self.lock:
+                if entry in self._bridge_pending:
+                    self._bridge_pending.remove(entry)
+        elif entry.get('refused') in ('presupuesto de envíos agotado', 'presupuesto total de la operación agotado'):
+            return
+        # A browser route can be aborted before it leaves when the durable budget is full. The bridge then reports
+        # that as status 0 or a fetch exception; it is a deferrable budget outcome, not a provider/network refusal.
+        if self.budget_exhausted:
+            return
         challenge = status == 403 and 'challenge' in (text or '')
         entry['challenge'] = challenge
         if error is not None:
@@ -220,8 +334,13 @@ class SdkAdapter:
             if kw.get('verify') is False:
                 adapter.stop('curl con verify=False')
                 raise AdapterStopped('verify=False')
+            # Count each provider exchange at this hook. Do not let curl_cffi follow hidden redirects inside one hook.
+            kw.setdefault('allow_redirects', False)
             entry = adapter.before_send('curl', url)
             if not entry['sent']:
+                if entry.get('refused') in ('presupuesto de envíos agotado',
+                                             'presupuesto total de la operación agotado'):
+                    raise BudgetExhausted('Physical operation budget exhausted before request')
                 raise AdapterStopped(entry['refused'])
             try:
                 response = original_get(url, *a, **kw)
@@ -279,6 +398,26 @@ class SdkAdapter:
                     raise
         bridge.BrowserBridge._launch = guarded_launch
 
+        async def guarded_browser_route(route):
+            url = route.request.url
+            if not adapter._provider_host(urlsplit(url).hostname):
+                await route.continue_()
+                return
+            entry = adapter.before_browser_send(url)
+            if not entry.get('sent'):
+                await route.abort()
+                return
+            try:
+                await route.continue_()
+            except Exception as error:
+                adapter._finish_send(entry, error=f'{type(error).__name__}: {str(error)[:120]}')
+                raise
+
+        async def guarded_browser_websocket(route):
+            # WebSockets do not pass through BrowserContext.route() and would bypass the durable HTTP-send ledger.
+            # The approved scraper flow does not require them, so close before a handshake can leave the container.
+            await adapter.block_browser_websocket(route)
+
         original_solve = bridge.BrowserBridge._solve_on_captcha_page
 
         async def guarded_solve(self):
@@ -305,6 +444,7 @@ class SdkAdapter:
 
         def session_class():
             base = original_session_class()
+            original_page_fetch = base.fetch
 
             class AcquisitionSession(base):
                 def __init__(self, **kw):
@@ -324,8 +464,23 @@ class SdkAdapter:
                         adapter.stop('sesión del navegador sin verificación HTTPS o sin sandbox')
                         raise AdapterStopped('Sesión del navegador no segura')
 
+                async def fetch(self, url, **kw):
+                    # BrowserBridge's challenge solver uses Scrapling's page.goto(CAPTCHA_URL). A context route alone
+                    # is too late for that first navigation in the pinned runtime, so install a page route before goto.
+                    page_setup = kw.get('page_setup')
+
+                    async def guarded_page_setup(page):
+                        await page.route('**/*', guarded_browser_route)
+                        if page_setup is not None:
+                            await page_setup(page)
+
+                    kw['page_setup'] = guarded_page_setup
+                    return await original_page_fetch(self, url, **kw)
+
                 async def start(self):
                     await super().start()
+                    await self.context.route('**/*', guarded_browser_route)
+                    await self.context.route_web_socket('**/*', guarded_browser_websocket)
                     self.context.on('request', adapter.on_browser_request)
                     self.context.on('response', adapter.on_browser_response)
                     self.context.on('requestfailed', adapter.on_browser_failed)
@@ -360,12 +515,18 @@ class SdkAdapter:
             entry = self._match(response.url)
             if entry is not None:
                 entry['status'] = response.status
+            send = self._match_send(response.url)
+            if send is not None:
+                self._finish_send(send, status=response.status)
 
     def on_browser_failed(self, request):
         with self.lock:
             entry = self._match(request.url)
             if entry is not None:
                 entry['failed'] = (request.failure or '')[:120]
+            send = self._match_send(request.url)
+            if send is not None:
+                self._finish_send(send, error=(request.failure or 'browser request failed')[:120])
 
     # --- peticiones ----------------------------------------------------------------------------------------
     def request(self, path):
@@ -380,6 +541,7 @@ class SdkAdapter:
             self.stop(f'ruta no permitida: {path}')
             return 403, {}, b''
         mark, started = len(self.sends), time.monotonic()
+        self.budget_exhausted = False
         response_mark = len(self._captured_responses)
         trace = transport.RequestTrace()
         body, error = b'', None
@@ -387,6 +549,8 @@ class SdkAdapter:
             data = transport.make_api_request(self.api + path, max_retries=1, raise_on_failure=True, trace=trace)
             status = 200
             body = json.dumps(data, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+        except BudgetExhausted:
+            raise
         except ResourceNotFoundError:
             status = 404
         except RateLimitError as e:
@@ -397,6 +561,8 @@ class SdkAdapter:
             status = e.status_code or 0
         except SofaScoreScraperError as e:
             status, error = None, f'{type(e).__name__}: {str(e)[:160]}'
+        if self.budget_exhausted:
+            raise BudgetExhausted('Physical operation budget exhausted before a provider request')
         physical = self.sends[mark:]
         exact = [(code, raw) for captured_path, code, raw in self._captured_responses[response_mark:]
                  if captured_path == path]

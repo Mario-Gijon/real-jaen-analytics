@@ -26,6 +26,16 @@
       "rules_sha256": "575528e883b82c0d00ef796c36d5fcf7f3be55a55cab7abca88383a80d714198",
       "productor": "Grupo 2: verificador de comentarios usa el estado final de detalle, listado de jornada validado o inventario en el mismo orden de prioridad que la receta",
       "uso": "Receta sofascore-group2-2627-v1; corrige solo la cobertura incremental de comentarios, sin cambiar rutas, alcance, presupuesto ni reglas deportivas"
+    },
+    {
+      "rules_sha256": "a9417c9069cdc645508cd181403484a96aae69180c43726c4467aa67548278c0",
+      "productor": "Grupo 2 group-v3: plan de ventana móvil y transporte con contador durable; rutas de curl, bridge y páginas del challenge contabilizadas, WebSocket bloqueado",
+      "uso": "Recetas piloto y Grupo 2. Ventana móvil, hasta tres recuperaciones históricas y máximo de 50 envíos físicos por operación solo para actualizaciones manuales del Grupo 2"
+    },
+    {
+      "rules_sha256": "3eda85ac00f500b5376c77149c636aa2b115786826b919f3c4d428a630ca0fb9",
+      "productor": "Grupo 2 group-v3 revisado: huella anterior más manejo de tiempos de observación locales inválidos como desconocidos para planificar ventana y rotación",
+      "uso": "Recetas piloto y Grupo 2; mismo alcance, excepciones, máximo de 50 envíos físicos e idempotencia"
     }
   ]
 }

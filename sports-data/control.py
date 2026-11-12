@@ -29,11 +29,10 @@ SCOPES = {
                             'ni de la temporada: los demás partidos se conservan tal como están publicados.'),
     GROUP: dict(kind='group', recipe=GROUP, round=None, match_ids=[], action='Actualizar Grupo 2',
                 label='Actualización del Grupo 2 (Primera Federación 26/27)',
-                description='Consulta los partidos finalizados que faltan, los aplazados, los cambios de calendario de '
-                            'las jornadas próximas y, por turnos, de las lejanas, y revisa las correcciones de las '
-                            'últimas 72 horas. Continúa en lotes seguros mientras quede trabajo elegible y el proveedor '
-                            'lo permita. Si se detiene, lo pendiente conserva los datos anteriores; nunca se sustituye '
-                            'por ceros.'),
+                description='Ventana móvil de las tres últimas jornadas disputadas, más cambios de calendario y partidos '
+                            'recién finalizados como excepciones. Los comentarios pendientes y hasta tres recuperaciones '
+                            'históricas selectivas comparten un máximo de 50 envíos físicos por pulsación. Los datos '
+                            'anteriores se conservan si una consulta no aporta información válida.'),
 }
 RECIPE = GROUP
 ACTIVE = ('queued', 'running')
@@ -69,17 +68,21 @@ def secret(path):
 
 
 def restriccion(environ):
-    """The restriction a bundle of this installation must declare, if any: RJ_ACQUISITION_MAX_ATTEMPTS,
-    RJ_ACQUISITION_MAX_SENDS and RJ_ACQUISITION_DETAIL_ROUNDS, all three or none (the acquisition service has the
-    same values; this side refuses a bundle that does not declare exactly them)."""
-    names = ('RJ_ACQUISITION_MAX_ATTEMPTS', 'RJ_ACQUISITION_MAX_SENDS', 'RJ_ACQUISITION_DETAIL_ROUNDS')
+    """The policy ceilings shared with Acquisition; static detail-round overrides are rejected."""
+    if environ.get('RJ_ACQUISITION_DETAIL_ROUNDS') or environ.get('RJ_DEV_DETAIL_ROUNDS'):
+        raise SystemExit('Static detail-round overrides are obsolete; use the rolling Group 2 window')
+    names = ('RJ_ACQUISITION_MAX_ATTEMPTS', 'RJ_ACQUISITION_MAX_SENDS',
+             'RJ_UPDATE_RECENT_ROUNDS', 'RJ_UPDATE_MAX_TOTAL_SENDS')
     values = [environ.get(n) for n in names]
     if not any(values):
         return None
-    if not all(values) or not values[0].isdigit() or not values[1].isdigit():
-        raise SystemExit('Set the three of ' + ', '.join(names) + ' or none')
-    rounds = sorted({int(p) for p in values[2].split(',')})
-    return dict(limits=dict(attempts=int(values[0]), sends=int(values[1])), detail_rounds=rounds)
+    if not all(values) or not all(v.isdigit() for v in values):
+        raise SystemExit('Set all four of ' + ', '.join(names) + ' or none')
+    attempts,sends,recent,total=map(int,values)
+    if not 1<=attempts<=116 or not attempts<=sends<=120 or not 1<=recent<=3 or not 1<=total<=50:
+        raise SystemExit('Invalid Group 2 request policy ceilings')
+    return dict(limits=dict(attempts=attempts,sends=sends), recent_round_count=recent,
+                max_total_sends=total)
 
 
 class Unavailable(Exception): pass
@@ -97,6 +100,7 @@ class Actualizaciones:
         self.root = coordinador.directorio / 'control'
         self.root.mkdir(exist_ok=True)
         self.guard = threading.RLock()
+        self._scope_cache = None
         self.threads = []
         self.live_jobs = set()
         self.stop_reconciler = threading.Event()
@@ -246,12 +250,17 @@ class Actualizaciones:
             import_result = confirmed.get('resultado') or {}
             run_status, published_at = self._publication_run(import_result)
             outcome = 'no_changes' if run_status == 'no_changes' else None
+            final_result = dict(published_at=published_at, generation=generation,
+                                reused_bundle=bool(current.get('reused_bundle', False)), coverage=coverage)
+            if isinstance(result.get('changed'), bool):
+                final_result['changed'] = result['changed']
+            elif outcome == 'no_changes':
+                final_result['changed'] = False
+            if outcome:
+                final_result['publication_result'] = outcome
             current.update(status='completed', phase='finished', published=True, finished_at=now(), resumable=False,
                            batch_count=max(current.get('batch_count', 0), current.get('pending_batch_sequence', 1)),
-                           continuation_pending=False,
-                           result=dict(published_at=published_at, generation=generation,
-                                       reused_bundle=bool(current.get('reused_bundle', False)), coverage=coverage,
-                                       **({'publication_result': outcome} if outcome else {})),
+                           continuation_pending=False, result=final_result,
                            reconciliation=dict(coordinator_id=ident, coordinator_state='completed',
                                                reconciled_at=now(), generation=generation))
             current.pop('publication_pending_id', None)
@@ -306,9 +315,12 @@ class Actualizaciones:
                 if (not item.get('continuation_pending') and attempt is not None
                         and attempt['estado'] == 'completed'):
                     item['published'] = True
+                    prior_result = item.get('result') or {}
                     item['result'] = dict(published_at=now(), generation=attempt['generacion'],
                                           reused_bundle=item.get('reused_bundle', False),
-                                          coverage=(item.get('result') or {}).get('coverage'))
+                                          coverage=prior_result.get('coverage'),
+                                          **({'changed': prior_result['changed']}
+                                             if isinstance(prior_result.get('changed'), bool) else {}))
                     item.update(status='completed', phase='finished', finished_at=now())
                 else:
                     self._fail(item, 'INTERRUPTED', resumable=False, status='interrupted')
@@ -411,7 +423,8 @@ class Actualizaciones:
                 item = self.get(ident)
                 if item['cancel_requested']:
                     raise Cancelled()
-                result = self.cliente.publicar(self.c, item['request_id'], self.recipe, avance=avance)
+                result = self.cliente.publicar(self.c, item['request_id'], self.recipe, avance=avance,
+                                               operation_id=ident)
                 if result.get('state') == 'pending':
                     coordinator_id = result.get('job_id')
                     if not coordinator_id or result.get('request_id') != item['request_id']:
@@ -438,9 +451,14 @@ class Actualizaciones:
                     item.update(published=True, batch_count=batch_count)
                     if progress is not None:
                         item['batch_progress'] = progress
-                    item['result'] = dict(published_at=now(), generation=result['generation_id'],
-                                          reused_bundle=bool(item['reused_bundle'] and batch_count == 1),
-                                          coverage=self._named(combined))
+                    previous_changed = (item.get('result') or {}).get('changed')
+                    batch_changed = result.get('changed')
+                    published_result = dict(published_at=now(), generation=result['generation_id'],
+                                             reused_bundle=bool(item['reused_bundle'] and batch_count == 1),
+                                             coverage=self._named(combined))
+                    if isinstance(previous_changed, bool) or isinstance(batch_changed, bool):
+                        published_result['changed'] = previous_changed is True or batch_changed is True
+                    item['result'] = published_result
                     self.save(item)
 
                 # Continue only for budget-deferred work within the declared scope, after measurable progress, and
@@ -535,7 +553,7 @@ class Actualizaciones:
         return None
 
     def _batch_work(self, coverage):
-        """Budget-deferred work only, filtered to the installation's configured detail rounds."""
+        """Budget-deferred work only; out-of-window routine items and history caps never trigger another batch."""
         if not coverage:
             return set()
         work = {f"deferred:{ident}" for ident in coverage.get('deferred', ())}
@@ -620,19 +638,47 @@ class Actualizaciones:
                     error=item['error'],
                     result=None if item['result'] is None else dict(published_at=item['result']['published_at'],
                                                                      reused_bundle=item['result']['reused_bundle'],
-                                                                     coverage=item['result'].get('coverage')))
+                                                                     coverage=item['result'].get('coverage'),
+                                                                     **({'changed': item['result']['changed']}
+                                                                        if isinstance(item['result'].get('changed'), bool) else {})))
 
     def actual(self):
         active = self._rows("WHERE state IN ('queued','running')")
         last = self._last_finished()
         published = [r for r in self._rows() if r.get('published') and r.get('result')]
         latest = max(published, key=lambda r: (r.get('result') or {}).get('published_at') or r.get('finished_at') or '') if published else None
-        return dict(available=self.cliente.disponible(self.c), scope=SCOPES[self.recipe],
+        return dict(available=self.cliente.disponible(self.c), scope=self._scope(),
                     active_job=self.public(active[0] if active else None), last_job=self.public(last),
                     # With the coverage of that publication: its pending resources and deferred refreshes stay visible
                     # while their previous data are served, even after a later update failed or was cancelled.
                     last_published=None if latest is None else dict(at=latest['result']['published_at'],
                                                                     coverage=latest['result'].get('coverage')))
+
+    def _scope(self):
+        if self.recipe != GROUP:
+            return SCOPES[self.recipe]
+        generation=self.c.capturar()
+        cached=self._scope_cache
+        if cached is not None and cached[0]==generation.id:
+            return cached[1]
+        from persistencia.bundle import inventory
+        from acquisition.group_plan import reference_round, recent_rounds
+        policy=getattr(self.cliente,'restriccion',None) or {}
+        count=policy.get('recent_round_count',3)
+        maximum=policy.get('max_total_sends',50)
+        baseline=inventory(generation)
+        reference=reference_round(baseline)
+        recent=recent_rounds(reference,count)
+        window=(f"las jornadas {', '.join(map(str,recent))}" if recent else 'ninguna jornada disputada aún')
+        value=dict(SCOPES[self.recipe],reference_round=reference,recent_rounds=recent,
+                   recent_round_count=count,max_total_sends=maximum)
+        value['description']=(f"Ventana rutinaria actual: {window} (las {count} últimas jornadas con partidos finalizados). "
+                             f"También se consultan partidos recién finalizados y cambios relevantes fuera de ventana. "
+                             f"Los comentarios pendientes y hasta tres recuperaciones históricas selectivas comparten "
+                             f"un máximo de {maximum} envíos físicos por pulsación. El calendario lejano rota; los "
+                             "datos previos se conservan ante respuestas vacías o errores.")
+        self._scope_cache=(generation.id,value)
+        return value
 
     def close(self, timeout=5):
         self.stop_reconciler.set()

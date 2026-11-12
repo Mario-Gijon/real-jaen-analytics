@@ -172,7 +172,7 @@ describe("Group 2 scope", () => {
     expect(screen.getByText(GROUP.description)).toBeVisible();
     expect(screen.getByText("datos nuevos").parentElement).toHaveTextContent("35 datos nuevos");
     expect(screen.getByText("datos anteriores conservados").parentElement).toHaveTextContent("608 datos anteriores conservados");
-    expect(screen.getByText(/partidos con pendientes/).parentElement).toHaveTextContent("2 partidos con pendientes");
+    expect(screen.getByText(/elementos pendientes\/aplazados/).parentElement).toHaveTextContent("5 elementos pendientes/aplazados");
     const first = (await screen.findByRole("link", { name: "Real Jaén – CE Europa" })).closest("li")!;
     expect(first).toHaveTextContent("estadísticas (respuesta vacía, sin datos publicados)");
     const second = (await screen.findByRole("link", { name: "Huesca – UD Ibiza" })).closest("li")!;
@@ -247,20 +247,39 @@ describe("Group 2 scope", () => {
 
   it("lists the matches left outside a restricted update, with their data kept", async () => {
     const restricted = job({ ...done, result: { ...done.result!, coverage: { ...coverage, pending: [], deferredMatchIds: [],
-      restrictedMatchIds: ["sofascore-match-2"], detailRounds: [9] } } });
+      restrictedMatchIds: ["sofascore-match-2"], detailRounds: null,
+      referenceRound: 11, recentRounds: [9, 10, 11], recentRoundCount: 3, maxTotalSends: 50 } } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: restricted }) }));
     render(<OperatorView />);
-    expect(await screen.findByRole("heading", { name: "Fuera del alcance de esta actualización" })).toBeVisible();
-    expect(screen.getByText(/solo consulta los partidos de la jornada 9\. En 1 partido se detectó/)).toBeVisible();
+    const outOfWindow = await screen.findByRole("heading", { name: "Fuera de la ventana rutinaria" });
+    expect(outOfWindow).toBeVisible();
+    expect(outOfWindow.nextElementSibling).toHaveTextContent(/La rutina se limita a las 3 últimas jornadas disputadas/);
+    expect(outOfWindow.nextElementSibling).toHaveTextContent(/1 partido queda fuera de esa ventana/);
     expect(screen.getByRole("link", { name: "Huesca – UD Ibiza" })).toHaveAttribute("href", "/matches/sofascore-match-2");
   });
 
   it("reports a group update without pending items as published", async () => {
-    const clean = job({ ...done, result: { ...done.result!, coverage: { ...coverage, pending: [], deferredMatchIds: [], newMatches: [],
-      comments: { ...coverage.comments, emptyMatchIds: [], pendingMatchIds: [], failed: [] } } } });
+    const clean = job({ ...done, result: { ...done.result!, coverage: { ...coverage, newResources: 0, pending: [], deferredMatchIds: [], newMatches: [],
+      comments: { ...coverage.comments, newMatchIds: [], emptyMatchIds: [], pendingMatchIds: [], failed: [] } }, changed: false } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: clean }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/^Publicado el 28\/10/)).toBeVisible();
+    expect(await screen.findByText(/^Revisión completada sin cambios/)).toBeVisible();
     expect(screen.queryByText(/con pendientes/)).toBeNull();
+  });
+
+  it("shows the rolling window and operation-wide send budget when declared by group-v3", async () => {
+    const rollingScope = { ...GROUP, referenceRound: 11, recentRounds: [9, 10, 11], recentRoundCount: 3,
+      maxTotalSends: 50, description: "Ventana rutinaria actual: jornadas 9, 10, 11. Máximo 50 envíos." };
+    const rollingCoverage = { ...coverage, pending: [], deferredMatchIds: ["sofascore-match-13"],
+      recentRounds: [9, 10, 11], referenceRound: 11, recentRoundCount: 3, maxTotalSends: 50,
+      operationSendsUsed: 17, operationSendsRemaining: 33, physicalSends: 8,
+      comments: { newMatchIds: [], keptMatchIds: [], emptyMatchIds: [], pendingMatchIds: [], failed: [] } };
+    const published = job({ ...done, result: { ...done.result!, coverage: rollingCoverage } });
+    api(() => ({ body: operatorStatus({ scope: rollingScope, lastJob: published }) }));
+    render(<OperatorView />);
+    expect(await screen.findByText(rollingScope.description)).toBeVisible();
+    expect(screen.getByText(/Ventana rutinaria: jornadas 9, 10, 11 \(referencia 11\)\. Envíos físicos reservados: 17 de 50; quedan 33/)).toBeVisible();
+    expect(screen.getByText(/elemento pendiente\/aplazado/).parentElement).toHaveTextContent("1 elemento pendiente/aplazado");
+    expect(screen.queryByText("sin recursos pendientes por presupuesto")).toBeNull();
   });
 });

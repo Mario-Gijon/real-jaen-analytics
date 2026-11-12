@@ -234,10 +234,15 @@ UNIQUE_TOURNAMENT,TOURNAMENT,SEASON=17073,94191,97382
 ROUND_NUMBERS=range(1,39)
 MAX_GROUP_ATTEMPTS=120  # production maximum of physical sends; logical attempts stop four below it
 MAX_GROUP_LOGICAL=MAX_GROUP_ATTEMPTS-4
+MAX_GROUP_TOTAL_SENDS=50
+MAX_GROUP_RECENT_ROUNDS=3
+MAX_GROUP_HISTORY_RECOVERIES=3
 MAX_PROVENANCE=24*1024*1024
 PENDING_REASONS=frozenset({'empty','not_found','parse','error','budget','not_requested','restricted'})
 PLAN_FIELDS=frozenset({'now','rounds','planned','deferred','new_matches','limits','detail_rounds'})
 GROUP_V2_PLAN_FIELDS=PLAN_FIELDS|{'comments'}
+GROUP_V3_PLAN_FIELDS=GROUP_V2_PLAN_FIELDS|{'recent_round_count','reference_round','recent_rounds','max_total_sends',
+                                              'operation_sends_used','physical_sends','operation_id'}
 GROUP_FIELDS=frozenset({'schema','contract','job_id','request_id','recipe_id','provider_revision','transport','inventory_sha256',
                         'generation_id','rules_sha256','policy','started_at','finished_at','files','coverage','retained',
                         'attempts','errors','plan'})
@@ -318,9 +323,9 @@ def coverage_summary(manifest):
     return dict(new=new,kept=kept,pending=[dict(event_id=i,resources=r) for i,r in sorted(pending.items())],
                 comments=comments)
 
-def check_plan(plan,attempts,*,with_comments=False):
+def check_plan(plan,attempts,*,with_comments=False,dynamic_policy=False):
     """The job's declared limits and restriction: never above the production maxima, and what it did fits them."""
-    fields=GROUP_V2_PLAN_FIELDS if with_comments else PLAN_FIELDS
+    fields=GROUP_V3_PLAN_FIELDS if dynamic_policy else GROUP_V2_PLAN_FIELDS if with_comments else PLAN_FIELDS
     if not isinstance(plan,dict) or set(plan)!=fields:raise Rejected('Invalid plan')
     limits,rounds=plan['limits'],plan['detail_rounds']
     if not isinstance(limits,dict) or set(limits)!={'attempts','sends'} or any(type(v) is not int for v in limits.values()):raise Rejected('Invalid limits')
@@ -335,6 +340,44 @@ def check_plan(plan,attempts,*,with_comments=False):
         if not isinstance(comments,dict) or set(comments)!={'new','kept','pending','failed'}:
             raise Rejected('Invalid comments coverage')
         if any(not isinstance(comments[k],list) for k in comments):raise Rejected('Invalid comments coverage')
+    if dynamic_policy:
+        if (plan['detail_rounds'] is not None or type(plan['recent_round_count']) is not int
+                or not 1<=plan['recent_round_count']<=MAX_GROUP_RECENT_ROUNDS
+                or plan['reference_round'] is not None and (type(plan['reference_round']) is not int
+                                                             or plan['reference_round'] not in ROUND_NUMBERS)
+                or not isinstance(plan['recent_rounds'],list)
+                or plan['recent_rounds']!=sorted(set(plan['recent_rounds']))
+                or any(type(r) is not int or r not in ROUND_NUMBERS for r in plan['recent_rounds'])):
+            raise Rejected('Invalid rolling round window')
+        expected_recent=([] if plan['reference_round'] is None else
+                         list(range(max(1,plan['reference_round']-plan['recent_round_count']+1),
+                                    plan['reference_round']+1)))
+        if plan['recent_rounds']!=expected_recent:
+            raise Rejected('Rolling window does not match its reference round')
+        if (type(plan['max_total_sends']) is not int or not 1<=plan['max_total_sends']<=MAX_GROUP_TOTAL_SENDS
+                or type(plan['operation_sends_used']) is not int
+                or not 0<=plan['operation_sends_used']<=plan['max_total_sends']
+                or type(plan['physical_sends']) is not int
+                or not 0<=plan['physical_sends']<=limits['sends']
+                or plan['physical_sends']>plan['operation_sends_used']
+                or type(plan['operation_id']) is not str):
+            raise Rejected('Invalid operation send accounting')
+        try:
+            if str(uuid.UUID(plan['operation_id']))!=plan['operation_id']:
+                raise ValueError()
+        except (ValueError,TypeError,AttributeError):
+            raise Rejected('Invalid operation id') from None
+        if limits['sends']>plan['max_total_sends']:
+            raise Rejected('Per-batch sends exceed the operation allowance')
+        planned=plan['planned']
+        if (not isinstance(planned,list) or any(not isinstance(item,dict)
+                or set(item)!={'id','reason','keys'} or type(item['id']) is not int
+                or item['reason'] not in ('finished','changed','pending','refresh','history')
+                or not isinstance(item['keys'],list) or len(set(item['keys']))!=len(item['keys'])
+                or any(key not in SECTIONS for key in item['keys']) for item in planned)
+                or len({item['id'] for item in planned})!=len(planned)
+                or sum(item['reason']=='history' for item in planned)>MAX_GROUP_HISTORY_RECOVERIES):
+            raise Rejected('Invalid planned work')
     return limits,rounds
 
 def _verify_group_file(name, descriptor, raw, total, *, with_comments):
@@ -371,8 +414,9 @@ def _verify_group(body,descriptor,baseline,*,context,expected_rules,test_transpo
     obj=parse(body)
     if set(obj)!={'manifest','files'}:raise Rejected('Unknown envelope')
     m=obj['manifest']
-    if set(m)!=GROUP_FIELDS or type(m['schema']) is not int or m['schema']!=2 or m['contract'] not in ('group-v1','group-v2'):raise Rejected('Incompatible contract')
-    with_comments=m['contract']=='group-v2'
+    if set(m)!=GROUP_FIELDS or type(m['schema']) is not int or m['schema']!=2 or m['contract'] not in ('group-v1','group-v2','group-v3'):raise Rejected('Incompatible contract')
+    dynamic_policy=m['contract']=='group-v3'
+    with_comments=m['contract'] in ('group-v2','group-v3')
     if any(str(uuid.UUID(m[k]))!=m[k] for k in ('job_id','request_id')) or tuple(m[k] for k in ('job_id','request_id'))!=tuple(context):raise Rejected('Wrong job context')
     if m['recipe_id']!=GROUP_RECIPE or m['provider_revision']!='611e436a1528b0f487aa56a045f023e8ae8ae098':raise Rejected('Wrong recipe/revision')
     if m['transport']!=('loopback-fixture' if test_transport else 'sofascore-https'):raise Rejected('Wrong transport provenance')
@@ -385,7 +429,7 @@ def _verify_group(body,descriptor,baseline,*,context,expected_rules,test_transpo
     if m['retained']!=retained:raise Rejected('Local history changed')
     attempts=m['attempts'];latest={};counts={}
     if not 1<=len(attempts)<=MAX_GROUP_ATTEMPTS:raise Rejected('Attempt budget mismatch')
-    _,detail_rounds=check_plan(m['plan'],attempts,with_comments=with_comments)
+    _,detail_rounds=check_plan(m['plan'],attempts,with_comments=with_comments,dynamic_policy=dynamic_policy)
     for n,a in enumerate(attempts,1):
         if set(a)!={'number','path','sent_at','finished_at','status','payload_sha256'} or a['number']!=n:raise Rejected('Unplanned attempt')
         counts[a['path']]=counts.get(a['path'],0)+1
@@ -445,6 +489,12 @@ def _verify_group(body,descriptor,baseline,*,context,expected_rules,test_transpo
     if not set(expected)<=set(calendar):raise Rejected('Inventory events missing from calendar')
     order=list(calendar)
     current={i for i in expected if expected[i]['current']}
+    planned_by_id={item['id']:item for item in m['plan']['planned']}
+    if dynamic_policy:
+        from acquisition.group_plan import reference_round as group_reference_round
+        actual_reference=group_reference_round(baseline,{i:row for i,(row,_attempt) in listed.items()})
+        if actual_reference!=m['plan']['reference_round']:
+            raise Rejected('Reference round is not supported by the inventory and listing')
     participants={i:((expected[i]['home'],expected[i]['away']) if i in expected else (p['home_team_id'],p['away_team_id'])) for i,(_,p) in calendar.items()}
     for path in latest:
         if path in ROUND_PATHS:continue
@@ -453,7 +503,36 @@ def _verify_group(body,descriptor,baseline,*,context,expected_rules,test_transpo
             continue
         parts=path.split('/')
         if len(parts) not in (3,4) or parts[1]!='event' or not parts[2].isdigit() or int(parts[2]) not in current or (len(parts)==4 and parts[3] not in SECTIONS):raise Rejected('Unplanned attempt')
-        if detail_rounds is not None and calendar[int(parts[2])][1]['round'] not in detail_rounds:raise Rejected('Detail outside the declared rounds')
+        ident=int(parts[2]);round_number=calendar[ident][1]['round']
+        if dynamic_policy:
+            candidate=planned_by_id.get(ident)
+            if candidate is None or (len(parts)==4 and parts[3] not in candidate['keys']):
+                raise Rejected('Detailed request is missing from the rolling plan')
+            reason=candidate['reason']
+            from acquisition.group_plan import matches as group_matches
+            old=group_matches(baseline).get(ident)
+            row=listed.get(ident,(None,None))[0]
+            missing=set(SECTIONS)-(old['sections'] if old else set())
+            if reason=='finished' and not (row and (row.get('status') or {}).get('type')=='finished'
+                                           and expected[ident]['status']!='finished'):
+                raise Rejected('Finished-match exception is not supported by the listing')
+            if reason=='changed':
+                from importar import rasgos_evento
+                if not (row and (old is None or old['traits'] is None or rasgos_evento(row)!=old['traits'])):
+                    raise Rejected('Calendar-change exception is not supported by the listing')
+            if reason in ('pending','history') and not (old and old['status']=='finished' and missing):
+                raise Rejected('Incomplete-resource recovery is not supported by the inventory')
+            if reason=='pending' and round_number not in m['plan']['recent_rounds']:
+                raise Rejected('Out-of-window pending work is not an approved exception')
+            if reason=='history' and round_number in m['plan']['recent_rounds']:
+                raise Rejected('Recent match misclassified as historical recovery')
+            if round_number not in m['plan']['recent_rounds']:
+                if reason not in ('finished','changed','history'):
+                    raise Rejected('Out-of-window detail lacks a verified exception')
+            elif reason=='refresh' and round_number not in m['plan']['recent_rounds']:
+                raise Rejected('Routine refresh outside the rolling window')
+        elif detail_rounds is not None and round_number not in detail_rounds:
+            raise Rejected('Detail outside the declared rounds')
     prior={(v['record']['event_id'],v['record']['key']):v['record'] for v in baseline['records']}
     raw_records={};owned={};refs={}
     for name,owner in wanted.items():
@@ -524,12 +603,13 @@ def _verify_group(body,descriptor,baseline,*,context,expected_rules,test_transpo
     if set(raw_records)!=covered:raise Rejected('Raw resource outside coverage')
     if with_comments:
         _verify_group_comments(m['plan']['comments'],rows['comments.jsonl'],baseline,expected,current,calendar,
-                               attempts,latest,m['plan']['planned'],detail_rounds,listed,raw_records)
+                               attempts,latest,m['plan']['planned'],detail_rounds,listed,raw_records,
+                               dynamic_policy=dynamic_policy)
     return m,decoded
 
 
 def _verify_group_comments(summary,records,baseline,expected,current,calendar,attempts,latest,planned,detail_rounds,
-                           listed,raw_records):
+                           listed,raw_records,*,dynamic_policy=False):
     """Verify the optional Spanish narrative backfill against the same job's scope and budget."""
     from persistencia.comentarios import validar_respuesta
     from acquisition.group_plan import matches as planned_matches
@@ -563,7 +643,7 @@ def _verify_group_comments(summary,records,baseline,expected,current,calendar,at
         if ident not in eligible:raise Rejected('Comments attempt is not due or outside finished Group 2')
         if ident not in expected or not expected[ident]['current'] or ident not in finished:
             raise Rejected('Comments event outside current finished inventory')
-        if detail_rounds is not None and round_by_event.get(ident) not in detail_rounds:
+        if not dynamic_policy and detail_rounds is not None and round_by_event.get(ident) not in detail_rounds:
             raise Rejected('Comments event outside configured detail rounds')
         if row['attempt_numbers']!=[item['number'] for item in attempts_for_event]:
             raise Rejected('Comments attempt numbers mismatch')

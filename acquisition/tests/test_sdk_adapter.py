@@ -9,6 +9,7 @@ sandbox de Chromium; RJ_TEST_CERT y RJ_TEST_KEY (certificado no confiable) para 
 openssl si existe o se omiten.
 """
 import contextlib
+import asyncio
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -56,7 +58,7 @@ def run_scenario(name, folder):
     if name.startswith('tls') and cert is None:
         return dict(skipped='sin certificado de prueba')
     kind = 'challenge' if name in ('tls-navegador', 'tls-curl', 'perfil-ocupado', 'ruta-no-permitida', 'servidor-500',
-                                 'servidor-500-prohibido') else name
+                                 'servidor-500-prohibido', 'challenge-budget') else name
     served = routes()
     if name == 'servidor-500':
         served[PATHS[1]] = SERVER_ERROR
@@ -68,7 +70,14 @@ def run_scenario(name, folder):
         api_site = stack.enter_context(FixtureSite(served, scenario=kind, cert=cert if name == 'tls-curl' else None))
         page_site = stack.enter_context(FixtureSite({}, scenario=kind, cert=cert)) if name == 'tls-navegador' else None
         origin = page_site.origin if page_site else api_site.origin
-        adapter = SdkAdapter(profile, PATHS, api=api_site.api, site=origin, require_sandbox=sandbox, local_test=True)
+        operation_budget = None
+        job_id = None
+        if name == 'challenge-budget':
+            from acquisition.operation_budget import OperationBudget
+            operation_budget = OperationBudget(folder / 'operations', str(uuid.uuid4()), 50)
+            job_id = str(uuid.uuid4())
+        adapter = SdkAdapter(profile, PATHS, api=api_site.api, site=origin, operation_budget=operation_budget,
+                             job_id=job_id, require_sandbox=sandbox, local_test=True)
         adapter.install()
         if name == 'perfil-ocupado':
             from sofascore_scraper.client import profile_lock
@@ -108,8 +117,17 @@ class Adaptador(unittest.TestCase):
         rep = r['report']
         self.assertEqual(r['statuses'], [200] * 5)
         self.assertIsNone(rep['stopped'])
-        self.assertEqual(self.sends(r)[:2], [('curl', PATHS[0], 403), ('bridge', PATHS[0], 200)])
-        self.assertEqual(len(r['api_hits']), len(self.sends(r)), 'cada envío anotado llegó al sitio y nada más')
+        sends = self.sends(r)
+        self.assertEqual(sends[0], ('curl', PATHS[0], 403))
+        self.assertIn(('browser-page', '/captcha.html', 200), sends)
+        self.assertIn(('browser-page', '/robots.txt', 200), sends)
+        self.assertEqual(sends[next(i for i, send in enumerate(sends) if send[0] == 'bridge')],
+                         ('bridge', PATHS[0], 200))
+        api_sends=[item for item in rep['sends'] if item['channel'] in ('curl','bridge') and item['sent']]
+        page_sends=[item for item in rep['sends'] if item['channel']=='browser-page' and item['sent']]
+        self.assertEqual(len(r['api_hits']),len(api_sends),'cada curl/fetch de API se contabiliza')
+        self.assertEqual(len(r['site_hits']),len(api_sends)+len(page_sends),
+                         'también se contabilizan las páginas del challenge antes de salir a la red')
         self.assertEqual({h['path'] for h in r['api_hits']}, {'/api/v1' + p for p in PATHS})
         [session] = rep['sessions']
         self.assertEqual((session['ignore_https_errors'], session['service_workers'], session['permissions'],
@@ -123,6 +141,14 @@ class Adaptador(unittest.TestCase):
         if os.environ.get('RJ_REQUIRE_SANDBOX') == '1':
             self.assertEqual(rep['sandbox'], {'namespaces': True, 'seccomp': True, 'proc_verified': True})
 
+    def test_ledger_persistente_incluye_pagina_captcha_y_redirecciones(self):
+        r = self.scenario('challenge-budget')
+        sent = [item for item in r['report']['sends'] if item['sent']]
+        self.assertEqual(r['statuses'], [200] * 5)
+        self.assertEqual(len(r['site_hits']), len(sent))
+        self.assertEqual(r['report']['operation_budget']['used'], len(sent))
+        self.assertEqual(r['report']['operation_budget']['remaining'], 50 - len(sent))
+
     def test_error_del_servidor_tras_el_challenge_no_es_un_rechazo(self):
         # The SDK retries a browser 5xx by curl, meets the normal challenge and reports 403: it is still a 500.
         r = self.scenario('servidor-500')
@@ -135,15 +161,39 @@ class Adaptador(unittest.TestCase):
         r = self.scenario('servidor-500-prohibido')
         self.assertEqual(r['statuses'], [200, 403])
         self.assertIsNotNone(r['report']['stopped'])
-        sends = [(s['channel'], s['path'], s['status'], s['challenge']) for s in r['report']['sends'] if s['sent']]
+        sends = [(s['channel'], s['path'], s['status'], s.get('challenge', False))
+                 for s in r['report']['sends'] if s['sent']]
         self.assertIn(('bridge', PATHS[1], 500, False), sends)
         self.assertEqual(sends[-1], ('curl', PATHS[1], 403, False), 'the last send is the refusal, nothing after it')
-        self.assertEqual(len(r['api_hits']), len(sends))
+        api_sends = [s for s in sends if s[0] in ('curl', 'bridge')]
+        self.assertEqual(len(r['api_hits']), len(api_sends))
 
     def test_403_sin_challenge_detiene_sin_navegador(self):
         r = self.scenario('prohibido')
         self.assertEqual((r['statuses'], len(r['api_hits']), r['report']['launches']), ([403], 1, 0))
         self.assertIsNotNone(r['report']['stopped'])
+
+    def test_websocket_de_la_pagina_se_cierra_antes_del_handshake(self):
+        from acquisition.operation_budget import OperationBudget
+        from acquisition.sdk_adapter import SdkAdapter
+        with tempfile.TemporaryDirectory(prefix='adapter-websocket-') as folder:
+            operation=str(uuid.uuid4())
+            budget=OperationBudget(Path(folder)/'operations',operation,50)
+            adapter=SdkAdapter(Path(folder)/'profile',PATHS,operation_budget=budget,job_id=str(uuid.uuid4()))
+
+            class Route:
+                url='wss://www.sofascore.com/provider-stream'
+                closed=None
+                async def close(self,code=None,reason=None):
+                    self.closed=(code,reason)
+
+            route=Route()
+            asyncio.run(adapter.block_browser_websocket(route))
+            self.assertEqual(route.closed[0],1008)
+            self.assertIn('WebSocket',route.closed[1])
+            self.assertIn('WebSocket',adapter.stopped)
+            self.assertEqual(budget.snapshot()['used'],0)
+            self.assertIn('browser-websocket-blocked',[event['kind'] for event in adapter.events])
 
     def test_challenge_irresoluble(self):
         r = self.scenario('irresoluble')
@@ -180,6 +230,39 @@ class Adaptador(unittest.TestCase):
             self.skipTest(r['skipped'])
         self.assertTrue(r['errors'])
         self.assertEqual(r['site_hits'], [])
+
+    def test_budget_ledger_charges_browser_pages_before_they_leave(self):
+        from acquisition.operation_budget import OperationBudget
+        from acquisition.sdk_adapter import API, SITE, SdkAdapter
+        with tempfile.TemporaryDirectory(prefix='adapter-operation-budget-') as folder:
+            operation=str(uuid.uuid4())
+            budget=OperationBudget(Path(folder)/'operations',operation,1)
+            adapter=SdkAdapter(Path(folder)/'profile',PATHS,max_sends=1,operation_budget=budget,
+                               job_id=str(uuid.uuid4()))
+            first=adapter.before_send('curl',API+PATHS[0])
+            second=adapter.before_browser_send(SITE+'/captcha.html?redirectUrl=robots')
+            self.assertTrue(first['sent'])
+            self.assertFalse(second['sent'])
+            self.assertTrue(adapter.budget_exhausted)
+            self.assertIsNone(adapter.stopped)
+            self.assertEqual(budget.snapshot()['used'],1)
+
+    def test_budget_aborted_browser_page_is_a_partial_budget_outcome_not_a_refusal(self):
+        from acquisition.operation_budget import OperationBudget
+        from acquisition.sdk_adapter import API, SITE, SdkAdapter
+        with tempfile.TemporaryDirectory(prefix='adapter-operation-abort-') as folder:
+            operation=str(uuid.uuid4())
+            budget=OperationBudget(Path(folder)/'operations',operation,1)
+            adapter=SdkAdapter(Path(folder)/'profile',PATHS,max_sends=4,operation_budget=budget,
+                               job_id=str(uuid.uuid4()))
+            api_entry=adapter.before_send('bridge',API+PATHS[1])
+            self.assertTrue(api_entry['sent'])
+            page_entry=adapter.before_browser_send(SITE+'/captcha.html')
+            self.assertFalse(page_entry['sent'])
+            adapter.after_send(api_entry,0,error='page request aborted by the operation budget')
+            self.assertTrue(adapter.budget_exhausted)
+            self.assertIsNone(adapter.stopped)
+            self.assertEqual(budget.snapshot()['used'],1)
 
 
 if __name__ == '__main__':

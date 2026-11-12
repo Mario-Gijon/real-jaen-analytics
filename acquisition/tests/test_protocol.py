@@ -25,6 +25,7 @@ from persistencia.adquisicion import AdquisicionRechazada, Cliente
 from persistencia.bundle import fingerprint
 
 RECIPE = 'sofascore-pilot-16599363-v1'
+GROUP_RECIPE = 'sofascore-group2-2627-v1'
 
 
 def baseline(generation=None):
@@ -106,7 +107,7 @@ class Protocol(unittest.TestCase):
 
     def completed(self, inventory=None):
         request = str(uuid.uuid4())
-        job = self.client.solicitar(request, RECIPE, inventory or baseline())
+        job = self.client.solicitar(request, RECIPE, inventory or baseline(), operation_id=request)
         return request, self.client.esperar(job['id'], timeout=10)
 
     def test_authorization_wrong_secret_and_no_echo(self):
@@ -127,7 +128,7 @@ class Protocol(unittest.TestCase):
         self.assertEqual(error.exception.code, 401)
 
     def test_arbitrary_parameters_and_invalid_inventory_rejected(self):
-        good = dict(request_id=str(uuid.uuid4()), recipe_id=RECIPE, inventory=baseline())
+        good = dict(request_id=str(uuid.uuid4()), operation_id=str(uuid.uuid4()), recipe_id=RECIPE, inventory=baseline())
         tampered = baseline(); tampered['teams'] = tampered['teams'][:19]
         cases = [dict(good, command='x'), dict(good, url='http://x'), dict(good, recipe_id='fixture-complete-v1'),
                  dict(good, request_id='not-a-uuid'), dict(good, inventory=[]), dict(good, inventory=tampered)]
@@ -159,7 +160,8 @@ class Protocol(unittest.TestCase):
             self.client.descargar(state['id'], dict(state['bundle'], sha256='1' * 64))
         report = self.client.informe(state['id'])
         self.assertEqual(set(report), {'provider', 'started_at', 'finished_at', 'error', 'cancelled', 'stopped', 'limits',
-                                       'sends', 'requests', 'sandbox', 'launches', 'connections', 'browser'})
+                                       'sends', 'requests', 'sandbox', 'launches', 'connections', 'browser',
+                                       'operation_budget', 'continuation_allowed'})
 
     def test_duplicate_request_returns_original_and_conflicts(self):
         inventory = baseline()
@@ -168,7 +170,52 @@ class Protocol(unittest.TestCase):
         self.assertEqual((again['id'], again['bundle']), (state['id'], state['bundle']))
         with self.assertRaises(AdquisicionRechazada):
             self.client.solicitar(request, RECIPE, baseline())  # same key, other inventory
+        with self.assertRaises(AdquisicionRechazada):
+            self.client.solicitar(request, RECIPE, inventory, operation_id=str(uuid.uuid4()))
         self.assertEqual(self.runner.calls, 1)
+
+    def test_group_operation_budget_is_initialized_before_send_and_survives_service_restart(self):
+        from acquisition.operation_budget import OperationBudget
+        from acquisition.service import Conflict
+        root = self.root / 'manual-operation-jobs'
+        operation_id = str(uuid.uuid4())
+        runner = Runner()
+
+        def completed(jobs, request_id):
+            item, _ = jobs.submit(request_id, GROUP_RECIPE, baseline(), operation_id)
+            deadline = time.monotonic() + 5
+            while jobs.get(item['id'])['state'] not in ('completed', 'failed') and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual(jobs.get(item['id'])['state'], 'completed')
+            self.assertEqual(jobs.get(item['id'])['operation_id'], operation_id)
+
+        first = Jobs(root, provider='fixture-site', runner=runner)
+        try:
+            completed(first, str(uuid.uuid4()))
+            ledger = OperationBudget(root / 'operations', operation_id, 50)
+            for index in range(47):
+                self.assertTrue(ledger.reserve_send(job_id='batch-one', channel='curl', path=f'/event/{index}')['allowed'])
+            self.assertEqual(ledger.snapshot()['used'], 47)
+        finally:
+            first.close()
+
+        second = Jobs(root, provider='fixture-site', runner=runner)
+        try:
+            completed(second, str(uuid.uuid4()))
+            state = OperationBudget(root / 'operations', operation_id, 50).snapshot()
+            self.assertEqual((state['used'], state['remaining']), (47, 3))
+            self.assertEqual(sum(OperationBudget(root / 'operations', operation_id, 50).reserve_send(
+                job_id='last-batch', channel='browser-page', path='/captcha.html')['allowed'] for _ in range(4)), 3)
+        finally:
+            second.close()
+
+        (root / 'operations' / (operation_id + '.json')).unlink()
+        third = Jobs(root, provider='fixture-site', runner=runner)
+        try:
+            with self.assertRaises(Conflict):
+                third.submit(str(uuid.uuid4()), GROUP_RECIPE, baseline(), operation_id)
+        finally:
+            third.close()
 
     def test_one_active_job_and_cancellation(self):
         self.runner.mode = 'wait'
@@ -226,7 +273,8 @@ class Protocol(unittest.TestCase):
                     {'ACQ_PROVIDER': 'fixture-site', 'ACQ_TEST_MODE': '1'}, {'ACQ_PROVIDER': 'simulated-local-v1', 'ACQ_TEST_MODE': '1'}):
             with self.subTest(env=env), self.assertRaises(SystemExit):
                 configuration(env)
-        self.assertEqual(configuration({'ACQ_PROVIDER': 'sofascore', 'ACQ_ENABLE_REAL': '1'}), ('sofascore', {}))
+        self.assertEqual(configuration({'ACQ_PROVIDER': 'sofascore', 'ACQ_ENABLE_REAL': '1'}),
+                         ('sofascore', dict(recent_round_count=3, max_total_sends=50)))
         with self.assertRaises(ValueError):
             Jobs(self.root / 'other', provider='sofascore')  # a real job process needs the profile owner
 

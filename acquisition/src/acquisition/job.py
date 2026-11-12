@@ -134,16 +134,25 @@ def run(folder):
     offset = (spec['test_now'] - time.time()) if provider == 'fixture-site' and spec.get('test_now') else 0.0
     clock = lambda: time.time() + offset  # noqa: E731
     if group:
+        from acquisition.operation_budget import OperationBudget
+        operation_budget = OperationBudget(Path(spec['transport_root']).parent / 'operations',
+                                           spec['operation_id'], spec['max_total_sends'])
+        total_state = operation_budget.snapshot()
+        if total_state['remaining'] <= group_plan.SEND_RESERVE:
+            raise SystemExit('Manual operation has no safe send allowance for another batch')
         started = clock()  # one "now" for the rounds of the allowlist and the plan
         listed_at = group_plan.round_listings(spec['transport_root'])
         scope = GroupScope(sorted(set().union(*group_plan.rounds_to_list(baseline, started, listed_at=listed_at))))
-        # Two counters, each capped by the production maximum and only lowered by the installation (service.py).
-        attempts_cap = min(group_plan.MAX_ATTEMPTS, spec.get('max_attempts') or group_plan.MAX_ATTEMPTS)
-        sends = min(group_plan.MAX_SENDS, spec.get('max_sends') or group_plan.MAX_SENDS)
+        # A new batch can use only the operation's persisted remainder. Attempts are lowered further to leave
+        # headroom for retries and browser challenge traffic; the adapter enforces the hard physical cap.
+        sends = min(group_plan.MAX_SENDS, spec.get('max_sends') or group_plan.MAX_SENDS, total_state['remaining'])
+        attempts_cap = min(group_plan.MAX_ATTEMPTS, spec.get('max_attempts') or group_plan.MAX_ATTEMPTS,
+                           max(1, sends - group_plan.SEND_RESERVE))
         paths, seconds = scope.permits, group_plan.SECONDS
         limits = dict(allowed=scope.permits, limits='group', max_attempts=attempts_cap, seconds=seconds,
                       send_reserve=group_plan.SEND_RESERVE)
     else:
+        operation_budget = None
         paths, sends, seconds = PATHS, MAX_SENDS, SECONDS
         limits = dict(max_attempts=len(PATHS), seconds=SECONDS, breaker=StrictBreaker())
     cancel = folder / 'cancel'
@@ -157,10 +166,12 @@ def run(folder):
             site = FixtureSite(routes_from_file(spec['fixture_routes']), scenario=spec.get('fixture_scenario', 'challenge'))
             site.__enter__()
             adapter = SdkAdapter(profile, paths, api=site.api, site=site.origin, max_sends=sends,
+                                 operation_budget=operation_budget, job_id=spec['job_id'],
                                  require_sandbox=True, local_test=True)
             urls = dict(loopback_url=site.api)
         else:
-            adapter = SdkAdapter(profile, paths, max_sends=sends, require_sandbox=True)
+            adapter = SdkAdapter(profile, paths, max_sends=sends, operation_budget=operation_budget,
+                                 job_id=spec['job_id'], require_sandbox=True)
             urls = dict(enable_real=True)
         adapter.install()
         try:
@@ -174,7 +185,9 @@ def run(folder):
                         descriptor = collect_group(store, transport, scope, baseline, output, now=started,
                                                    cancelled=cancel.exists, budget=budget, listed_at=listed_at,
                                                    limits=dict(attempts=attempts_cap, sends=sends),
-                                                   detail_rounds=spec.get('detail_rounds'))
+                                                   detail_rounds=None, recent_round_count=spec['recent_round_count'],
+                                                   max_total_sends=spec['max_total_sends'], operation_id=spec['operation_id'],
+                                                   operation_budget=operation_budget)
                         again = lambda: collect_group(store, transport, scope, baseline, output, now=clock())  # noqa: E731
                     else:
                         descriptor = collect(store, transport, baseline, output, cancelled=cancel.exists)
@@ -191,6 +204,7 @@ def run(folder):
             if site is not None:
                 site.__exit__(None, None, None)
     connections = monitor.stop()
+    operation_state = operation_budget.snapshot() if operation_budget is not None else None
     summary = dict(provider=provider, started_at=spec['started_at'], finished_at=now(), error=error,
                    cancelled=cancel.exists(), stopped=report['stopped'], descriptor=descriptor, attempts=attempts,
                    recipe=spec['recipe_id'],
@@ -199,7 +213,9 @@ def run(folder):
                                detail_rounds=spec.get('detail_rounds') if group else None),
                    sends=report['sends'], requests=report['requests'], sandbox=report['sandbox'],
                    sessions=report['sessions'], launches=report['launches'], browser=report['browser'],
-                   events=report['events'], connections=connections)
+                   events=report['events'], connections=connections, operation_budget=operation_state,
+                   continuation_allowed=bool(group and report['stopped'] is None and not report.get('budget_exhausted')
+                                             and operation_state['remaining'] > group_plan.SEND_RESERVE))
     with (folder / 'report.json').open('wb') as f:
         f.write(encode(summary))
         f.flush()

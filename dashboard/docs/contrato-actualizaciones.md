@@ -11,10 +11,17 @@ El alcance lo declara el backend (`scope`) según la receta configurada (`RJ_UPD
 interfaz muestra sus textos tal cual (`label`, `description`, `actionLabel`):
 
 - `group` (por defecto, `sofascore-group2-2627-v1`), botón «Actualizar Grupo 2». Consulta:
+  - revisiones rutinarias dentro de las tres últimas jornadas con un partido finalizado, calculadas con el inventario
+    publicado y los calendarios ya consultados; si se finaliza una jornada posterior, la ventana avanza;
   - los resultados que faltan, sin importar su antigüedad;
-  - los aplazados;
+  - los aplazados recuperados, los partidos recién finalizados y los cambios relevantes, aunque sean de jornadas antiguas;
   - los cambios de calendario de las jornadas próximas y, por turnos, de las lejanas;
-  - las correcciones de las últimas 72 h (regla 72 h / 6 h del SDK).
+  - los comentarios pendientes y hasta tres recuperaciones selectivas de partidos históricos;
+  - las correcciones recientes que indique la regla 72 h / 6 h del SDK.
+
+  Una pulsación permite como máximo 50 envíos físicos a SofaScore, compartidos por todos sus lotes. El contador se
+  reserva antes de cada petición y vive junto al estado persistente de Acquisition; si no se puede verificar, se
+  detiene sin reiniciarlo. No hay consultas automáticas en segundo plano.
 
   Diseño y validación: `../../api/docs/diseno-receta-grupo2.md`. Una ejecución real el 29-10-2026,
   sobre una copia aislada y con los detalles de la jornada 9: `../../api/docs/prueba-real-grupo2.md`.
@@ -23,11 +30,11 @@ interfaz muestra sus textos tal cual (`label`, `description`, `actionLabel`):
 
 Lo que una actualización no consulta se conserva tal como está publicado.
 
-El control de Grupo 2 ejecuta lotes sucesivos dentro de una sola solicitud del dashboard. Cada lote conserva los
-límites de adquisición configurados; el control inicia otro únicamente si la publicación anterior avanzó y quedan
-recursos elegibles aplazados por presupuesto. Un rechazo del proveedor, un transporte detenido, ausencia de progreso
-o el máximo de lotes cierra la ejecución de forma segura. Cada lote se publica de forma verificada, por lo que los
-datos ya publicados permanecen disponibles aunque la ejecución posterior se detenga.
+El control de Grupo 2 ejecuta lotes sucesivos dentro de una sola solicitud del dashboard. El presupuesto físico
+restante se comparte entre lotes y no se reinicia al reiniciar servicios. El control inicia otro lote únicamente si
+la publicación anterior avanzó, quedan recursos elegibles aplazados por presupuesto y el informe confirma margen
+seguro. Cada lote se publica de forma verificada, por lo que los datos ya publicados permanecen disponibles aunque
+la ejecución posterior se detenga.
 
 ### Publicación con cobertura parcial
 
@@ -43,9 +50,13 @@ los partidos nuevos con su posible sustitución (`newMatches`, decisión manual)
 
 - Si quedan pendientes, la interfaz dice **«Actualización completada con pendientes»** y los enumera con su motivo.
 - Las revisiones aplazadas se enumeran por partido: se siguen sirviendo sus datos anteriores.
-- Una instalación puede restringir los detalles a unas jornadas (`detailRounds`, prueba real de una jornada): lo que
-  el calendario detecte en otras queda en `restrictedMatchIds`, sin consultar y con sus datos anteriores; un recurso
-  sin datos previos queda pendiente con el motivo `restricted`.
+- Los partidos fuera de la ventana rutinaria se identifican en `restrictedMatchIds` cuando no concurre una excepción;
+  se conservan sus datos anteriores. Los cambios relevantes y recién finalizados no quedan bloqueados por la ventana.
+- `UpdateScope` y `coverage` muestran la ventana aplicada, su jornada de referencia, el máximo de 50 envíos y el uso
+  acumulado de la pulsación. Los datos nuevos, los conservados, el presupuesto aplazado y los errores del proveedor se
+  presentan por separado.
+- Si la generación publicada no cambia y no quedan recursos pendientes ni aplazados, el estado dice **«Revisión
+  completada sin cambios»**. Una generación sin cambios se informa por separado de un paquete reutilizado.
 - Si una actualización posterior falla o se cancela, `lastCoverage` mantiene visibles los pendientes y aplazados de
   la última publicación válida, incluidos los lotes ya publicados durante esa ejecución.
 - Un pendiente nunca es ausencia ni cero.

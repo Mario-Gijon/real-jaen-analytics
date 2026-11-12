@@ -68,6 +68,40 @@ def season(now=NOW, checked=None):
 
 
 class Rounds(unittest.TestCase):
+    def test_rolling_window_uses_the_highest_round_with_a_final_score(self):
+        w=World()
+        for number in (9,10,11):
+            w.add(event(2000+number,number,NOW-86400,'finished',score=(1,0)),fetched=NOW-3600,sections=g.SECTIONS)
+        reference=g.reference_round(w.baseline())
+        self.assertEqual((reference,g.recent_rounds(reference,3)),(11,[9,10,11]))
+        w.add(event(2012,12,NOW-3600,'finished',home=90001,away=90002,score=(0,0)),
+              fetched=NOW-1800,sections=g.SECTIONS)
+        reference=g.reference_round(w.baseline())
+        self.assertEqual((reference,g.recent_rounds(reference,3)),(12,[10,11,12]))
+
+    def test_simultaneous_and_out_of_order_results_do_not_move_window_backwards(self):
+        w=World()
+        for ident,number in ((1,10),(2,11),(3,12),(4,12)):
+            w.add(event(ident,number,NOW-86400,'finished',home=TEAMS[ident],away=TEAMS[ident+4],score=(1,0)),
+                  fetched=NOW-3600,sections=g.SECTIONS)
+        self.assertEqual(g.reference_round(w.baseline()),12)
+        old=event(5,4,NOW-30*86400,'finished',home=TEAMS[9],away=TEAMS[10],score=(2,1))
+        self.assertEqual(g.reference_round(w.baseline(),{5:old}),12)
+
+    def test_no_completed_fixture_has_no_dynamic_window(self):
+        w=World();w.add(event(1,1,NOW+86400),fetched=NOW)
+        self.assertIsNone(g.reference_round(w.baseline()))
+        self.assertEqual(g.recent_rounds(None,3),[])
+
+    def test_invalid_local_observation_timestamp_is_unknown_not_a_scope_failure(self):
+        w=World()
+        w.add(event(2011,11,NOW-86400,'finished',score=(1,0)),fetched=NOW-3600,sections=g.SECTIONS)
+        next(row['record'] for row in w.records if row['record']['key']=='event')['fetched_at']='sin-fecha'
+        baseline=w.baseline()
+        self.assertEqual((g.reference_round(baseline),g.recent_rounds(g.reference_round(baseline),3)),
+                         (11,[9,10,11]))
+        self.assertTrue(g.rounds_to_list(baseline,NOW)[0])
+
     def test_near_rounds_and_far_rotation(self):
         near, far = g.rounds_to_list(season().baseline(), NOW)
         self.assertEqual(near, [9, 10])  # started and not finished; within 7 days
@@ -129,6 +163,32 @@ class Matches(unittest.TestCase):
         self.assertEqual([(p['id'], p['reason'], p['keys']) for p in planned], [(1009, 'finished', g.SECTIONS)])
         self.assertEqual(deferred, {})
 
+    def test_old_postponed_match_that_finishes_is_a_window_exception(self):
+        w=World()
+        old=w.add(event(10,4,NOW-30*86400,'postponed'),fetched=NOW-20*86400)
+        finished=dict(old,status=dict(type='finished'),homeScore=dict(current=1),awayScore=dict(current=0))
+        planned,deferred=g.plan_matches(w.baseline(),{10:finished},NOW,recent_rounds=[10,11,12])
+        self.assertEqual([(item['id'],item['reason']) for item in planned],[(10,'finished')])
+        self.assertEqual(deferred,{})
+
+    def test_old_complete_unchanged_and_recent_not_due_are_not_refreshed(self):
+        w=World()
+        w.add(event(1,2,NOW-30*86400,'finished',score=(1,0)),fetched=NOW-20*86400,sections=g.SECTIONS)
+        w.add(event(2,11,NOW-30*H,'finished',home=90001,away=90002,score=(0,0)),
+              fetched=NOW-H,sections=g.SECTIONS)
+        planned,deferred=g.plan_matches(w.baseline(),{},NOW,recent_rounds=[9,10,11],reasons=('refresh',))
+        self.assertEqual((planned,deferred),([],{}))
+
+    def test_old_incomplete_matches_are_bounded_historical_recovery(self):
+        w=World()
+        for ident,number in ((1,2),(2,3),(3,4),(4,5)):
+            w.add(event(ident,number,NOW-30*86400,'finished',home=TEAMS[ident],away=TEAMS[ident+4],score=(1,0)),
+                  fetched=NOW-20*86400,sections=('lineups',))
+        planned,deferred=g.plan_matches(w.baseline(),{},NOW,recent_rounds=[9,10,11],history_limit=2,
+                                        reasons=('history',))
+        self.assertEqual([(item['id'],item['reason']) for item in planned],[(1,'history'),(2,'history')])
+        self.assertEqual(deferred,{3:'restricted',4:'restricted'})
+
     def test_empty_stored_section_is_pending_and_retried(self):
         w = World()
         w.add(event(30, 5, NOW - 40 * 86400, 'finished', score=(1, 0)), fetched=NOW - 39 * 86400,
@@ -171,13 +231,13 @@ class Matches(unittest.TestCase):
                              dict(far, startTimestamp=far['startTimestamp'] + 3600))
         planned, deferred = g.plan_matches(w.baseline(), listed, NOW)
         self.assertEqual([(p['id'], p['reason'], p['cost']) for p in planned],
-                         [(1, 'pending', 3), (2, 'finished', 4), (3, 'changed', 1), (4, 'refresh', 4)])
+                         [(2, 'finished', 4), (3, 'changed', 1), (1, 'pending', 3), (4, 'refresh', 4)])
         planned, deferred = g.plan_matches(w.baseline(), listed, NOW, budget=7)
-        self.assertEqual([p['id'] for p in planned], [1, 2])
-        self.assertEqual(deferred, {3: 'budget', 4: 'budget'})
+        self.assertEqual([p['id'] for p in planned], [2, 3])
+        self.assertEqual(deferred, {1: 'budget', 4: 'budget'})
         # Next update: what was deferred is still due; pending of the previous one goes first again.
         planned, _ = g.plan_matches(w.baseline(), listed, NOW, budget=7)
-        self.assertEqual(planned[0]['reason'], 'pending')
+        self.assertEqual(planned[0]['reason'], 'finished')
 
     def test_reason_filter_reserves_routine_refresh_for_a_later_pass(self):
         w = World()
@@ -193,7 +253,7 @@ class Matches(unittest.TestCase):
         essential, deferred = g.plan_matches(w.baseline(), listed, NOW, budget=8,
                                              reasons=('pending', 'finished', 'changed'))
         self.assertEqual([(item['id'], item['reason']) for item in essential],
-                         [(1, 'pending'), (2, 'finished'), (3, 'changed')])
+                         [(2, 'finished'), (3, 'changed'), (1, 'pending')])
         self.assertEqual(deferred, {})
         refresh, deferred = g.plan_matches(w.baseline(), listed, NOW, budget=4, reasons=('refresh',))
         self.assertEqual([(item['id'], item['reason']) for item in refresh], [(4, 'refresh')])
@@ -255,20 +315,24 @@ class Reductions(unittest.TestCase):
     """The installation can only lower the production maxima."""
     def test_lowering_is_accepted_and_raising_refused(self):
         from acquisition.service import reductions
-        self.assertEqual(reductions({}), {})
-        self.assertEqual(reductions(dict(ACQ_MAX_ATTEMPTS='60', ACQ_MAX_SENDS='70', ACQ_DETAIL_ROUNDS='9')),
-                         dict(max_attempts=60, max_sends=70, detail_rounds=[9]))
+        self.assertEqual(reductions({}), dict(recent_round_count=3, max_total_sends=50))
+        self.assertEqual(reductions(dict(ACQ_MAX_ATTEMPTS='60', ACQ_MAX_SENDS='70',
+                                        ACQ_UPDATE_RECENT_ROUNDS='2', ACQ_UPDATE_MAX_TOTAL_SENDS='40')),
+                         dict(max_attempts=60, max_sends=70, recent_round_count=2, max_total_sends=40))
         for bad in (dict(ACQ_MAX_ATTEMPTS='117'), dict(ACQ_MAX_SENDS='121'), dict(ACQ_MAX_SENDS='0'),
                     dict(ACQ_MAX_ATTEMPTS='-1'), dict(ACQ_MAX_ATTEMPTS='60.5'), dict(ACQ_MAX_ATTEMPTS='71', ACQ_MAX_SENDS='70'),
-                    dict(ACQ_DETAIL_ROUNDS='39'), dict(ACQ_DETAIL_ROUNDS='9,x'), dict(ACQ_DETAIL_ROUNDS=',')):
+                    dict(ACQ_DETAIL_ROUNDS='10'), dict(ACQ_UPDATE_RECENT_ROUNDS='4'),
+                    dict(ACQ_UPDATE_MAX_TOTAL_SENDS='51')):
             with self.subTest(bad=bad), self.assertRaises(SystemExit):
                 reductions(bad)
 
     def test_both_providers_receive_them(self):
         from acquisition.service import configuration
         provider, extra = configuration(dict(ACQ_PROVIDER='sofascore', ACQ_ENABLE_REAL='1', ACQ_MAX_ATTEMPTS='60',
-                                             ACQ_MAX_SENDS='70', ACQ_DETAIL_ROUNDS='9'))
-        self.assertEqual((provider, extra), ('sofascore', dict(max_attempts=60, max_sends=70, detail_rounds=[9])))
+                                             ACQ_MAX_SENDS='70', ACQ_UPDATE_RECENT_ROUNDS='3',
+                                             ACQ_UPDATE_MAX_TOTAL_SENDS='50'))
+        self.assertEqual((provider, extra), ('sofascore', dict(max_attempts=60, max_sends=70,
+                                                               recent_round_count=3, max_total_sends=50)))
 
 
 @unittest.skipUnless(importlib.util.find_spec('sofascore_scraper'), 'SDK required (acquisition test image)')

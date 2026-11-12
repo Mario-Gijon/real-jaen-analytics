@@ -6,6 +6,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import test_actualizacion as fixtures
 
@@ -39,6 +40,44 @@ class CoverageNaming(unittest.TestCase):
         self.assertNotIn('empty', coverage['comments'])
 
 
+class RollingScope(unittest.TestCase):
+    def test_scope_uses_published_finished_round_and_recalculates_after_generation_change(self):
+        from control import Actualizaciones, GROUP
+        from types import SimpleNamespace
+
+        class Coordinator:
+            generation = SimpleNamespace(id='generation-11')
+
+            def capturar(self):
+                return self.generation
+
+        def baseline(round_number):
+            ident = 16600000 + round_number
+            return dict(events=[dict(id=ident, current=True, status='finished', replaced_by=None,
+                                     home=1, away=2, tournament_id=94191, season_id=97382)],
+                        records=[dict(record=dict(event_id=ident, key='listing',
+                            fetched_at='2026-11-12T12:00:00+00:00', payload=dict(
+                                round=dict(number=round_number), start_utc='2026-09-01T12:00:00Z',
+                                status=dict(type='finished'), quality=dict(observed_at_utc='2026-11-12T12:00:00Z'))))])
+
+        coordinator = Coordinator()
+        updates = object.__new__(Actualizaciones)
+        updates.c = coordinator
+        updates.recipe = GROUP
+        updates.cliente = SimpleNamespace(restriccion=dict(recent_round_count=3, max_total_sends=50))
+        updates._scope_cache = None
+
+        with mock.patch('persistencia.bundle.inventory', return_value=baseline(11)):
+            first = updates._scope()
+        self.assertEqual((first['reference_round'], first['recent_rounds']), (11, [9, 10, 11]))
+        self.assertIn('jornadas 9, 10, 11', first['description'])
+
+        coordinator.generation = SimpleNamespace(id='generation-12')
+        with mock.patch('persistencia.bundle.inventory', return_value=baseline(12)):
+            second = updates._scope()
+        self.assertEqual((second['reference_round'], second['recent_rounds']), (12, [10, 11, 12]))
+
+
 class FakeCliente:
     """What persistencia.adquisicion.Cliente.publicar does, seen from the control: phases, records, coordinator."""
     def __init__(self, fixture):
@@ -65,7 +104,7 @@ class FakeCliente:
         if self.mode != 'ignore-cancel':
             self.gate.set()
 
-    def publicar(self, coord, request_id, recipe, avance):
+    def publicar(self, coord, request_id, recipe, avance, operation_id=None):
         from persistencia.adquisicion import AdquisicionRechazada
         from persistencia.bundle import Rejected
         self.calls.append(request_id)
@@ -106,7 +145,7 @@ class PendingCliente(FakeCliente):
         self.reconciliations = []
         self.reconcile_mode = 'pending'
 
-    def publicar(self, coord, request_id, recipe, avance):
+    def publicar(self, coord, request_id, recipe, avance, operation_id=None):
         self.calls.append(request_id)
         acquisition = str(uuid.uuid5(uuid.NAMESPACE_URL, request_id))
         publication = str(uuid.uuid5(uuid.NAMESPACE_URL, 'coordinator:' + request_id))
@@ -177,13 +216,31 @@ class Control(unittest.TestCase):
         self.addCleanup(lambda: (self.cliente.gate.set(), control.close()))
         return coord, control
 
+    def displayed_status(self, control):
+        # These coordinator tests use a two-team fixture. Add only synthetic team declarations while testing the
+        # read-only dashboard scope; package validation keeps its own strict twenty-team boundary.
+        from persistencia.bundle import api
+        original = api.equipos_con_exportacion
+
+        def teams(data):
+            declared = original(data)
+            identifiers = {item['team_id'] for item in declared}
+            candidate = 10000000
+            while len(identifiers) < 20:
+                identifiers.add(candidate)
+                candidate += 1
+            return [dict(team_id=ident) for ident in sorted(identifiers)]
+
+        with mock.patch.object(api, 'equipos_con_exportacion', side_effect=teams):
+            return control.actual()
+
     def test_acquisition_indisponible_no_crea_trabajo_ni_bloquea_consultas(self):
         from control import Unavailable
         self.cliente.available = False
         coord, control = self.open()
         with coord:
             before = coord.capturar().id
-            current = control.actual()
+            current = self.displayed_status(control)
             self.assertFalse(current['available'])
             self.assertIsNone(current['active_job'])
             with self.assertRaises(Unavailable):
@@ -204,7 +261,7 @@ class Control(unittest.TestCase):
             self.assertNotEqual(coord.capturar().id, before)
             again, reused = control.solicitar(key)
             self.assertEqual((again['id'], reused), (job['id'], True))
-            current = control.actual()
+            current = self.displayed_status(control)
             self.assertEqual(current['last_published']['at'], done['result']['published_at'])
             self.assertEqual((current['scope']['kind'], current['scope']['action']), ('group', 'Actualizar Grupo 2'))
             self.assertEqual(len(self.cliente.calls), 1)
@@ -242,6 +299,7 @@ class Control(unittest.TestCase):
             self.assertEqual((done['status'], done['published']), ('completed', True))
             self.assertEqual(done['reconciliation']['coordinator_id'], client.publication_ids[0])
             self.assertEqual(done['result']['publication_result'], 'no_changes')
+            self.assertIs(done['result']['changed'], False)
             self.assertEqual(client.calls, [job['request_id']])
 
     def test_reinicio_recupera_publicacion_pendiente_sin_lanzar_otro_trabajo(self):
@@ -334,7 +392,7 @@ class Control(unittest.TestCase):
             self.cliente.mode = 'refused'
             failed = wait(control, control.solicitar(str(uuid.uuid4()))[0]['id'])
             self.assertEqual(failed['status'], 'failed')
-            current = control.actual()
+            current = self.displayed_status(control)
             self.assertEqual(current['last_job']['id'], failed['id'])
             self.assertEqual(current['last_published']['at'], done['result']['published_at'])
             self.assertEqual(current['last_published']['coverage']['deferred'], [999])
@@ -427,7 +485,7 @@ class Control(unittest.TestCase):
             phase(control, pending['id'], 'acquiring')
             restarted = Actualizaciones(coord, self.cliente)
             self.assertEqual(restarted.get(pending['id'])['error']['code'], 'INTERRUPTED')
-            self.assertIsNone(restarted.actual()['active_job'])
+            self.assertIsNone(self.displayed_status(restarted)['active_job'])
             self.cliente.mode = 'refused'  # the orphaned worker of the old process must not publish either
             self.cliente.gate.set()
             time.sleep(.3)

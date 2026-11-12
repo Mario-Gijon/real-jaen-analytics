@@ -41,6 +41,10 @@ REFERENCIAS_CODIGO_COMPATIBLES = frozenset({
     '71ede1b31b4c6ca56380d1b702da6b69dc5df8df8a48b9ba264ee04166941404',
     # This release bounds that observation window and reconciles the same durable publication ID; sporting rules stay unchanged.
     '41d545996a790ffbf1116ea906ed48dc37b36570640142833dd8513cb65173b7',
+    # The 4d46649 development image is the deployed source fingerprint. This release changes only Acquisition
+    # package planning/validation in bundle.py and acquisition orchestration; importer, schema and SQLite rules
+    # are unchanged, so the confirmed coordinator metadata can adopt the new fingerprint without a migration.
+    '9dd45fbfafcbe374daac683c1f589caaac8ec0548e473ae5d8e8072a30e32f20',
 })
 
 

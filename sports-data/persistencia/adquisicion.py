@@ -146,10 +146,12 @@ class Cliente:
             raise AdquisicionRechazada('ID invalido')
         return ident
 
-    def solicitar(self, request_id, recipe_id, baseline):
+    def solicitar(self, request_id, recipe_id, baseline, operation_id=None):
         if recipe_id not in RECIPES:
             raise AdquisicionRechazada('Receta invalida')
-        return self._json('POST', data=dict(request_id=self._id(request_id), recipe_id=recipe_id, inventory=baseline),
+        operation_id=operation_id or request_id
+        return self._json('POST', data=dict(request_id=self._id(request_id), operation_id=self._id(operation_id),
+                                            recipe_id=recipe_id, inventory=baseline),
                           timeout=60)
 
     def estado(self, ident):
@@ -190,12 +192,13 @@ class Cliente:
         elif marker.exists():
             raise AdquisicionRechazada('Instalacion de prueba: proveedor real deshabilitado')
 
-    def publicar(self, coordinador, request_id, recipe_id, *, timeout=600, avance=None):
+    def publicar(self, coordinador, request_id, recipe_id, *, timeout=600, avance=None, operation_id=None):
         """`avance(fase, **datos)`, if given, is told each phase (acquiring, verifying, publishing) before it starts;
         an exception it raises stops the request there, before any import if raised before 'publishing'."""
         avance = avance or (lambda fase, **datos: None)
         self._instalacion(coordinador)
         self._id(request_id)
+        operation_id=self._id(operation_id or request_id)
         if recipe_id not in RECIPES:
             raise AdquisicionRechazada('Receta invalida')
         with self.guard:
@@ -209,14 +212,17 @@ class Cliente:
                 baseline = parse((folder / 'inventory.json').read_bytes())
                 if record['recipe_id'] != recipe_id or baseline['sha256'] != record['inventory_sha256']:
                     raise AdquisicionRechazada('Solicitud reutilizada con otra receta o inventario')
+                if record.get('bundle') is None and record.get('operation_id', request_id) != operation_id:
+                    raise AdquisicionRechazada('Solicitud reutilizada en otra operación manual')
             else:
                 baseline = inventory(coordinador.capturar())
                 _immutable(folder / 'inventory.json', encode(baseline))
                 record = dict(request_id=request_id, recipe_id=recipe_id, inventory_sha256=baseline['sha256'],
-                              generation_id=baseline['generation_id'], acquisition_id=None, bundle=None, intentos=[])
+                              generation_id=baseline['generation_id'], operation_id=operation_id,
+                              acquisition_id=None, bundle=None, intentos=[])
                 _record(path, record)
             if record['bundle'] is None:
-                job = self.solicitar(request_id, recipe_id, baseline)
+                job = self.solicitar(request_id, recipe_id, baseline, operation_id)
                 record['acquisition_id'] = job['id']
                 _record(path, record)
                 avance('acquiring', acquisition_id=job['id'], acquisition_state=job['state'])
@@ -237,7 +243,11 @@ class Cliente:
                 # published for the next manual update.
                 try:
                     report = self.informe(record['acquisition_id'])
-                    published['_continuation_allowed'] = isinstance(report, dict) and report.get('stopped') is None
+                    operation=report.get('operation_budget') if isinstance(report,dict) else None
+                    published['_operation_sends_used']=(operation or {}).get('used')
+                    published['_operation_sends_remaining']=(operation or {}).get('remaining')
+                    published['_continuation_allowed']=(isinstance(report, dict) and report.get('stopped') is None
+                                                        and report.get('continuation_allowed') is True)
                 except Exception:
                     published['_continuation_allowed'] = False
             return published
@@ -289,6 +299,9 @@ class Cliente:
                                             test_transport=self.modo == 'prueba')
         if manifest['recipe_id'] != record['recipe_id']:
             raise Rejected('Bundle of another recipe')
+        if (manifest.get('contract') == 'group-v3'
+                and manifest['plan'].get('operation_id') != record.get('operation_id')):
+            raise Rejected('Bundle belongs to another manual operation')
         comprobar_restriccion(manifest, self.restriccion)
         path = folder / 'solicitud.json'
         last = record['intentos'][-1] if record['intentos'] else None
@@ -328,7 +341,8 @@ class Cliente:
         if result['estado'] != 'completed':
             raise AdquisicionRechazada('Publicacion fallida: se conserva la generacion valida')
         published = dict(state='published', generation_id=result['generacion'], job_id=last, acquisition_id=job,
-                         request_id=record['request_id'], bundle=descriptor, attempts=len(record['intentos']))
+                         request_id=record['request_id'], bundle=descriptor, attempts=len(record['intentos']),
+                         changed=result['generacion'] != baseline['generation_id'])
         if manifest['contract'] == 'group-v1':
             # Partial coverage: what is new, what was kept from before and what stays pending (never absence).
             plan = manifest['plan']
@@ -336,12 +350,18 @@ class Cliente:
                                          deferred=sorted(int(i) for i, why in plan['deferred'].items() if why == 'budget'),
                                          restricted=sorted(int(i) for i, why in plan['deferred'].items() if why == 'restricted'),
                                          limits=plan['limits'], detail_rounds=plan['detail_rounds'])
-        elif manifest['contract'] == 'group-v2':
+        elif manifest['contract'] in ('group-v2','group-v3'):
             plan=manifest['plan']
             coverage=dict(coverage_summary(manifest),new_matches=plan['new_matches'],rounds=plan['rounds'],
                           deferred=sorted(int(i) for i,why in plan['deferred'].items() if why=='budget'),
                           restricted=sorted(int(i) for i,why in plan['deferred'].items() if why=='restricted'),
                           limits=plan['limits'],detail_rounds=plan['detail_rounds'])
+            if manifest['contract']=='group-v3':
+                coverage.update(reference_round=plan['reference_round'],recent_rounds=plan['recent_rounds'],
+                                recent_round_count=plan['recent_round_count'],max_total_sends=plan['max_total_sends'],
+                                operation_sends_used=plan['operation_sends_used'],
+                                operation_sends_remaining=plan['max_total_sends']-plan['operation_sends_used'],
+                                physical_sends=plan['physical_sends'])
             persisted=(result.get('resultado') or {}).get('comments_persisted') or {}
             failed_persisted=set(persisted.get('failed_ids',[]))
             if failed_persisted:
@@ -378,12 +398,22 @@ class Cliente:
 
 
 def comprobar_restriccion(manifest, restriccion):
-    """Group bundles must declare this installation's exact limits; the fixed pilot has no group plan."""
+    """Apply current ceilings to new jobs while retaining verification of already sealed legacy bundles."""
     if restriccion is None or manifest.get('contract') == 'pilot-v2':
         return
     plan = manifest.get('plan') or {}
-    if dict(limits=plan.get('limits'), detail_rounds=plan.get('detail_rounds')) != restriccion:
-        raise Rejected('Bundle outside the restriction of this installation')
+    limits=plan.get('limits') or {}
+    allowed=restriccion.get('limits') or {}
+    if manifest.get('contract')=='group-v3':
+        if (plan.get('detail_rounds') is not None
+                or limits.get('attempts',allowed.get('attempts',0)+1)>allowed.get('attempts',0)
+                or limits.get('sends',allowed.get('sends',0)+1)>allowed.get('sends',0)
+                or plan.get('recent_round_count')!=restriccion.get('recent_round_count')
+                or plan.get('max_total_sends')!=restriccion.get('max_total_sends')):
+            raise Rejected('Bundle outside the restriction of this installation')
+    elif (limits.get('attempts',allowed.get('attempts',0)+1)>allowed.get('attempts',0)
+          or limits.get('sends',allowed.get('sends',0)+1)>allowed.get('sends',0)):
+        raise Rejected('Legacy bundle exceeds the limits of this installation')
 
 
 def verificar_sellado(body, descriptor, baseline, context, *, test_transport=False):

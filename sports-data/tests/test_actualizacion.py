@@ -479,6 +479,19 @@ class Actualizacion(Base):
             self.assertEqual(coordinator._meta()['codigo'], actualizacion.codigo())
         self.assertEqual(sqlite.describir(self.base), antes)
 
+    def test_adopta_huella_del_release_desplegado_sin_cambiar_datos_deportivos(self):
+        anterior = '9dd45fbfafcbe374daac683c1f589caaac8ec0548e473ae5d8e8072a30e32f20'
+        antes = sqlite.describir(self.base)
+        with self.abrir() as coordinator:
+            metadata = coordinator._meta()
+            metadata['codigo'] = anterior
+            with sqlite3.connect(coordinator.journal) as journal:
+                journal.execute('UPDATE confirmado SET detalle=? WHERE id=1', (json.dumps(metadata),))
+
+        with self.abrir() as coordinator:
+            self.assertEqual(coordinator._meta()['codigo'], actualizacion.codigo())
+        self.assertEqual(sqlite.describir(self.base), antes)
+
     def test_enospc_copia_y_journal_antes_de_confirmar(self):
         original = sqlite.copia_consistente
         def sin_espacio(origen, destino):

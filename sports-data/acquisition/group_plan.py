@@ -6,14 +6,20 @@ Design and decisions: docs/diseno-receta-grupo2.md. In short:
 1. Rounds to list. Near rounds (a current match not finished whose start has passed or is within 7 days, a
    postponed match, or a finished match still inside the 72 h window) and, in rotation, the FAR_ROUNDS_PER_RUN
    other rounds with matches still to play whose calendar was checked longest ago (far calendar changes).
-2. Matches to consult, in priority order, within the budget:
-   pending    finished in the inventory with a section missing (an earlier update left it pending)
-   finished   the listing shows finished and the inventory does not have it finished (whatever its age: a result
-              recovered outside the 72 h window too), postponed matches recovered included
-   changed    the listing differs from the inventory (identity, status, score, start): a correction or a far
-              calendar change; a match not finished only needs its event
-   refresh    finished, observed before 72 h after kick-off and at least 6 h ago (the SDK's refresh_due rule)
-   Whatever does not fit stays pending with reason "budget" for the next update.
+2. Routine detailed review is the contiguous window ending at the highest current round with a final score in the
+   published inventory or this update's validated listings (at most the last three rounds).
+3. Matches to consult, in priority order, within the budget:
+   finished   the listing shows newly finished, including a postponed match from an old round
+   changed    the listing differs from the inventory (status, score, start): a correction or calendar change
+   pending    essential sections missing from an earlier update
+   refresh    complete, finished matches whose SDK 72 h / 6 h refresh is due, only inside the routine window
+   comments   pending narrative comments for finished current matches
+   history    at most three unique old incomplete matches per manual operation
+   Whatever does not fit stays pending with reason "budget" for the next manual update.
+
+One manual operation has one durable physical-send counter shared across its batches and service restarts. It includes
+curl calls, browser API fetches and every SofaScore page request made for a challenge. Six sends remain reserved to
+keep attempts and browser traffic conservative; the transport ledger is the hard ceiling.
 
 An empty answer, a 404 or an error never means "no data" here: the section stays pending, never zero.
 """
@@ -29,24 +35,30 @@ WINDOW_S = 72 * 3600
 MIN_INTERVAL_S = 6 * 3600
 UPCOMING_S = 7 * 86400
 FAR_ROUNDS_PER_RUN = 6
-# Physical sends of one update and the logical attempts planned inside them (the rest absorbs retries and the
-# browser's own requests: the curl that meets the challenge and the bridge's check).
+# Manual policy: routine queries use the last rounds that have actually started producing final scores.
+DEFAULT_RECENT_ROUNDS = 3
+MAX_RECENT_ROUNDS = 3
+MAX_HISTORICAL_RECOVERIES = 3
+# Physical sends include curl, browser fetches and provider-page requests used by a challenge.
 MAX_SENDS = 120          # physical sends of the adapter (curl and the browser's fetch()), production maximum
 MAX_ATTEMPTS = MAX_SENDS - 4  # logical attempts of the transport (each GET of a route, retries included)
 PLANNED_ATTEMPTS = 100   # attempts the plan may schedule (listings included)
 SECONDS = 900
-# Worst case of physical sends of one logical attempt (curl, browser fetch, retry and the bridge's own check): below
-# this headroom the transport schedules no more attempts and the rest stays pending as "budget".
-SEND_RESERVE = 4
+# Conservative headroom for a challenge, its browser pages and an API fetch. The adapter remains the hard cap.
+SEND_RESERVE = 6
 FINISHED = 'finished'
 OPEN_LATER = ('postponed', 'suspended', 'interrupted', 'delayed')
-PRIORITY = ('pending', 'finished', 'changed', 'refresh')
+PRIORITY = ('finished', 'changed', 'pending', 'refresh', 'history')
 
 
 def instant(value):
     if value is None:
         return None
-    return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        # Invalid legacy observation times are unknown for scheduling, not a reason to fail the whole scope read.
+        return None
 
 
 def matches(baseline):
@@ -69,7 +81,7 @@ def matches(baseline):
             # Last calendar check: the event's observation or a later listing of its round (far rounds are listed
             # without asking their events, so the rotation must see that listing to move on).
             seen = instant(((listing or {}).get('payload') or {}).get('quality', {}).get('observed_at_utc')) if listing else None
-            checked = max(filter(None, (instant(event['fetched_at']), seen)))
+            checked = max(filter(None, (instant(event['fetched_at']), seen)), default=None)
         else:
             payload = listing['payload'] if listing else {}
             number = (payload.get('round') or {}).get('number')
@@ -90,6 +102,30 @@ def refresh_due(match, now):
     if match['status'] != FINISHED or match['event_fetched'] is None or match['start'] is None:
         return False
     return match['event_fetched'] - match['start'] < WINDOW_S and match['event_fetched'] <= now - MIN_INTERVAL_S
+
+
+def reference_round(baseline, listed=None):
+    """Highest current round with a finished match in local evidence or this update's listing."""
+    played = []
+    for match in matches(baseline).values():
+        if match['current'] and match['status'] == FINISHED and type(match['round']) is int and match['round'] in ROUNDS:
+            played.append(match['round'])
+    for row in (listed or {}).values():
+        number = round_of(row)
+        if ((row.get('status') or {}).get('type') == FINISHED and type(number) is int and number in ROUNDS):
+            played.append(number)
+    return max(played) if played else None
+
+
+def recent_rounds(reference, count=DEFAULT_RECENT_ROUNDS):
+    """The contiguous round-number window; no reference means no fixture has been completed yet."""
+    if type(count) is not int or not 1 <= count <= MAX_RECENT_ROUNDS:
+        raise ValueError('Recent round count is outside the approved policy')
+    if reference is None:
+        return []
+    if type(reference) is not int or reference not in ROUNDS:
+        raise ValueError('Invalid reference round')
+    return list(range(max(1, reference - count + 1), reference + 1))
 
 
 def rounds_to_list(baseline, now, *, far_per_run=FAR_ROUNDS_PER_RUN, listed_at=None):
@@ -153,13 +189,14 @@ def round_of(match_or_row):
     return (match_or_row.get('roundInfo') or {}).get('round')
 
 
-def plan_matches(baseline, listed, now, *, budget=PLANNED_ATTEMPTS, detail_rounds=None, reasons=None):
+def plan_matches(baseline, listed, now, *, budget=PLANNED_ATTEMPTS, detail_rounds=None, recent_rounds=None,
+                 history_limit=MAX_HISTORICAL_RECOVERIES, history_ids=(), reasons=None):
     """Matches to consult. `listed`: {match id: row of a round page just listed}. Returns (planned, deferred):
     planned is a list of dict(id, reason, keys, cost) in consultation order; deferred the ones left for the next
     update ({id: 'budget' | 'restricted'}). keys: the sections to ask besides the event (empty: event only).
-    detail_rounds: an explicit restriction of this installation; a candidate of another round (or of an unknown one)
-    is never consulted, only deferred as 'restricted', whatever the date. `reasons` lets the caller schedule essential
-    work separately from routine refreshes while preserving this function's priority and due-date rules."""
+    detail_rounds: legacy restriction for already sealed group-v1/v2 jobs. recent_rounds is the rolling routine window.
+    Newly finished matches and detected calendar changes remain exceptions; older incomplete resources are considered
+    as bounded history work. `reasons` lets the recipe preserve stages while sharing this planner."""
     known = matches(baseline)
     candidates = []
     for ident, m in known.items():
@@ -168,15 +205,17 @@ def plan_matches(baseline, listed, now, *, budget=PLANNED_ATTEMPTS, detail_round
         row = listed.get(ident)
         listed_status = ((row or {}).get('status') or {}).get('type')
         finished_now = listed_status == FINISHED or (row is None and m['status'] == FINISHED)
-        if m['status'] == FINISHED and m['sections'] != set(SECTIONS):
-            missing = tuple(k for k in SECTIONS if k not in m['sections'])
-            candidates.append(('pending', m['start'] or 0, ident, missing))
-        elif row is not None and listed_status == FINISHED and m['status'] != FINISHED:
+        number = round_of(m)
+        if row is not None and listed_status == FINISHED and m['status'] != FINISHED:
             candidates.append(('finished', m['start'] or 0, ident, SECTIONS))
         elif row is not None and m['traits'] is not None and rasgos_evento(row) != m['traits']:
             candidates.append(('changed', m['start'] or 0, ident, SECTIONS if finished_now else ()))
         elif row is not None and m['traits'] is None:
             candidates.append(('changed', m['start'] or 0, ident, SECTIONS if finished_now else ()))
+        elif m['status'] == FINISHED and m['sections'] != set(SECTIONS):
+            missing = tuple(k for k in SECTIONS if k not in m['sections'])
+            candidates.append(('pending' if recent_rounds is None or number in recent_rounds else 'history',
+                               m['start'] or 0, ident, missing))
         elif refresh_due(m, now):
             candidates.append(('refresh', m['start'] or 0, ident, SECTIONS))
     # New provider IDs are reported separately by new_matches(). They are not eligible for detail requests or
@@ -187,18 +226,29 @@ def plan_matches(baseline, listed, now, *, budget=PLANNED_ATTEMPTS, detail_round
             raise ValueError('Unknown planning reason')
         candidates = [candidate for candidate in candidates if candidate[0] in selected_reasons]
     candidates.sort(key=lambda c: (PRIORITY.index(c[0]), c[1], c[2]))
-    planned, deferred, used = [], {}, 0
+    planned, deferred, used, histories = [], {}, 0, 0
+    history_ids = set(history_ids)
     for reason, _start, ident, keys in candidates:
         if detail_rounds is not None:
             number = round_of(known[ident]) if ident in known else round_of(listed[ident])
             if number not in detail_rounds:
                 deferred[ident] = 'restricted'
                 continue
+        number = round_of(known[ident]) if ident in known else round_of(listed[ident])
+        if reason == 'refresh' and recent_rounds is not None and number not in recent_rounds:
+            deferred[ident] = 'restricted'
+            continue
+        if (reason == 'history' and ident not in history_ids
+                and (type(history_limit) is not int or history_limit < 0 or histories >= history_limit)):
+            deferred[ident] = 'restricted'
+            continue
         cost = 1 + len(keys)
         if used + cost > budget:
             deferred[ident] = 'budget'
             continue
         used += cost
+        if reason == 'history' and ident not in history_ids:
+            histories += 1
         planned.append(dict(id=ident, reason=reason, keys=tuple(keys), cost=cost))
     return planned, deferred
 
