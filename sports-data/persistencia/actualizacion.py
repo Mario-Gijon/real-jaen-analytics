@@ -39,6 +39,8 @@ REFERENCIAS_CODIGO_COMPATIBLES = frozenset({
     '376f2cdc92f351ab9fa7056eb584a0e3813f1cf61fe0d9a6b362a996ce7cc7fe',
     # This release keeps waiting for the same durable publication after one coordinator polling window expires.
     '71ede1b31b4c6ca56380d1b702da6b69dc5df8df8a48b9ba264ee04166941404',
+    # This release bounds that observation window and reconciles the same durable publication ID; sporting rules stay unchanged.
+    '41d545996a790ffbf1116ea906ed48dc37b36570640142833dd8513cb65173b7',
 })
 
 

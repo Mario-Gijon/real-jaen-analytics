@@ -25,6 +25,7 @@ from .bundle import MAX_WIRE, Rejected, coverage_summary, encode, inventory, par
 
 RECIPES = {'sofascore-pilot-16599363-v1', 'sofascore-group2-2627-v1'}
 MAX_STATUS = 1024 * 1024
+PUBLICATION_OBSERVATION_SECONDS = 300
 TEST_MARKER = '.acquisition-test-installation'
 TEST_CONTENT = 'isolated-acquisition-test\n'
 # Outside persistencia/: approving a producer must not change the rule fingerprint the coordinator requires.
@@ -72,19 +73,15 @@ def _record(path, value):
     _sync(path.parent)
 
 
-def _esperar_publicacion(coordinador, ident):
-    """Wait for the durable publication to reach a terminal state.
-
-    The coordinator's timeout bounds one polling window; it does not cancel its worker. Retrying that window avoids
-    reporting a failed acquisition while the coordinator can still publish the same generation in the background.
-    """
-    while True:
-        try:
-            return coordinador.esperar(ident, timeout=300)
-        except TimeoutError as error:
-            # Only the coordinator's own timeout (which carries the awaited ID) is a polling-window expiry.
-            if error.args != (ident,):
-                raise
+def _esperar_publicacion(coordinador, ident, timeout=PUBLICATION_OBSERVATION_SECONDS):
+    """Observe one bounded window; expiry leaves the durable coordinator job pending."""
+    try:
+        return coordinador.esperar(ident, timeout=timeout)
+    except TimeoutError as error:
+        # Only this exact coordinator timeout means the worker may still publish. Other timeouts remain real errors.
+        if error.args != (ident,):
+            raise
+        return dict(estado='pending', identificador=ident)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -245,6 +242,44 @@ class Cliente:
                     published['_continuation_allowed'] = False
             return published
 
+    def reconciliar_publicacion(self, coordinador, request_id, recipe_id, coordinator_id):
+        """Reconcile one stored bundle and publication ID without asking Acquisition or the provider for work."""
+        request_id, coordinator_id = self._id(request_id), self._id(coordinator_id)
+        if recipe_id not in RECIPES:
+            raise AdquisicionRechazada('Receta invalida')
+        root = coordinador.directorio / 'adquisiciones'
+        folder = root / request_id
+        paths = (folder / 'solicitud.json', folder / 'inventory.json', folder / 'bundle.json')
+        if (folder.is_symlink() or not folder.resolve().is_relative_to(root.resolve())
+                or any(path.is_symlink() or not path.is_file() for path in paths)):
+            raise Rejected('Incomplete or unsafe publication receipt')
+        record = parse(paths[0].read_bytes())
+        baseline = parse(paths[1].read_bytes())
+        if (record.get('request_id') != request_id or record.get('recipe_id') != recipe_id
+                or record.get('bundle') is None or not record.get('acquisition_id')
+                or not record.get('intentos') or record['intentos'][-1] != coordinator_id):
+            raise Rejected('Publication receipt does not match the pending job')
+        current = coordinador.capturar()
+        try:
+            state = coordinador.estado(coordinator_id)
+        except KeyError:
+            state = None
+        if state is None:
+            # The recorded ID was durable before submit. Resubmitting that same ID is safe only while its base
+            # generation is still current; the coordinator deduplicates an already accepted ID.
+            if current.id != baseline.get('generation_id'):
+                raise Rejected('Missing publication ID after the base generation changed')
+            return self.recibir(coordinador, folder, record, baseline)
+        if state['estado'] in ('queued', 'running'):
+            return dict(state='pending', job_id=coordinator_id, request_id=request_id,
+                        acquisition_id=record['acquisition_id'], bundle=record['bundle'])
+        if state['estado'] != 'completed':
+            return dict(state='failed', job_id=coordinator_id, request_id=request_id,
+                        acquisition_id=record['acquisition_id'])
+        if state.get('generacion') != current.id:
+            raise Rejected('Completed publication is not the confirmed current generation')
+        return self.recibir(coordinador, folder, record, baseline)
+
     def recibir(self, coordinador, folder, record, baseline, avance=None):
         """Verify the private copy and hand it to the coordinator. Records each coordinator attempt before it starts."""
         from .actualizacion import CoordinacionRechazada
@@ -287,6 +322,9 @@ class Cliente:
             except CoordinacionRechazada as e:
                 raise Rejected(f'Coordinador: {e}') from None
         result = _esperar_publicacion(coordinador, last)
+        if result['estado'] == 'pending':
+            return dict(state='pending', job_id=last, acquisition_id=job, request_id=record['request_id'],
+                        bundle=descriptor)
         if result['estado'] != 'completed':
             raise AdquisicionRechazada('Publicacion fallida: se conserva la generacion valida')
         published = dict(state='published', generation_id=result['generacion'], job_id=last, acquisition_id=job,

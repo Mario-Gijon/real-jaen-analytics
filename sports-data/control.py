@@ -39,6 +39,8 @@ RECIPE = GROUP
 ACTIVE = ('queued', 'running')
 CANCELLABLE_PHASES = ('queued', 'acquiring')
 POLL_SECONDS = 3
+PUBLICATION_RECONCILE_SECONDS = 5
+PUBLICATION_ATTENTION_SECONDS = 900
 # A single click is finite even if an invalid coverage report keeps claiming that work remains.
 MAX_GROUP_BATCHES = 64
 # Safe public messages per error code; internal reasons stay in the backend log, keyed by job id.
@@ -96,10 +98,15 @@ class Actualizaciones:
         self.root.mkdir(exist_ok=True)
         self.guard = threading.RLock()
         self.threads = []
+        self.live_jobs = set()
+        self.stop_reconciler = threading.Event()
         with closing(self.db()) as c, c:
             c.execute('CREATE TABLE IF NOT EXISTS job(id TEXT PRIMARY KEY, idem TEXT UNIQUE, state TEXT, data TEXT)')
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active ON job((1)) WHERE state IN ('queued','running')")
         self._reconcile()
+        self.reconciler_thread = threading.Thread(target=self._reconcile_loop, daemon=True,
+                                                  name='publication-reconciler')
+        self.reconciler_thread.start()
 
     def db(self):
         c = sqlite3.connect(self.root / 'jobs.sqlite', timeout=10)
@@ -122,20 +129,178 @@ class Actualizaciones:
 
     def _attempt(self, item):
         """Coordinator state of the request's last import attempt (the coordinator's journal is the authority)."""
-        path = self.c.directorio / 'adquisiciones' / item['request_id'] / 'solicitud.json'
-        if not path.exists():
-            return None
-        intentos = json.loads(path.read_bytes())['intentos']
-        if not intentos:
+        ident = self._publication_id(item)
+        if ident is None:
             return None
         try:
-            return self.c.estado(intentos[-1])
+            return self.c.estado(ident)
         except KeyError:
             return None
 
+    def _publication_id(self, item):
+        ident = item.get('publication_pending_id')
+        if ident:
+            return ident
+        path = self.c.directorio / 'adquisiciones' / item['request_id'] / 'solicitud.json'
+        if not path.is_file() or path.is_symlink():
+            return None
+        try:
+            attempts = json.loads(path.read_bytes()).get('intentos') or []
+            return attempts[-1] if attempts else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _reconcile_publication(self, item, *, coordinator_id=None):
+        try:
+            return self._reconcile_publication_once(item, coordinator_id=coordinator_id)
+        except Exception as error:
+            ident = coordinator_id or self._publication_id(item)
+            # A mismatch or unreadable confirmation is an unknown outcome, not grounds to release the active lock.
+            with self.guard:
+                current = self.get(item['id'])
+                current.update(status='running', phase='publishing',
+                               publication_pending_id=ident,
+                               reconciliation_error=dict(type=type(error).__name__, message=str(error)[:300]),
+                               reconciliation_checked_at=now())
+                self._annotate_pending_age(current)
+                current['publication_attention_required'] = True
+                self.save(current)
+            print(f'[control] publication reconciliation {item["id"]}: {type(error).__name__}: {str(error)[:300]}',
+                  file=sys.stderr, flush=True)
+            return False
+
+    @staticmethod
+    def _annotate_pending_age(item):
+        started = item.get('publication_pending_since')
+        if not started:
+            return
+        try:
+            age = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(started)).total_seconds()))
+        except (TypeError, ValueError):
+            return
+        item['publication_age_seconds'] = age
+        item['publication_attention_required'] = age >= PUBLICATION_ATTENTION_SECONDS
+
+    def _reconcile_publication_once(self, item, *, coordinator_id=None):
+        """Check and verify one durable publication; this path never starts Acquisition or a new batch."""
+        ident = coordinator_id or self._publication_id(item)
+        if ident is None:
+            return False
+        try:
+            result = self.cliente.reconciliar_publicacion(self.c, item['request_id'], self.recipe, ident)
+        except Exception as error:
+            # An uncertain verification is not evidence of failure. Retain the active lock and retry this same ID.
+            with self.guard:
+                current = self.get(item['id'])
+                current.update(status='running', phase='publishing',
+                               publication_pending_id=ident,
+                               reconciliation_error=dict(type=type(error).__name__, message=str(error)[:300]),
+                               reconciliation_checked_at=now())
+                self._annotate_pending_age(current)
+                current['publication_attention_required'] = True
+                self.save(current)
+            print(f'[control] publication reconciliation {item["id"]}: {type(error).__name__}: {str(error)[:300]}',
+                  file=sys.stderr, flush=True)
+            return False
+
+        if result.get('job_id') != ident:
+            raise ValueError('Publication reconciliation returned a different coordinator ID')
+        if result.get('state') == 'pending':
+            with self.guard:
+                current = self.get(item['id'])
+                current.update(status='running', phase='publishing',
+                               publication_pending_id=ident,
+                               reconciliation_checked_at=now())
+                self._annotate_pending_age(current)
+                current.pop('reconciliation_error', None)
+                self.save(current)
+            return False
+        if result.get('state') == 'failed':
+            with self.guard:
+                current = self.get(item['id'])
+                self._fail(current, 'PUBLICATION_FAILED', resumable=True)
+                current['publication_pending_id'] = ident
+                current['reconciliation'] = dict(coordinator_id=ident, coordinator_state='failed',
+                                                  reconciled_at=now())
+                self.save(current)
+            return True
+        if result.get('state') != 'published' or result.get('job_id') != ident:
+            raise ValueError('Publication reconciliation returned an inconsistent result')
+
+        confirmed = self.c.estado(ident)
+        current_generation = self.c.capturar().id
+        generation = result.get('generation_id')
+        if (confirmed.get('estado') != 'completed' or confirmed.get('generacion') != generation
+                or current_generation != generation):
+            raise ValueError('Publication is not the confirmed current generation')
+
+        coverage = result.get('coverage')
+        with self.guard:
+            current = self.get(item['id'])
+            progress = current.get('batch_progress')
+            if self.recipe == GROUP and coverage is not None:
+                progress = self._merge_batch(progress, coverage, result.get('_batch_resources'))
+                coverage = self._combine_coverage(coverage, progress)
+                coverage = self._named(coverage)
+                current['batch_progress'] = progress
+            import_result = confirmed.get('resultado') or {}
+            run_status, published_at = self._publication_run(import_result)
+            outcome = 'no_changes' if run_status == 'no_changes' else None
+            current.update(status='completed', phase='finished', published=True, finished_at=now(), resumable=False,
+                           batch_count=max(current.get('batch_count', 0), current.get('pending_batch_sequence', 1)),
+                           continuation_pending=False,
+                           result=dict(published_at=published_at, generation=generation,
+                                       reused_bundle=bool(current.get('reused_bundle', False)), coverage=coverage,
+                                       **({'publication_result': outcome} if outcome else {})),
+                           reconciliation=dict(coordinator_id=ident, coordinator_state='completed',
+                                               reconciled_at=now(), generation=generation))
+            current.pop('publication_pending_id', None)
+            current.pop('pending_batch_sequence', None)
+            current.pop('reconciliation_error', None)
+            current.pop('publication_age_seconds', None)
+            current.pop('publication_attention_required', None)
+            self.save(current)
+        return True
+
+    def _publication_run(self, result):
+        """Return the coordinator import run's terminal status and timestamp when available."""
+        run_id = result.get('run')
+        if isinstance(run_id, int):
+            try:
+                with closing(sqlite3.connect(self.c.base.as_uri() + '?mode=ro', uri=True, timeout=2)) as c:
+                    row = c.execute('SELECT status, finished_at FROM import_run WHERE id=?', (run_id,)).fetchone()
+                if row and row[0]:
+                    return row[0], row[1] or now()
+            except (OSError, sqlite3.Error):
+                pass
+        return None, now()
+
+    def _reconcile_loop(self):
+        while not self.stop_reconciler.wait(PUBLICATION_RECONCILE_SECONDS):
+            for item in self._rows("WHERE state='running'"):
+                if item.get('phase') != 'publishing':
+                    continue
+                with self.guard:
+                    if item['id'] in self.live_jobs:
+                        continue
+                self._reconcile_publication(item)
+
     def _reconcile(self):
-        """A job left active by a restart is never resumed: completed if its publication was confirmed, else interrupted."""
+        """Reconcile durable publication IDs; only work before publication is treated as interrupted on restart."""
         for item in self._rows("WHERE state IN ('queued','running')"):
+            if item.get('phase') == 'publishing' or item.get('publication_pending_id'):
+                publication_id = self._publication_id(item)
+                if publication_id is not None:
+                    self._reconcile_publication(item, coordinator_id=publication_id)
+                else:
+                    # Publishing phase without its receipt is uncertain; do not free the one-active-job lock.
+                    item.update(status='running', phase='publishing',
+                                reconciliation_error=dict(type='MissingPublicationId',
+                                                          message='No durable coordinator ID in request receipt'),
+                                reconciliation_checked_at=now(), publication_attention_required=True)
+                    self._annotate_pending_age(item)
+                    self.save(item)
+                continue
             attempt = self._attempt(item)
             if item.get('batch_mode'):
                 if (not item.get('continuation_pending') and attempt is not None
@@ -193,6 +358,8 @@ class Actualizaciones:
             with closing(self.db()) as c, c:
                 c.execute('INSERT INTO job VALUES(?,?,?,?)', (item['id'], idem, item['status'], json.dumps(item)))
         worker = threading.Thread(target=self.run, args=(item['id'],), daemon=True)
+        with self.guard:
+            self.live_jobs.add(item['id'])
         self.threads.append(worker)
         worker.start()
         return item, False
@@ -245,6 +412,19 @@ class Actualizaciones:
                 if item['cancel_requested']:
                     raise Cancelled()
                 result = self.cliente.publicar(self.c, item['request_id'], self.recipe, avance=avance)
+                if result.get('state') == 'pending':
+                    coordinator_id = result.get('job_id')
+                    if not coordinator_id or result.get('request_id') != item['request_id']:
+                        raise ValueError('Pending publication is missing its durable identifiers')
+                    with self.guard:
+                        item = self.get(ident)
+                        item.update(status='running', phase='publishing',
+                                    publication_pending_id=coordinator_id,
+                                    pending_batch_sequence=item.get('batch_count', 0) + 1,
+                                    publication_pending_since=now(), reconciliation_checked_at=now())
+                        self._annotate_pending_age(item)
+                        self.save(item)
+                    return
                 batch_count += 1
                 coverage = result.get('coverage')
                 if self.recipe == GROUP and coverage is not None:
@@ -314,6 +494,9 @@ class Actualizaciones:
                 item = self.get(ident)
                 self._fail(item, code, resumable=resumable, status=status)
                 self.save(item)
+        finally:
+            with self.guard:
+                self.live_jobs.discard(ident)
 
     def _named(self, coverage):
         """The coverage with the names of the matches it mentions, from the generation just published (the interface
@@ -426,6 +609,14 @@ class Actualizaciones:
                     cancellable=item['status'] in ACTIVE and item['phase'] in CANCELLABLE_PHASES and not item['cancel_requested'],
                     cancel_requested=item['cancel_requested'], published=item['published'],
                     requested_at=item['requested_at'], finished_at=item['finished_at'], poll_after_seconds=POLL_SECONDS,
+                    publication_pending=(item['status'] == 'running' and item['phase'] == 'publishing'),
+                    publication_pending_since=item.get('publication_pending_since'),
+                    publication_age_seconds=item.get('publication_age_seconds'),
+                    publication_attention_required=item.get('publication_attention_required', False),
+                    publication_reconciliation_error=(
+                        item['reconciliation_error'].get('type')
+                        if isinstance(item.get('reconciliation_error'), dict)
+                        else item.get('reconciliation_error')),
                     error=item['error'],
                     result=None if item['result'] is None else dict(published_at=item['result']['published_at'],
                                                                      reused_bundle=item['result']['reused_bundle'],
@@ -444,5 +635,8 @@ class Actualizaciones:
                                                                     coverage=latest['result'].get('coverage')))
 
     def close(self, timeout=5):
+        self.stop_reconciler.set()
+        if hasattr(self, 'reconciler_thread'):
+            self.reconciler_thread.join(timeout)
         for thread in self.threads:
             thread.join(timeout)

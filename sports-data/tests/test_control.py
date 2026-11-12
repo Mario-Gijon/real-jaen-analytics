@@ -51,6 +51,15 @@ class FakeCliente:
     def disponible(self, _coordinator):
         return self.available
 
+    def reconciliar_publicacion(self, coord, request_id, recipe, publication):
+        state = coord.estado(publication)
+        if state['estado'] in ('queued', 'running'):
+            return dict(state='pending', job_id=publication, request_id=request_id)
+        if state['estado'] != 'completed':
+            return dict(state='failed', job_id=publication, request_id=request_id)
+        return dict(state='published', job_id=publication, request_id=request_id,
+                    generation_id=state['generacion'], coverage=self.coverage)
+
     def cancelar(self, acquisition):
         self.cancelled.append(acquisition)
         if self.mode != 'ignore-cancel':
@@ -89,6 +98,42 @@ class FakeCliente:
         return value
 
 
+class PendingCliente(FakeCliente):
+    """Publication was submitted durably; reconciliation can remain pending and later observe that same ID."""
+    def __init__(self, fixture):
+        super().__init__(fixture)
+        self.publication_ids = []
+        self.reconciliations = []
+        self.reconcile_mode = 'pending'
+
+    def publicar(self, coord, request_id, recipe, avance):
+        self.calls.append(request_id)
+        acquisition = str(uuid.uuid5(uuid.NAMESPACE_URL, request_id))
+        publication = str(uuid.uuid5(uuid.NAMESPACE_URL, 'coordinator:' + request_id))
+        self.publication_ids.append(publication)
+        avance('acquiring', acquisition_id=acquisition, acquisition_state='completed')
+        avance('verifying')
+        avance('publishing')
+        folder = coord.directorio / 'adquisiciones' / request_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'solicitud.json').write_text(json.dumps(dict(intentos=[publication])))
+        coord.solicitar(exportaciones=[(self.fixture.fixture, 2841)], identificador=publication)
+        return dict(state='pending', job_id=publication, acquisition_id=acquisition, request_id=request_id,
+                    bundle=dict(bytes=1, sha256='synthetic'))
+
+    def reconciliar_publicacion(self, coord, request_id, recipe, publication):
+        self.reconciliations.append(publication)
+        if self.reconcile_mode == 'pending':
+            return dict(state='pending', job_id=publication, request_id=request_id)
+        state = coord.estado(publication)
+        if state['estado'] in ('queued', 'running'):
+            return dict(state='pending', job_id=publication, request_id=request_id)
+        if state['estado'] != 'completed':
+            return dict(state='failed', job_id=publication, request_id=request_id)
+        return dict(state='published', job_id=publication, request_id=request_id,
+                    generation_id=state['generacion'], coverage=None)
+
+
 def wait(control, ident, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -105,6 +150,16 @@ def phase(control, ident, value, timeout=10):
         if time.monotonic() > deadline:
             raise TimeoutError(value)
         time.sleep(.01)
+
+
+def pending(control, ident, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        item = control.get(ident)
+        if item.get('publication_pending_id'):
+            return item
+        time.sleep(.01)
+    raise TimeoutError('publication_pending_id')
 
 
 @unittest.skipUnless(fixtures.CON_SQL, 'SQL dependencies required')
@@ -153,6 +208,62 @@ class Control(unittest.TestCase):
             self.assertEqual(current['last_published']['at'], done['result']['published_at'])
             self.assertEqual((current['scope']['kind'], current['scope']['action']), ('group', 'Actualizar Grupo 2'))
             self.assertEqual(len(self.cliente.calls), 1)
+
+    def test_coordinador_pendiente_no_falla_y_luego_completa_sin_republicar(self):
+        from control import Actualizaciones
+        from unittest import mock
+
+        client = PendingCliente(self.fixture)
+        coord = self.fixture.abrir()
+        with coord, mock.patch('control.PUBLICATION_RECONCILE_SECONDS', .01):
+            seed = str(uuid.uuid4())
+            coord.solicitar(exportaciones=[(self.fixture.fixture, 2841)], identificador=seed)
+            self.assertEqual(coord.esperar(seed, timeout=30)['estado'], 'completed')
+            control = Actualizaciones(coord, client)
+            self.addCleanup(lambda: (client.gate.set(), control.close()))
+            job, _ = control.solicitar(str(uuid.uuid4()))
+            pending(control, job['id'])
+            coord.esperar(client.publication_ids[0], timeout=30)
+            # Keep observing the same durable publication while its coordinator remains reported as pending.
+            deadline = time.monotonic() + .2
+            while time.monotonic() < deadline and len(client.reconciliations) < 2:
+                time.sleep(.01)
+            still_pending = control.get(job['id'])
+            self.assertEqual((still_pending['status'], still_pending['phase'], still_pending['published']),
+                             ('running', 'publishing', False))
+            self.assertTrue(control.public(still_pending)['publication_pending'])
+            self.assertEqual(client.calls, [job['request_id']])
+            self.assertEqual(set(client.reconciliations), {client.publication_ids[0]})
+
+            client.reconcile_mode = 'coordinator'
+            recovered = control._reconcile_publication(control.get(job['id']))
+            self.assertTrue(recovered)
+            done = control.get(job['id'])
+            self.assertEqual((done['status'], done['published']), ('completed', True))
+            self.assertEqual(done['reconciliation']['coordinator_id'], client.publication_ids[0])
+            self.assertEqual(done['result']['publication_result'], 'no_changes')
+            self.assertEqual(client.calls, [job['request_id']])
+
+    def test_reinicio_recupera_publicacion_pendiente_sin_lanzar_otro_trabajo(self):
+        from control import Actualizaciones
+
+        client = PendingCliente(self.fixture)
+        coord = self.fixture.abrir()
+        with coord:
+            control = Actualizaciones(coord, client)
+            job, _ = control.solicitar(str(uuid.uuid4()))
+            pending(control, job['id'])
+            coord.esperar(client.publication_ids[0], timeout=30)
+            control.close()
+            client.reconcile_mode = 'coordinator'
+
+            restarted = Actualizaciones(coord, client)
+            self.addCleanup(restarted.close)
+            done = restarted.get(job['id'])
+            self.assertEqual((done['status'], done['published']), ('completed', True))
+            self.assertEqual(done['reconciliation']['coordinator_id'], client.publication_ids[0])
+            self.assertEqual(client.calls, [job['request_id']])
+            self.assertEqual(client.reconciliations, [client.publication_ids[0]])
 
     def test_un_unico_trabajo_activo(self):
         self.cliente.gate.clear()

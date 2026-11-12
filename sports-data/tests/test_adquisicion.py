@@ -142,43 +142,69 @@ class Availability(unittest.TestCase):
 
 
 class PublicationWait(unittest.TestCase):
-    def test_timeout_de_espera_no_marca_fallida_una_publicacion_que_sigue_en_curso(self):
+    def test_timeout_termina_una_ventana_y_devuelve_pendiente(self):
+        from persistencia.adquisicion import _esperar_publicacion
+
+        class Coordinator:
+            def __init__(self):
+                self.calls = []
+
+            def esperar(self, ident, timeout):
+                self.calls.append((ident, timeout))
+                raise TimeoutError(ident)
+
+        coordinator = Coordinator()
+        result = _esperar_publicacion(coordinator, 'durable-id', timeout=7)
+        self.assertEqual(result, dict(estado='pending', identificador='durable-id'))
+        self.assertEqual(coordinator.calls, [('durable-id', 7)])
+
+    def test_publicacion_completada_despues_del_timeout_reusa_el_mismo_id(self):
         from persistencia.adquisicion import Cliente
 
         with tempfile.TemporaryDirectory(prefix='acquisition-publication-timeout-') as tmp:
             root = Path(tmp)
             secret = root / 'secret'
             secret.write_bytes(b't' * 48)
-            folder = root / 'request'
-            folder.mkdir()
-            (folder / 'bundle.json').write_bytes(b'fixture bundle')
             request_id = str(uuid.uuid4())
             acquisition_id = str(uuid.uuid4())
             baseline = dict(generation_id=str(uuid.uuid4()), sha256='baseline')
-            record = dict(bundle=dict(bytes=14, sha256='descriptor'), acquisition_id=acquisition_id,
-                          request_id=request_id, recipe_id='sofascore-group2-2627-v1', intentos=[])
+            descriptor = dict(bytes=14, sha256='descriptor')
             publication_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
                                             f'urn:rj:acquisition:{acquisition_id}:descriptor:1'))
+            folder = root / 'adquisiciones' / request_id
+            folder.mkdir(parents=True)
+            (folder / 'bundle.json').write_bytes(b'fixture bundle')
+            record = dict(bundle=descriptor, acquisition_id=acquisition_id, request_id=request_id,
+                          recipe_id='sofascore-group2-2627-v1', intentos=[])
+            from persistencia.bundle import encode
+            (folder / 'solicitud.json').write_bytes(encode(record))
+            (folder / 'inventory.json').write_bytes(encode(baseline))
 
             class Coordinator:
                 def __init__(self):
+                    self.directory = root
+                    self.directorio = root
+                    self.status = 'queued'
                     self.waits = []
                     self.requested = []
+                    self.generation = baseline['generation_id']
 
-                def estado(self, _ident):
-                    return {'estado': 'queued'}
+                def estado(self, ident):
+                    if ident != publication_id:
+                        raise KeyError(ident)
+                    return dict(estado=self.status, generacion=self.generation)
 
                 def capturar(self):
-                    return object()
+                    return SimpleNamespace(id=self.generation)
 
                 def solicitar(self, **kwargs):
                     self.requested.append(kwargs['identificador'])
 
                 def esperar(self, ident, timeout):
                     self.waits.append((ident, timeout))
-                    if len(self.waits) == 1:
+                    if self.status != 'completed':
                         raise TimeoutError(ident)
-                    return dict(estado='completed', generacion='published-generation')
+                    return dict(estado='completed', generacion=self.generation)
 
             coordinator = Coordinator()
             client = Cliente('http://acquisition:8002', secret, modo='prueba')
@@ -186,9 +212,57 @@ class PublicationWait(unittest.TestCase):
             with mock.patch('persistencia.adquisicion.verificar_sellado', return_value=(manifest, {})), \
                     mock.patch('persistencia.adquisicion.comprobar_restriccion'), \
                     mock.patch('persistencia.adquisicion.inventory', return_value=baseline):
-                result = client.recibir(coordinator, folder, record, baseline)
+                pending = client.recibir(coordinator, folder, record, baseline)
+                self.assertEqual(pending['state'], 'pending')
+                self.assertEqual(pending['job_id'], publication_id)
+
+                coordinator.status = 'completed'
+                coordinator.generation = 'published-generation'
+                result = client.reconciliar_publicacion(coordinator, request_id, record['recipe_id'], publication_id)
 
             self.assertEqual(coordinator.requested, [publication_id])
-            self.assertEqual(coordinator.waits, [(publication_id, 300), (publication_id, 300)])
+            self.assertEqual([ident for ident, _ in coordinator.waits], [publication_id, publication_id])
             self.assertEqual(result['state'], 'published')
             self.assertEqual(result['generation_id'], 'published-generation')
+
+    def test_reconciliacion_permanentemente_pendiente_no_reenvia_solicitud(self):
+        from persistencia.adquisicion import Cliente
+        from persistencia.bundle import encode
+
+        with tempfile.TemporaryDirectory(prefix='acquisition-permanent-pending-') as tmp:
+            root = Path(tmp)
+            secret = root / 'secret'
+            secret.write_bytes(b't' * 48)
+            request_id, acquisition_id = str(uuid.uuid4()), str(uuid.uuid4())
+            coordinator_id = str(uuid.uuid4())
+            descriptor = dict(bytes=14, sha256='descriptor')
+            baseline = dict(generation_id='base-generation', sha256='baseline')
+            folder = root / 'adquisiciones' / request_id
+            folder.mkdir(parents=True)
+            (folder / 'solicitud.json').write_bytes(encode(dict(request_id=request_id,
+                recipe_id='sofascore-group2-2627-v1', bundle=descriptor, acquisition_id=acquisition_id,
+                intentos=[coordinator_id])))
+            (folder / 'inventory.json').write_bytes(encode(baseline))
+            (folder / 'bundle.json').write_bytes(b'fixture bundle')
+
+            class Coordinator:
+                directorio = root
+
+                def __init__(self):
+                    self.requested = []
+
+                def capturar(self):
+                    return SimpleNamespace(id='base-generation')
+
+                def estado(self, _ident):
+                    return dict(estado='running')
+
+                def solicitar(self, **kwargs):
+                    self.requested.append(kwargs)
+
+            coordinator = Coordinator()
+            client = Cliente('http://acquisition:8002', secret, modo='prueba')
+            result = client.reconciliar_publicacion(coordinator, request_id,
+                'sofascore-group2-2627-v1', coordinator_id)
+            self.assertEqual((result['state'], result['job_id']), ('pending', coordinator_id))
+            self.assertEqual(coordinator.requested, [])
