@@ -373,7 +373,6 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
   const [team, setTeam] = useState<FilterTeam>("all");
   const [locationByKey, setLocationByKey] = useState<Record<string, LocationState>>({});
   const [selectedEventKey, setSelectedEventKey] = useState<string | null>(null);
-  const [expandedEventKeys, setExpandedEventKeys] = useState<Set<string>>(() => new Set());
   const [seekRequest, setSeekRequest] = useState<{ sequence: number; seconds: number; scope: string } | null>(null);
   const [scrollRange, setScrollRange] = useState({ left: 0, max: 0 });
   const [playback, setPlayback] = useState<YouTubePlaybackSnapshot>({
@@ -754,42 +753,44 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
                 : `Saltar al minuto ${item.minute} de la ${period === "first" ? "primera" : "segunda"} parte; reproducción desde el reloj ${footballClockAtMinuteTail(item.minute!)}`;
         const isPlaybackActive = hasVideo && activePlaybackEventKey === key;
         const isSelected = hasVideo && (playback.ready ? isPlaybackActive : selectedEventKey === scopedKey);
-        const expanded = expandedEventKeys.has(key);
-        const canExpand = hasVideo && item.text.length > 130;
+        const minuteLabel = item.minute === null ? "Sin minuto" : `${item.minute}′`;
+        const score = item.score && (item.score.home !== null || item.score.away !== null) ? <p className={css.score}
+          aria-label={`Marcador: ${item.score.home ?? "no disponible"} a ${item.score.away ?? "no disponible"}`}>
+          Marcador <strong>{item.score.home ?? "—"}–{item.score.away ?? "—"}</strong>
+        </p> : null;
+        const comment = <p className={css.text}><TextWithPlayers item={item} mentions={mentions}
+          seasonId={seasonId} profileOrigin={profileOrigin} /></p>;
+        const videoAction = hasVideo ? <div className={css.videoAction}>
+          <button type="button" className={css.videoButton} aria-label={actionName}
+            title={reason ?? (location?.status === "error" ? location.message
+              : location?.status === "resolved" && !periodStart
+                ? `Reproducción desde ${footballClockAtMinuteTail(item.minute!)} del reloj futbolístico`
+                : "Consultar estado de localización del evento")}
+            disabled={nonlocalizable || location?.status === "loading"}
+            onClick={() => void locateEvent(item, key)}>
+            <Video size={17} aria-hidden="true" />
+          </button>
+        </div> : null;
         return <li key={key} ref={(element) => {
           if (element) eventCardRefs.current.set(key, element);
           else eventCardRefs.current.delete(key);
         }} className={`${css.item} ${isSelected ? css.selected : ""} ${isPlaybackActive ? css.activeEvent : ""}`}
           aria-current={isPlaybackActive ? "true" : undefined}>
-          <div className={css.when}>
-            <strong>{item.minute === null ? "Sin minuto" : `${item.minute}′`}</strong>
-          </div>
-          <div className={css.content}>
-            <span className={css.kind}>{eventLabel(item)}</span>
-            <p className={`${css.text} ${canExpand && !expanded ? css.textClamped : ""}`}><TextWithPlayers item={item} mentions={mentions}
-              seasonId={seasonId} profileOrigin={profileOrigin} /></p>
-            {canExpand ? <button type="button" className={css.expandText} aria-expanded={expanded}
-              onClick={() => setExpandedEventKeys((current) => {
-                const next = new Set(current);
-                if (next.has(key)) next.delete(key); else next.add(key);
-                return next;
-              })}>{expanded ? "Mostrar menos" : "Ver comentario completo"}</button> : null}
-            {item.score && (item.score.home !== null || item.score.away !== null) ? <p className={css.score}
-              aria-label={`Marcador: ${item.score.home ?? "no disponible"} a ${item.score.away ?? "no disponible"}`}>
-              Marcador <strong>{item.score.home ?? "—"}–{item.score.away ?? "—"}</strong>
-            </p> : null}
-          </div>
-          {hasVideo ? <div className={css.videoAction}>
-            <button type="button" className={css.videoButton} aria-label={actionName}
-              title={reason ?? (location?.status === "error" ? location.message
-                : location?.status === "resolved" && !periodStart
-                  ? `Reproducción desde ${footballClockAtMinuteTail(item.minute!)} del reloj futbolístico`
-                  : "Consultar estado de localización del evento")}
-              disabled={nonlocalizable || location?.status === "loading"}
-              onClick={() => void locateEvent(item, key)}>
-              <Video size={17} aria-hidden="true" />
-            </button>
-          </div> : null}
+          {hasVideo ? <>
+            <div className={css.videoCardHeader}>
+              <div className={css.when}><strong>{minuteLabel}</strong></div>
+              <span className={css.kind}>{eventLabel(item)}</span>
+              {videoAction}
+            </div>
+            <div className={css.videoCardContent}>{comment}{score}</div>
+          </> : <>
+            <div className={css.when}><strong>{minuteLabel}</strong></div>
+            <div className={css.content}>
+              <span className={css.kind}>{eventLabel(item)}</span>
+              {comment}
+              {score}
+            </div>
+          </>}
         </li>;
       })}
         </ol>

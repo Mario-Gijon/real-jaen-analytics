@@ -267,9 +267,10 @@ describe("MatchCommentsPanel unified events", () => {
     expect(locateMatchVideoEvent).toHaveBeenCalledTimes(2);
   });
 
-  it("lets long video comments expand without losing player links", async () => {
+  it("shows the full video comment below its compact minute, category and video header", async () => {
     const player = participant("sofascore-player-597500", "Mario Martos", "scorer");
-    const item = event({ id: "long-comment", position: 1, text: `Mario Martos ${"jugada narrada con detalle ".repeat(12)}`,
+    const fullComment = `Mario Martos ${"jugada narrada con detalle ".repeat(12)}`;
+    const item = event({ id: "long-comment", position: 1, text: fullComment,
       category: "shot", participants: [player] });
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([item]));
     vi.mocked(getMatchVideo).mockResolvedValue({ available: true, youtubeVideoId: "79Rngk2hcC0",
@@ -278,11 +279,13 @@ describe("MatchCommentsPanel unified events", () => {
     render(<MatchCommentsPanel matchId="sofascore-match-16599928"
       profileOrigin={{ kind: "observedMatch", id: "sofascore-match-16599928" }} />);
 
-    const expand = await screen.findByRole("button", { name: "Ver comentario completo" });
-    const text = expand.previousElementSibling;
-    expect(text).toHaveClass("textClamped");
-    fireEvent.click(expand);
-    expect(screen.getByRole("button", { name: "Mostrar menos" })).toHaveAttribute("aria-expanded", "true");
+    const list = await screen.findByRole("list", { name: "Eventos en orden cronológico" });
+    const card = list.querySelector("li");
+    expect(card?.firstElementChild).toHaveClass(/videoCardHeader/);
+    expect(card?.firstElementChild).toHaveTextContent("24′Remates");
+    expect(card?.firstElementChild?.querySelector("button[aria-label]")).toBeInTheDocument();
+    expect(card?.lastElementChild).toHaveTextContent(fullComment);
+    expect(screen.queryByRole("button", { name: "Ver comentario completo" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Mario Martos" })).toBeInTheDocument();
   });
 
