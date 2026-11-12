@@ -28,7 +28,15 @@ Desarrollo usa almacenamiento y redes con nombres `rja-dev-*`; producción usa `
    docker compose --env-file .env.dev -f compose.dev.yaml up --build
    ```
 
-En desarrollo `RJ_ACQUISITION_ENABLE_REAL=0` por defecto. Activar el proveedor real requiere cambiarlo explícitamente a `1`; arrancar Acquisition solo inicia su API y no inicia adquisiciones.
+Acquisition usa el perfil opcional `acquisition`; las consultas deportivas, el Dashboard y Video Service arrancan sin él. Para iniciar solo esos tres servicios:
+
+```sh
+docker compose --env-file .env.dev -f compose.dev.yaml up --build dashboard sports-data video-service
+```
+
+Para habilitar explícitamente SofaScore en desarrollo, configura `RJ_ACQUISITION_ENABLE_REAL=1` y arranca Acquisition con `--profile acquisition`. Esto inicia su API, pero no una adquisición. En producción el valor de ejemplo es `0`; debe cambiarse expresamente a `1` antes de activar el perfil.
+
+El estado de «Actualizar» comprueba de forma dinámica la salud y el proveedor de Acquisition. Si está apagado o su modo no coincide con la instalación de Sports Data, el control queda deshabilitado y no se crea un trabajo. Si Acquisition cae después de empezar, el trabajo queda registrado como fallido o interrumpido y se conserva la última generación publicada.
 
 Para producción, configura `.env.prod` a partir de `.env.prod.example`, incluyendo imágenes con tags independientes, secretos externos, imports y el directorio externo del catálogo de vídeos. El volumen `rja-prod-video-state` conserva la SQLite de Video Service y las calibraciones creadas por el servicio; `rja-prod-sports-state` conserva la base deportiva.
 

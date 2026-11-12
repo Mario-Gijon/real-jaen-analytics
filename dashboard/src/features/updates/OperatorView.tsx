@@ -24,7 +24,8 @@ export function OperatorView() {
         : <section aria-label="Estado de actualización" aria-busy="true"><LoadingState variant="section" label="Cargando estado de actualización…" /></section>}
     </>;
   }
-  if (!status.available) {
+  const scope = status.scope;
+  if (!scope) {
     return (
       <>
         <PageHeader title="Actualización de datos" />
@@ -33,11 +34,15 @@ export function OperatorView() {
     );
   }
   const running = isActive(job);
-  const scope = status.scope;
 
   return (
     <>
       <PageHeader title="Actualización de datos" description={scope ? scope.label : undefined} />
+      {!status.available ? (
+        <p className={css.muted} role="status">
+          La actualización no está disponible ahora. Puedes seguir consultando los datos publicados; el estado se comprobará de nuevo automáticamente.
+        </p>
+      ) : null}
       {scope ? (
         <section className={css.section} aria-labelledby="alcance">
           <h2 id="alcance">Alcance</h2>
@@ -88,7 +93,9 @@ export function OperatorView() {
               {job?.cancelRequested ? "Cancelando…" : job?.cancellable ? "Cancelar" : "Ya no se puede cancelar"}
             </Button>
           ) : (
-            <Button disabled={busy} onClick={start} variant="primary">{scope?.actionLabel ?? "Actualizar"}</Button>
+            <Button disabled={busy || !status.available} onClick={start} variant="primary">
+              {status.available ? scope.actionLabel : "No disponible"}
+            </Button>
           )}
           {publishedNow ? <Button onClick={reload}>Recargar datos</Button> : null}
         </div>

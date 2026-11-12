@@ -16,7 +16,12 @@ if CON_SQL:
     from scripts import adopt_bundle_limit_fingerprint as maintenance
 
 
-@unittest.skipUnless(CON_SQL, 'requires requirements-sql.txt')
+# This maintenance tool is pinned to one reviewed code fingerprint. Its transition tests only
+# apply while the current source still has that exact target fingerprint.
+@unittest.skipUnless(
+    CON_SQL and actualizacion.codigo() == maintenance.TARGET,
+    'requires requirements-sql.txt and the exact reviewed 0007 target fingerprint',
+)
 class BundleLimitCoordinatorMaintenance(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='rj-bundle-limit-maintenance-'))

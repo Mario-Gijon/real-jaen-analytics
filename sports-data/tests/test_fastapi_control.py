@@ -193,6 +193,27 @@ class FastAPIControl(fixtures.Base):
         with bloquear(self.fixture.base):
             self.assertTrue(self.fixture.base.is_file())
 
+    def test_acquisition_indisponible_no_crea_trabajo_y_no_bloquea_lecturas(self):
+        from app import UPDATE_PREFIX as PREFIX
+
+        auth = {'Authorization': 'Bearer ' + self.token}
+        self.client_impl.available = False
+        with self.running() as (base, application):
+            current = self.request(base, PREFIX + '/current', headers=auth)
+            self.assertEqual((current[0], current[1]['available'], current[1]['active_job']),
+                             (200, False, None))
+            self.assertEqual(self.request(base, '/health')[0], 200)
+            before = application.state.coordinator.capturar().id
+            refused = self.request(base, PREFIX, 'POST', dict(auth, **{
+                'Idempotency-Key': str(uuid.uuid4())
+            }))
+            self.assertEqual(refused[:2], (409, {'error': 'update_unavailable'}))
+            after = self.request(base, PREFIX + '/current', headers=auth)
+            self.assertEqual((after[1]['available'], after[1]['active_job'], after[1]['last_job']),
+                             (False, None, None))
+            self.assertEqual(application.state.coordinator.capturar().id, before)
+            self.assertEqual(self.client_impl.calls, [])
+
     def test_fallos_y_consultas_durante_publicacion_conservan_una_generacion(self):
         from app import UPDATE_PREFIX as PREFIX
 

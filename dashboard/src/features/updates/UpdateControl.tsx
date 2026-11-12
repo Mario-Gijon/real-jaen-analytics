@@ -13,8 +13,8 @@ import css from "./Updates.module.css";
  * backend declares (the pilot's or the group's). Details at /operador.
  */
 export function UpdateControl() {
-  const { status, job, busy, publishedNow, start, cancel, reload } = useUpdates();
-  if (!status?.available || !status.scope) return null;
+  const { status, job, busy, problem, publishedNow, start, cancel, reload } = useUpdates();
+  if (!status?.scope) return null;
   const scope = status.scope;
   const running = isActive(job);
   const line = job ? jobLine(job) : status.lastPublished ? `Publicado el ${updateTime(status.lastPublished.at)}` : "Sin publicaciones";
@@ -27,6 +27,16 @@ export function UpdateControl() {
       ) : running ? (
         <Button className={css.barButton} disabled={busy || !job?.cancellable} onClick={cancel} size="sm">
           {job?.cancelRequested ? "Cancelando" : "Cancelar"}
+        </Button>
+      ) : !status.available ? (
+        <Button
+          aria-label="Actualización temporalmente no disponible"
+          className={css.barButton}
+          disabled
+          size="sm"
+          title="El servicio de actualización no está disponible o no tiene el proveedor esperado."
+        >
+          No disponible
         </Button>
       ) : (
         <Button
@@ -42,6 +52,7 @@ export function UpdateControl() {
           Actualizar
         </Button>
       )}
+      {problem ? <span className={css.barProblem} role="alert">{problem}</span> : null}
     </div>
   );
 }

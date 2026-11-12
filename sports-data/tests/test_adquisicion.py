@@ -1,6 +1,10 @@
 """Durable handoff key: SQL fixtures only, no network or real data."""
 import unittest
 import uuid
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 import test_actualizacion as fixtures
 
 @unittest.skipUnless(fixtures.CON_SQL,'SQL dependencies required')
@@ -53,6 +57,11 @@ class LimitesYRestriccion(unittest.TestCase):
             with self.subTest(plan=plan), self.assertRaises(Rejected):
                 comprobar_restriccion(dict(plan=plan), exigida)
 
+    def test_la_restriccion_de_grupo_no_se_aplica_al_piloto(self):
+        from persistencia.adquisicion import comprobar_restriccion
+        comprobar_restriccion(dict(contract='pilot-v2'),
+                              dict(limits=dict(attempts=60, sends=70), detail_rounds=[9]))
+
     def test_control_lee_las_tres_variables_o_ninguna(self):
         import control
         self.assertIsNone(control.restriccion({}))
@@ -98,3 +107,35 @@ class Productores(unittest.TestCase):
         self.assertIn('queries.py', archivos)
         self.assertNotIn('productores-adquisicion.json', archivos)
         self.assertFalse(any('productores' in a for a in archivos))
+
+
+class Availability(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='acquisition-readiness-')
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.base = root / 'sports.sqlite'
+        self.coordinator = SimpleNamespace(base=self.base)
+        self.secret = root / 'token'
+        self.secret.write_bytes(b't' * 48)
+        from persistencia.adquisicion import Cliente
+        self.Cliente = Cliente
+
+    def test_real_mode_requires_live_sofascore_service_and_rejects_test_installation(self):
+        client = self.Cliente('http://acquisition:8002', self.secret)
+        with mock.patch.object(client, '_json', return_value={'status': 'ok', 'provider': 'sofascore'}) as health:
+            self.assertTrue(client.disponible(self.coordinator))
+            health.assert_called_once_with('GET', base='http://acquisition:8002/health', limit=1024, timeout=2)
+        with mock.patch.object(client, '_json', return_value={'status': 'ok', 'provider': 'fixture-site'}):
+            self.assertFalse(client.disponible(self.coordinator))
+
+    def test_test_mode_requires_test_marker_and_fixture_provider(self):
+        from persistencia.adquisicion import TEST_CONTENT, TEST_MARKER
+        client = self.Cliente('http://acquisition:8002', self.secret, modo='prueba')
+        with mock.patch.object(client, '_json', return_value={'status': 'ok', 'provider': 'fixture-site'}):
+            self.assertFalse(client.disponible(self.coordinator))
+            marker = self.base.with_name(self.base.name + TEST_MARKER)
+            marker.write_text(TEST_CONTENT)
+            self.assertTrue(client.disponible(self.coordinator))
+            marker.write_text('unrecognized\n')
+            self.assertFalse(client.disponible(self.coordinator))

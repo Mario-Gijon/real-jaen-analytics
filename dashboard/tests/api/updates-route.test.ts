@@ -23,6 +23,7 @@ const backendJob = (over: Record<string, unknown> = {}) => ({
   request_id: "never-forwarded", ...over,
 });
 const backendStatus = {
+  available: true,
   scope: { kind: "pilot", recipe: "sofascore-pilot-16599363-v1", round: 1, match_ids: [16599363], action: "Actualizar piloto",
     label: "Actualización piloto: calendario de la jornada 1 y un partido", description: "Consulta el calendario de la jornada 1 y un partido. No actualiza el resto de la jornada ni de la temporada: los demás partidos se conservan tal como están publicados." },
   active_job: backendJob(), last_job: null, last_published: { at: "2026-10-27T10:00:00+00:00" },
@@ -108,6 +109,17 @@ describe("update routes", () => {
         description: "Consulta el calendario de la jornada 1 y un partido. No actualiza el resto de la jornada ni de la temporada: los demás partidos se conservan tal como están publicados.", actionLabel: "Actualizar piloto", matchIds: ["sofascore-match-16599363"] } });
     expect(calls[0].url).toBe("http://backend:8001/internal/v1/updates/current");
     expect(calls[0].headers.get("authorization")).toBe(`Bearer ${CONTROL_SECRET}`);
+  });
+
+  it("forwards live Acquisition unavailability without dropping the existing scope or publication", async () => {
+    backend(() => json({ ...backendStatus, available: false, active_job: null }));
+    const response = await current(request("/api/v1/updates/current", { cookie: await session() }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      available: false,
+      scope: { kind: "pilot" },
+      lastPublished: { at: "2026-10-27T10:00:00+00:00" },
+    });
   });
 
   it("open a signed HttpOnly 90-day session only with the password, from the same origin, and throttle guesses", async () => {

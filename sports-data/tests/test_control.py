@@ -42,11 +42,14 @@ class CoverageNaming(unittest.TestCase):
 class FakeCliente:
     """What persistencia.adquisicion.Cliente.publicar does, seen from the control: phases, records, coordinator."""
     def __init__(self, fixture):
-        self.fixture, self.mode, self.calls, self.cancelled = fixture, 'ok', [], []
+        self.fixture, self.mode, self.calls, self.cancelled, self.available = fixture, 'ok', [], [], True
         self.coverage = None
         self.batch_results = []
         self.gate = threading.Event()
         self.gate.set()
+
+    def disponible(self, _coordinator):
+        return self.available
 
     def cancelar(self, acquisition):
         self.cancelled.append(acquisition)
@@ -118,6 +121,21 @@ class Control(unittest.TestCase):
         control = Actualizaciones(coord, self.cliente)
         self.addCleanup(lambda: (self.cliente.gate.set(), control.close()))
         return coord, control
+
+    def test_acquisition_indisponible_no_crea_trabajo_ni_bloquea_consultas(self):
+        from control import Unavailable
+        self.cliente.available = False
+        coord, control = self.open()
+        with coord:
+            before = coord.capturar().id
+            current = control.actual()
+            self.assertFalse(current['available'])
+            self.assertIsNone(current['active_job'])
+            with self.assertRaises(Unavailable):
+                control.solicitar(str(uuid.uuid4()))
+            self.assertEqual(control._rows(), [])
+            self.assertEqual(coord.capturar().id, before)
+            self.assertEqual(self.cliente.calls, [])
 
     def test_publica_y_misma_clave_devuelve_el_mismo_trabajo(self):
         coord, control = self.open()

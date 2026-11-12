@@ -91,6 +91,7 @@ class Cliente:
         # dict(limits=dict(attempts, sends), detail_rounds=[...]): a bundle must declare exactly this (control.py).
         self.restriccion = restriccion
         self.url = url.rstrip('/') + '/internal/v1/acquisitions'
+        self.health_url = url.rstrip('/') + '/health'
         self._secret = Path(secret_file).read_bytes().strip()
         if not 32 <= len(self._secret) <= 256 or not self._secret.isascii() or any(c <= 32 for c in self._secret):
             raise AdquisicionRechazada('Secreto interno no configurado')
@@ -115,6 +116,17 @@ class Cliente:
 
     def _json(self, *args, **kwargs):
         return json.loads(self._http(*args, **kwargs)[0])
+
+    def disponible(self, coordinador):
+        """Readiness is live, mode-matched and test-installation-aware; it never queries a sports provider."""
+        try:
+            self._instalacion(coordinador)
+            health = self._json('GET', base=self.health_url, limit=1024, timeout=2)
+            expected_provider = 'fixture-site' if self.modo == 'prueba' else 'sofascore'
+            return health == {'status': 'ok', 'provider': expected_provider}
+        except Exception:
+            # Availability is advisory for the UI and a fail-closed precondition for starting a durable job.
+            return False
 
     @staticmethod
     def _id(ident):
@@ -313,9 +325,8 @@ class Cliente:
 
 
 def comprobar_restriccion(manifest, restriccion):
-    """With a restriction configured (limits and detail rounds), the bundle must declare exactly it: a producer that
-    ignored or widened it is rejected before anything reaches the coordinator."""
-    if restriccion is None:
+    """Group bundles must declare this installation's exact limits; the fixed pilot has no group plan."""
+    if restriccion is None or manifest.get('contract') == 'pilot-v2':
         return
     plan = manifest.get('plan') or {}
     if dict(limits=plan.get('limits'), detail_rounds=plan.get('detail_rounds')) != restriccion:

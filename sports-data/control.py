@@ -174,6 +174,8 @@ class Actualizaciones:
             active = self._rows("WHERE state IN ('queued','running')")
             if active:
                 return active[0], True
+            if not self.cliente.disponible(self.c):
+                raise Unavailable('Acquisition is not ready for this installation')
             try:
                 self.c.capturar()
             except Exception as e:
@@ -434,7 +436,8 @@ class Actualizaciones:
         last = self._last_finished()
         published = [r for r in self._rows() if r.get('published') and r.get('result')]
         latest = max(published, key=lambda r: (r.get('result') or {}).get('published_at') or r.get('finished_at') or '') if published else None
-        return dict(scope=SCOPES[self.recipe], active_job=self.public(active[0] if active else None), last_job=self.public(last),
+        return dict(available=self.cliente.disponible(self.c), scope=SCOPES[self.recipe],
+                    active_job=self.public(active[0] if active else None), last_job=self.public(last),
                     # With the coverage of that publication: its pending resources and deferred refreshes stay visible
                     # while their previous data are served, even after a later update failed or was cancelled.
                     last_published=None if latest is None else dict(at=latest['result']['published_at'],

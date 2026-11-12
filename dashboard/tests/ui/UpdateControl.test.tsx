@@ -43,6 +43,16 @@ describe("UpdateControl (top bar)", () => {
     }
   });
 
+  it("clearly disables starting an update when Acquisition is unavailable", async () => {
+    const unavailable = operatorStatus({ available: false });
+    const fetch = api(() => ({ body: unavailable }));
+    render(<UpdateControl />);
+    const button = await screen.findByRole("button", { name: "Actualización temporalmente no disponible" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent("No disponible");
+    expect(fetch.mock.calls.some(([url]) => String(url) === "/api/v1/updates/current")).toBe(true);
+  });
+
   it("names the pilot scope, and repeated clicks send a single start with one key", async () => {
     let release: () => void = () => {};
     let started = false;
@@ -94,6 +104,15 @@ describe("UpdateControl (top bar)", () => {
 });
 
 describe("OperatorView (/operador)", () => {
+  it("keeps the status page and published data visible while Acquisition is unavailable", async () => {
+    const fetch = api(() => ({ body: operatorStatus({ available: false }) }));
+    render(<OperatorView />);
+    expect(await screen.findByText(/La actualización no está disponible ahora/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "No disponible" })).toBeDisabled();
+    expect(screen.getByRole("heading", { name: "Alcance" })).toBeVisible();
+    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true);
+  });
+
   it("offers the update to the access session, without a second key, and says what the pilot does not update", async () => {
     const fetch = api(() => ({ body: operatorStatus() }));
     render(<OperatorView />);

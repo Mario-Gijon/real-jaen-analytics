@@ -59,6 +59,7 @@ type BackendCoverage = {
   };
 };
 type BackendStatus = {
+  available: boolean;
   scope: { kind: "pilot" | "group"; label: string; description: string; action: string; round: number | null; match_ids: number[] };
   active_job: BackendJob | null;
   last_job: BackendJob | null;
@@ -163,11 +164,14 @@ async function call(method: "GET" | "POST", path: string, headers: Record<string
   return { status: response.status, body };
 }
 
-export async function controlStatus(): Promise<Omit<UpdateStatus, "available">> {
+export async function controlStatus(): Promise<UpdateStatus> {
   const { body } = await call("GET", "/current");
   const value = body as BackendStatus;
-  if (!value?.scope) throw new ControlUnavailableError("Respuesta de control no válida");
+  if (typeof value?.available !== "boolean" || !value.scope) {
+    throw new ControlUnavailableError("Respuesta de control no válida");
+  }
   return {
+    available: value.available,
     scope: scope(value.scope),
     lastPublished: value.last_published ? { at: value.last_published.at } : null,
     activeJob: value.active_job ? job(value.active_job) : null,

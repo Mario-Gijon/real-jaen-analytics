@@ -33,7 +33,11 @@ def codigo():
 # The 0d12fffc release fingerprint is accepted as the same sporting rules: this cleanup only removes the
 # sports-data HTTP/CLI implementations. Historical import metadata stays intact; an old coordinator journal is
 # upgraded once to the current fingerprint. Acquisition producer approvals are separate and remain unchanged.
-REFERENCIAS_CODIGO_COMPATIBLES = frozenset({'bd9446235f4e6a1ec8618fc0f35124a7b31f94a0dad55c4539c4892c875ebb6a'})
+REFERENCIAS_CODIGO_COMPATIBLES = frozenset({
+    'bd9446235f4e6a1ec8618fc0f35124a7b31f94a0dad55c4539c4892c875ebb6a',
+    # This release only adds mode-matched Acquisition readiness to persistencia.adquisicion; sporting rules are unchanged.
+    '376f2cdc92f351ab9fa7056eb584a0e3813f1cf61fe0d9a6b362a996ce7cc7fe',
+})
 
 
 def codigo_compatible(referencia):

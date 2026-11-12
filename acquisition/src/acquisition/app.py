@@ -50,6 +50,7 @@ def create_app(*, jobs=None, token=None):
     async def lifespan(app):
         if injected:
             app.state.jobs, app.state.token = jobs, token
+            app.state.provider = jobs.provider
             try:
                 yield
             finally:
@@ -63,7 +64,7 @@ def create_app(*, jobs=None, token=None):
             owner.verify()
             current_jobs = Jobs(os.environ.get('ACQ_JOBS_ROOT', '/acquisition-jobs'),
                                 provider=provider, owner=owner, extra=extra)
-            app.state.jobs, app.state.token = current_jobs, internal_token
+            app.state.jobs, app.state.token, app.state.provider = current_jobs, internal_token, provider
             try:
                 yield
             finally:
@@ -78,7 +79,7 @@ def create_app(*, jobs=None, token=None):
         post = request.method == 'POST'
         try:
             if not post and target == '/health':
-                return _response(200, {'status': 'ok'})
+                return _response(200, {'status': 'ok', 'provider': request.app.state.provider})
 
             provided = request.headers.get('authorization', '').encode('utf-8')
             if not hmac.compare_digest(provided, b'Bearer ' + request.app.state.token):

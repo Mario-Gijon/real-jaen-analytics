@@ -47,6 +47,11 @@
 .barButton:focus-visible {
   outline-color: var(--rj-gold-300);
 }
+.barProblem {
+  max-width: 220px;
+  color: var(--rj-danger);
+  font-size: var(--rj-text-xs);
+}
 
 /* Operator screen. */
 .section {

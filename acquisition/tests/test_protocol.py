@@ -121,7 +121,7 @@ class Protocol(unittest.TestCase):
 
     def test_health_is_public_and_internal_routes_are_not(self):
         with urllib.request.urlopen(self.url + '/health', timeout=5) as response:
-            self.assertEqual((response.status, response.read()), (200, b'{"status":"ok"}'))
+            self.assertEqual((response.status, response.read()), (200, b'{"provider":"fixture-site","status":"ok"}'))
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(self.url + PREFIX, timeout=5)
         self.assertEqual(error.exception.code, 401)

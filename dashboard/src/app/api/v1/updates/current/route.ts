@@ -11,7 +11,7 @@ export async function GET(request: Request): Promise<NextResponse<UpdateStatus |
   const refused = refuse(request, { changesState: false });
   if (refused) return refused;
   try {
-    return noStore<UpdateStatus>({ available: true, ...(await controlStatus()) });
+    return noStore<UpdateStatus>(await controlStatus());
   } catch (error) {
     return fromControl(error, "estado");
   }

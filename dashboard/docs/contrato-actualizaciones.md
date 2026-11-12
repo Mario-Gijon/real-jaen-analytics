@@ -66,6 +66,11 @@ cliente de adquisición → servicio `acquisition` y coordinador.
   `<base>.actualizaciones/control/`. Sin modo control, `api.py` sigue igual que hasta ahora.
 - **Demo** (`DATA_MODE=demo`) o falta de configuración: la interfaz no muestra el control y las operaciones
   responden `409 UPDATE_UNAVAILABLE` sin llamar al backend.
+- **Acquisition apagado o modo incompatible**: Sports Data comprueba `/health` y la identidad del proveedor sin
+  consultar a SofaScore. `available` se calcula en cada consulta; la interfaz lo vuelve a consultar cada 15 s.
+  Antes de guardar un trabajo, Sports Data repite la comprobación y responde `409 update_unavailable` si falla,
+  sin crear una fila de trabajo. Si el servicio cae después de esa comprobación, la operación queda registrada y
+  termina de forma segura, conservando la generación anterior.
 
 ## Autorización
 
@@ -88,7 +93,7 @@ Todas responden con `Cache-Control: no-store`.
 
 | Método y ruta | Quién | Respuesta |
 |---|---|---|
-| GET /api/v1/updates/current | Sesión | `UpdateStatus`: alcance, última publicación, trabajos activo y último, y cobertura de la última publicación |
+| GET /api/v1/updates/current | Sesión | `UpdateStatus`: disponibilidad dinámica de Acquisition, alcance, última publicación, trabajos activo y último, y cobertura de la última publicación |
 | POST /api/v1/updates | Sesión | Cuerpo vacío y cabecera `Idempotency-Key` (UUID). `202 {job, reused}`. La misma clave devuelve el mismo trabajo, aunque haya terminado. Con otro trabajo activo, devuelve ese con `reused: true` y no crea otro |
 | GET /api/v1/updates/{id} | Sesión | `200 UpdateJob`; `404` si no existe |
 | POST /api/v1/updates/{id}/cancel | Sesión | `202 UpdateJob`. Idempotente. `409 NOT_CANCELLABLE` si ya verifica, publica o terminó |

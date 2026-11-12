@@ -74,8 +74,10 @@ export function useUpdates() {
         });
     };
     void refresh();
+    const availabilityTimer = window.setInterval(refresh, 15_000);
     window.addEventListener(CHANGED, refresh);
     return () => {
+      window.clearInterval(availabilityTimer);
       window.removeEventListener(CHANGED, refresh);
       controller.abort();
     };
