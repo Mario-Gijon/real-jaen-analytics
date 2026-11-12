@@ -20,6 +20,7 @@ services:
       SPORTS_DATA_DB: /state/real-jaen.sqlite
       SPORTS_DATA_SCOPE: /app/ambito.json
       SPORTS_DATA_CONTROL: "1"
+      SPORTS_DATA_ENRICHMENT_ENABLED: "1"
       SPORTS_DATA_WORKERS: "1"
       WEB_CONCURRENCY: "1"
       RJ_UPDATE_RECIPE: ${RJ_UPDATE_RECIPE:-sofascore-group2-2627-v1}
