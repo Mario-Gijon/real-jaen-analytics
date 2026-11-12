@@ -37,6 +37,8 @@ REFERENCIAS_CODIGO_COMPATIBLES = frozenset({
     'bd9446235f4e6a1ec8618fc0f35124a7b31f94a0dad55c4539c4892c875ebb6a',
     # This release only adds mode-matched Acquisition readiness to persistencia.adquisicion; sporting rules are unchanged.
     '376f2cdc92f351ab9fa7056eb584a0e3813f1cf61fe0d9a6b362a996ce7cc7fe',
+    # This release keeps waiting for the same durable publication after one coordinator polling window expires.
+    '71ede1b31b4c6ca56380d1b702da6b69dc5df8df8a48b9ba264ee04166941404',
 })
 
 

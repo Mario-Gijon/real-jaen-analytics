@@ -459,13 +459,25 @@ class Actualizacion(Base):
             connection.execute('UPDATE confirmado SET detalle=? WHERE id=1', (json.dumps(journal),))
         with Coordinador(self.base, AMBITO, reserva=0) as coordinator:
             self.assertEqual(coordinator._meta()['codigo'], actualizacion.codigo())
-
         with sqlite3.connect(journal_path) as connection:
             journal = json.loads(connection.execute('SELECT detalle FROM confirmado WHERE id=1').fetchone()[0])
         self.assertEqual(stored['codigo']['sha256_agregada'], anterior)
         self.assertEqual(journal['codigo'], actualizacion.codigo())
         self.assertTrue(actualizacion.codigo_compatible(anterior))
         self.assertFalse(actualizacion.codigo_compatible('0' * 64))
+
+    def test_adopta_huella_de_espera_de_publicacion_sin_cambiar_datos_deportivos(self):
+        anterior = '71ede1b31b4c6ca56380d1b702da6b69dc5df8df8a48b9ba264ee04166941404'
+        antes = sqlite.describir(self.base)
+        with self.abrir() as coordinator:
+            metadata = coordinator._meta()
+            metadata['codigo'] = anterior
+            with sqlite3.connect(coordinator.journal) as journal:
+                journal.execute('UPDATE confirmado SET detalle=? WHERE id=1', (json.dumps(metadata),))
+
+        with self.abrir() as coordinator:
+            self.assertEqual(coordinator._meta()['codigo'], actualizacion.codigo())
+        self.assertEqual(sqlite.describir(self.base), antes)
 
     def test_enospc_copia_y_journal_antes_de_confirmar(self):
         original = sqlite.copia_consistente

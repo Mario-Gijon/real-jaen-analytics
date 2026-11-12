@@ -72,6 +72,21 @@ def _record(path, value):
     _sync(path.parent)
 
 
+def _esperar_publicacion(coordinador, ident):
+    """Wait for the durable publication to reach a terminal state.
+
+    The coordinator's timeout bounds one polling window; it does not cancel its worker. Retrying that window avoids
+    reporting a failed acquisition while the coordinator can still publish the same generation in the background.
+    """
+    while True:
+        try:
+            return coordinador.esperar(ident, timeout=300)
+        except TimeoutError as error:
+            # Only the coordinator's own timeout (which carries the awaited ID) is a polling-window expiry.
+            if error.args != (ident,):
+                raise
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args):
         return None
@@ -271,7 +286,7 @@ class Cliente:
                                       generacion_esperada=baseline['generation_id'],comentarios=comments)
             except CoordinacionRechazada as e:
                 raise Rejected(f'Coordinador: {e}') from None
-        result = coordinador.esperar(last, timeout=300)
+        result = _esperar_publicacion(coordinador, last)
         if result['estado'] != 'completed':
             raise AdquisicionRechazada('Publicacion fallida: se conserva la generacion valida')
         published = dict(state='published', generation_id=result['generacion'], job_id=last, acquisition_id=job,

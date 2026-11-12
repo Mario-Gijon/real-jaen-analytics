@@ -139,3 +139,56 @@ class Availability(unittest.TestCase):
             self.assertTrue(client.disponible(self.coordinator))
             marker.write_text('unrecognized\n')
             self.assertFalse(client.disponible(self.coordinator))
+
+
+class PublicationWait(unittest.TestCase):
+    def test_timeout_de_espera_no_marca_fallida_una_publicacion_que_sigue_en_curso(self):
+        from persistencia.adquisicion import Cliente
+
+        with tempfile.TemporaryDirectory(prefix='acquisition-publication-timeout-') as tmp:
+            root = Path(tmp)
+            secret = root / 'secret'
+            secret.write_bytes(b't' * 48)
+            folder = root / 'request'
+            folder.mkdir()
+            (folder / 'bundle.json').write_bytes(b'fixture bundle')
+            request_id = str(uuid.uuid4())
+            acquisition_id = str(uuid.uuid4())
+            baseline = dict(generation_id=str(uuid.uuid4()), sha256='baseline')
+            record = dict(bundle=dict(bytes=14, sha256='descriptor'), acquisition_id=acquisition_id,
+                          request_id=request_id, recipe_id='sofascore-group2-2627-v1', intentos=[])
+            publication_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                            f'urn:rj:acquisition:{acquisition_id}:descriptor:1'))
+
+            class Coordinator:
+                def __init__(self):
+                    self.waits = []
+                    self.requested = []
+
+                def estado(self, _ident):
+                    return {'estado': 'queued'}
+
+                def capturar(self):
+                    return object()
+
+                def solicitar(self, **kwargs):
+                    self.requested.append(kwargs['identificador'])
+
+                def esperar(self, ident, timeout):
+                    self.waits.append((ident, timeout))
+                    if len(self.waits) == 1:
+                        raise TimeoutError(ident)
+                    return dict(estado='completed', generacion='published-generation')
+
+            coordinator = Coordinator()
+            client = Cliente('http://acquisition:8002', secret, modo='prueba')
+            manifest = dict(recipe_id=record['recipe_id'], contract='pilot-v2')
+            with mock.patch('persistencia.adquisicion.verificar_sellado', return_value=(manifest, {})), \
+                    mock.patch('persistencia.adquisicion.comprobar_restriccion'), \
+                    mock.patch('persistencia.adquisicion.inventory', return_value=baseline):
+                result = client.recibir(coordinator, folder, record, baseline)
+
+            self.assertEqual(coordinator.requested, [publication_id])
+            self.assertEqual(coordinator.waits, [(publication_id, 300), (publication_id, 300)])
+            self.assertEqual(result['state'], 'published')
+            self.assertEqual(result['generation_id'], 'published-generation')
