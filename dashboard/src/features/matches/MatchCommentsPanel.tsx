@@ -830,10 +830,6 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
           seasonId={seasonId} profileOrigin={profileOrigin} /></p>;
         const videoAction = hasVideo ? <div className={css.videoAction}>
           <button type="button" className={css.videoButton} aria-label={actionName}
-            title={reason ?? (location?.status === "error" ? location.message
-              : location?.status === "resolved" && !periodStart
-                ? `Salto aproximado desde ${footballClockAtMinuteTail(item.minute!)} del reloj futbolístico`
-                : "Consultar estado de localización del evento")}
             disabled={nonlocalizable || location?.status === "loading"}
             onClick={() => void locateEvent(item, key)}>
             <Video size={17} aria-hidden="true" />
@@ -851,12 +847,6 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
               {videoAction}
             </div>
             <div className={css.videoCardContent}>
-              {manualSelected && location?.status === "resolved" ? <p className={css.locationHint} role="status">
-                {location.method === "later_reference_extrapolation"
-                  ? `Salto aproximado desde ${formatFootballClock(location.eventClockSecondEstimate)} del reloj futbolístico, estimado ${location.extrapolatedSeconds} s antes de la primera referencia OCR fiable.`
-                  : `Salto aproximado desde ${formatFootballClock(location.eventClockSecondEstimate)} del reloj futbolístico; SofaScore no aporta el segundo exacto de la acción.`}
-              </p> : null}
-              {nonlocalizable && reason ? <p className={css.locationHint} role="status">{reason}</p> : null}
               {comment}{score}
             </div>
           </> : <>
@@ -959,11 +949,5 @@ function footballClockAtMinuteTail(minute: number): string {
   const clockSecond = Math.max(0, (minute - 1) * 60 + 40);
   const minutes = Math.floor(clockSecond / 60);
   const seconds = clockSecond % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatFootballClock(clockSecond: number): string {
-  const minutes = Math.floor(Math.max(0, clockSecond) / 60);
-  const seconds = Math.floor(Math.max(0, clockSecond) % 60);
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }

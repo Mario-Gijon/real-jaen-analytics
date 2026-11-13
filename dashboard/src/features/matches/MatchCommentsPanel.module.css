@@ -50,7 +50,6 @@
 .videoCardHeader .when { align-self: center; }
 .videoCardHeader .kind { justify-self: start; max-width: 100%; margin: 0; }
 .videoCardContent { min-width: 0; width: 100%; }
-.locationHint { margin: 0 0 var(--rj-space-2); color: var(--rj-text-secondary); font-size: var(--rj-text-xs); line-height: 1.4; }
 .when { display: flex; flex-direction: column; align-items: flex-start; gap: var(--rj-space-1); color: var(--rj-text-secondary); font-size: var(--rj-text-xs); }
 .when strong { color: var(--rj-text-primary); font-size: var(--rj-text-md); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .content { min-width: 0; }
