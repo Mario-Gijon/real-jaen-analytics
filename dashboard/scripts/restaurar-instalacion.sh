@@ -2,7 +2,7 @@
 # Recuperación conjunta de un respaldo de scripts/respaldo-instalacion.sh en volúmenes NUEVOS
 # Sirve también para una primera carga del servidor.
 #
-#   ENV_FILE=.env.prod sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
+#   ENV_FILE=deploy/prod/.env sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
 #
 # RESPALDO es una carpeta dentro de RJ_IMPORT_DIR, configurado en relación con la raíz del workspace; el backend la lee en /imports, en solo lectura.
 # Comprueba SHA256SUMS; se niega si algún volumen de destino ya existe; restaura la base, sus registros de
@@ -10,9 +10,11 @@
 # de navegador nuevo y verifica que el coordinador acepta la generación del respaldo. No arranca servicios.
 set -eu
 SRC=${1:?Indica la carpeta del respaldo}
-ENV_FILE=${ENV_FILE:-.env.prod}
-COMPOSE_FILES=${COMPOSE_FILES:--f compose.prod.yaml}
+ENV_FILE=${ENV_FILE:-deploy/prod/.env}
 test -f "$ENV_FILE" || { echo "No existe $ENV_FILE" >&2; exit 1; }
+COMPOSE_DIR=$(cd deploy/prod && pwd)
+ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
+COMPOSE_FILES=${COMPOSE_FILES:--f compose.yaml}
 var() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
 STATE_VOLUME=$(var RJ_PROD_SPORTS_STATE_VOLUME)
 JOBS_VOLUME=$(var RJ_PROD_ACQUISITION_JOBS_VOLUME)
@@ -22,7 +24,7 @@ IMPORT_DIR=$(var RJ_IMPORT_DIR)
 PROJECT=$(var COMPOSE_PROJECT_NAME)
 PROJECT=${PROJECT:-real-jaen-analytics-prod}
 # shellcheck disable=SC2086
-dc() { docker compose --env-file "$ENV_FILE" $COMPOSE_FILES "$@"; }
+dc() (cd "$COMPOSE_DIR" && docker compose --env-file "$ENV_FILE" $COMPOSE_FILES "$@")
 # The backup must be inside the import directory, which the backend mounts read-only at /imports.
 src_abs=$(cd "$SRC" && pwd)
 imp_abs=$(cd "$IMPORT_DIR" && pwd)
@@ -61,4 +63,4 @@ docker run --rm --network none --user 10001:10001 -v "$JOBS_VOLUME:/acquisition-
 docker run --rm --network none --user 10001:10001 -v "$VIDEO_VOLUME:/video" -v "$imp_abs:/imports:ro" \
   --entrypoint tar "$SPORTS_DATA_IMAGE" -xf "/imports/$REL/video-service-state.tar" -C /video
 dc --profile admin run --rm --no-deps acquisition-admin initialize-profile --confirm-new-profile
-echo "Restaurado sin arrancar servicios. Consulta README.md para iniciar compose.prod.yaml."
+echo "Restaurado sin arrancar servicios. Consulta README.md para iniciar deploy/prod/compose.yaml."

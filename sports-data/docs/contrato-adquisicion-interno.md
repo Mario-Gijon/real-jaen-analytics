@@ -2,7 +2,7 @@
 
 Vigente desde el 28-10-2026. Sustituye a la integración simulada v1 y al protocolo v2 del piloto, ambos en
 [historico/](historico/README.md). Estado de la adquisición y ejecuciones reales: [adquisicion-sofascore.md](adquisicion-sofascore.md).
-Despliegue: servicios `sports-data` y `acquisition` en `compose.dev.yaml` y `compose.prod.yaml`. Las imágenes mantienen esta frontera HTTP.
+Despliegue: servicios `sports-data` y `acquisition` en `deploy/dev/compose.yaml` y `deploy/prod/compose.yaml`. Las imágenes mantienen esta frontera HTTP.
 
 ## Fronteras
 

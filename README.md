@@ -9,41 +9,67 @@ dashboard/       Next.js, BFF, contratos y pruebas
 sports-data/     API deportiva, control, importador, persistencia y pruebas
 acquisition/     servicio HTTP de adquisición, Dockerfile y pruebas
 video-service/   API de vídeo, OCR, sincronización y pruebas
-compose.dev.yaml desarrollo con hot reload
-compose.prod.yaml producción con imágenes independientes versionadas
+deploy/dev/      Compose y ejemplo de variables para desarrollo
+deploy/prod/     Compose y ejemplo de variables para producción
+.gitlab-ci.yml   despliegue remoto opcional en SINBAD²
 ```
 
 El botón «Actualizar» sigue el flujo Dashboard → Sports Data (`control.py`) → Acquisition. El servicio Acquisition queda a la espera de solicitudes y no inicia trabajos al arrancar. Sports Data mantiene el control, los contratos, la persistencia y las operaciones de comentarios. Las bases, los vídeos, las calibraciones operativas y los secretos no forman parte del repositorio.
 
-## Compose
+Los Compose de raíz son puntos de entrada compatibles con instalaciones existentes; la operativa nueva se ejecuta desde `deploy/dev` o `deploy/prod`. El único perfil conservado oculta el contenedor administrativo de mantenimiento, que se usa solo durante una restauración excepcional.
 
-Desarrollo usa almacenamiento y redes con nombres `rja-dev-*`; producción usa `rja-prod-*`. Ninguna API publica puertos al host. Solo Dashboard publica un puerto configurable. Los valores `LOCAL_DATA_API_URL=http://sports-data:8002` y `VIDEO_SERVICE_URL=http://video-service:8010` se resuelven dentro de las redes privadas.
+## Desarrollo
 
-1. Copia `.env.dev.example` a `.env.dev` y ajusta los directorios externos para secretos de desarrollo, copias de importación y la imagen auditada del runtime de navegador.
-2. Prepara esos archivos y directorios fuera del repositorio. Usa exclusivamente copias de datos para desarrollo.
-3. Valida la configuración y arranca con:
-
-   ```sh
-   docker compose --env-file .env.dev -f compose.dev.yaml config
-   docker compose --env-file .env.dev -f compose.dev.yaml up --build
-   ```
-
-Acquisition usa el perfil opcional `acquisition`; las consultas deportivas, el Dashboard y Video Service arrancan sin él. Para iniciar solo esos tres servicios:
+Desde `deploy/dev`, crea el archivo privado a partir del ejemplo, completa las rutas locales de secretos/importaciones y selecciona la imagen auditada de Chromium:
 
 ```sh
-docker compose --env-file .env.dev -f compose.dev.yaml up --build dashboard sports-data video-service
+cd deploy/dev
+cp -n .env.example .env
+docker compose up -d --build
 ```
 
-Para habilitar explícitamente SofaScore en desarrollo, configura `RJ_ACQUISITION_ENABLE_REAL=1` y arranca Acquisition con `--profile acquisition`. Esto inicia su API, pero no una adquisición. En producción el valor de ejemplo es `0`; debe cambiarse expresamente a `1` antes de activar el perfil.
+Este Compose mantiene el proyecto `real-jaen-analytics-dev` y los volúmenes/redes `rja-dev-*`, por lo que conserva el estado existente de desarrollo. Acquisition arranca junto con los otros tres servicios, pero no inicia trabajos al arrancar. El modo real permanece desactivado por defecto. Las actualizaciones usan tres jornadas y un máximo de 50 envíos físicos.
 
-El estado de «Actualizar» comprueba de forma dinámica la salud y el proveedor de Acquisition. Si está apagado o su modo no coincide con la instalación de Sports Data, el control queda deshabilitado y no se crea un trabajo. Si Acquisition cae después de empezar, el trabajo queda registrado como fallido o interrumpido y se conserva la última generación publicada.
+## Producción local y respaldo inicial
 
-Para producción, configura `.env.prod` a partir de `.env.prod.example`, incluyendo imágenes con tags independientes, secretos externos, imports y el directorio externo del catálogo de vídeos. El volumen `rja-prod-video-state` conserva la SQLite de Video Service y las calibraciones creadas por el servicio; `rja-prod-sports-state` conserva la base deportiva.
+Desde `deploy/prod`, prepara el `.env` privado con secretos y directorios externos. El ejemplo usa el puerto local `33302` y recursos `rja-sinbad2-*`, aislados de las instalaciones en `33201` y `33301`:
 
-Los scripts `dashboard/scripts/respaldo-instalacion.sh` y `dashboard/scripts/restaurar-instalacion.sh` usan `.env.prod`, volúmenes nuevos del monorepositorio y conservan tanto el estado deportivo como el estado de vídeo. La restauración se limita a volúmenes que todavía no existan.
+```sh
+cd deploy/prod
+cp -n .env.example .env
+docker compose config -q
+docker compose build
+```
 
-Acquisition conserva el runtime auditado de Chromium como imagen base separada, indicado por `RJ_SCRAPER_RUNTIME_IMAGE` en desarrollo. Compose no construye ni descarga el runtime de navegador.
+Para una instalación nueva, copia el respaldo verificado al directorio configurado para importaciones y restáuralo una sola vez, antes de arrancar servicios:
 
-## Datos operativos
+```sh
+cd ../..
+ENV_FILE=deploy/prod/.env sh dashboard/scripts/restaurar-instalacion.sh /srv/real-jaen-analytics/imports/RESPALDO_VERIFICADO
+```
 
-Se preparó sin alterar los checkouts de referencia. No se copiaron bases SQLite, importaciones, secretos, vídeos, manifiestos operativos ni calibraciones. No se ejecutaron adquisiciones, descargas, OCR, migraciones ni actualizaciones deportivas durante la consolidación.
+La restauración crea volúmenes únicamente si aún no existen, valida sumas, SQLite y generación, y repone historial de actualizaciones, trabajos de Acquisition y estado/calibraciones de Video Service. Inicializa un perfil de navegador nuevo; no copia cookies. Tras restaurar, el arranque local habitual es:
+
+```sh
+cd deploy/prod
+docker compose up -d --build
+```
+
+Los archivos `.env` quedan fuera de Git. Las actualizaciones de código no ejecutan importaciones ni restauraciones. No uses `docker compose down -v`.
+
+## GitLab CI/CD en SINBAD²
+
+El único job, `deploy_to_sinbad2`, se habilita al establecer la variable protegida `ENABLE_SINBAD2_DEPLOY=1` para la rama principal. Configura `SSH_PRIVATE_KEY` y `SSH_KNOWN_HOSTS` como variables protegidas de tipo archivo, además de `SSH_HOST` y `REMOTE_USER`. La clave y los hosts conocidos no se imprimen ni se copian al servidor.
+
+El job transfiere `git archive` del commit, con solo archivos versionados, a un directorio de versión bajo `~/deploy_real-jaen-analytics/releases/`. Cada despliegue construye desde un snapshot limpio, así que archivos eliminados de commits anteriores no quedan en los contextos. El `.env.prod` privado vive en `~/deploy_real-jaen-analytics/.env.prod`; no se sincroniza ni sobrescribe. Las etiquetas locales de imagen se mantienen en ese archivo, por lo que los scripts de respaldo siguen usando la misma imagen Sports Data. Compose valida la configuración y la existencia de los volúmenes restaurados antes de construir/actualizar los cuatro servicios y comprobar sus healthchecks. No se ejecuta `down`, no se borran volúmenes y no se vuelve a importar el respaldo.
+
+La preparación inicial se hace una vez, antes de activar el job: clona el código versionado en `~/deploy_real-jaen-analytics/bootstrap`, copia el ejemplo a `~/deploy_real-jaen-analytics/.env.prod` y configura los secretos/rutas y nombres únicos. Instala en Docker la imagen de runtime auditada y coloca el respaldo verificado dentro de `RJ_IMPORT_DIR`. Construye sin iniciar servicios desde `bootstrap/deploy/prod` con `docker compose --env-file ~/deploy_real-jaen-analytics/.env.prod build`. Luego ejecuta desde la raíz de `bootstrap` `ENV_FILE=~/deploy_real-jaen-analytics/.env.prod sh dashboard/scripts/restaurar-instalacion.sh /srv/real-jaen-analytics/imports/RESPALDO_VERIFICADO`. La restauración comprueba las sumas y la generación antes de crear y llenar los volúmenes nuevos. Después protege las variables SSH en GitLab y activa `ENABLE_SINBAD2_DEPLOY=1` en la rama principal. El job comprobará que los volúmenes existen antes de arrancar nada. No lo habilites antes de terminar esa restauración inicial.
+
+Para respaldos y restauraciones excepcionales, los scripts existentes usan por defecto `deploy/prod/.env` y `deploy/prod/compose.yaml`:
+
+```sh
+ENV_FILE=deploy/prod/.env sh dashboard/scripts/respaldo-instalacion.sh /ruta/nueva/para/respaldo
+ENV_FILE=deploy/prod/.env sh dashboard/scripts/restaurar-instalacion.sh /srv/real-jaen-analytics/imports/RESPALDO_VERIFICADO
+```
+
+La base deportiva y su generación confirmada, comentarios/estadísticas e historial de actualizaciones permanecen en volúmenes. Las referencias de vídeo y calibraciones se conservan en sus ubicaciones/volúmenes configurados. No hay actualizaciones programadas: Acquisition solo trabaja tras una solicitud manual autorizada.

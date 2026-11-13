@@ -1,0 +1,80 @@
+stages:
+  - deploy
+
+deploy_to_sinbad2:
+  stage: deploy
+  image: alpine:3.22
+  resource_group: sinbad2-production
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $ENABLE_SINBAD2_DEPLOY == "1"'
+      when: on_success
+    - when: never
+  before_script:
+    - apk add --no-cache git openssh-client
+    - test -r "$SSH_PRIVATE_KEY" && test -r "$SSH_KNOWN_HOSTS"
+    - test -n "$SSH_HOST" && test -n "$REMOTE_USER"
+    - mkdir -m 700 -p "$HOME/.ssh"
+    - cp "$SSH_PRIVATE_KEY" "$HOME/.ssh/id_ed25519"
+    - chmod 600 "$HOME/.ssh/id_ed25519"
+    - cp "$SSH_KNOWN_HOSTS" "$HOME/.ssh/known_hosts"
+    - chmod 600 "$HOME/.ssh/known_hosts"
+  script:
+    - |
+      set -eu
+      set -o pipefail
+      target="${REMOTE_USER}@${SSH_HOST}"
+      release_id="${CI_COMMIT_SHA}-${CI_PIPELINE_ID}-${CI_JOB_ID}"
+      ssh_opts="-i $HOME/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+      git archive --format=tar "$CI_COMMIT_SHA" |
+        ssh $ssh_opts "$target" "set -eu; root=\"\$HOME/deploy_real-jaen-analytics\"; release=\"\$root/releases/${release_id}\"; mkdir -p \"\$release\"; tar -xf - -C \"\$release\""
+      ssh $ssh_opts "$target" sh -s -- "$release_id" "$CI_COMMIT_SHA" <<'REMOTE_SCRIPT'
+      set -eu
+      release_id=$1
+      commit_sha=$2
+      root="$HOME/deploy_real-jaen-analytics"
+      release="$root/releases/$release_id"
+      compose_dir="$release/deploy/prod"
+      compose_file="$compose_dir/compose.yaml"
+      env_file="$root/.env.prod"
+      test -d "$release"
+      test -f "$compose_file"
+      test -f "$env_file" || { echo "Missing private deployment config: $env_file" >&2; exit 1; }
+
+      cd "$compose_dir"
+      dc() {
+        docker compose --project-directory "$compose_dir" \
+          --env-file "$env_file" -f compose.yaml "$@"
+      }
+
+      dc config -q
+      for key in RJ_PROD_SPORTS_STATE_VOLUME RJ_PROD_ACQUISITION_PROFILES_VOLUME \
+        RJ_PROD_ACQUISITION_JOBS_VOLUME RJ_PROD_VIDEO_STATE_VOLUME; do
+        volume=$(sed -n "s/^$key=//p" "$env_file" | tail -n 1)
+        case "$volume" in
+          ""|*[!a-zA-Z0-9_.-]*) echo "Missing or invalid $key in $env_file" >&2; exit 1 ;;
+        esac
+        docker volume inspect "$volume" >/dev/null 2>&1 || {
+          echo "Persistent volume $volume is missing; restore the verified backup before deployment" >&2
+          exit 1
+        }
+      done
+      runtime_image=$(sed -n 's/^RJ_SCRAPER_RUNTIME_IMAGE=//p' "$env_file" | tail -n 1)
+      test -n "$runtime_image" || { echo "RJ_SCRAPER_RUNTIME_IMAGE is required in $env_file" >&2; exit 1; }
+      docker image inspect "$runtime_image" >/dev/null 2>&1 || {
+        echo "Audited browser runtime image $runtime_image is not present on SINBAD²" >&2
+        exit 1
+      }
+
+      dc up -d --build --wait --wait-timeout 300 dashboard sports-data acquisition video-service
+      for service in dashboard sports-data acquisition video-service; do
+        container_id=$(dc ps -q "$service")
+        test -n "$container_id" || { echo "$service has no container" >&2; exit 1; }
+        state=$(docker inspect --format '{{.State.Status}}' "$container_id")
+        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_id")
+        test "$state" = running && test "$health" = healthy || {
+          echo "$service is not healthy (state=$state, health=$health)" >&2
+          exit 1
+        }
+      done
+      echo "Deployment $commit_sha is healthy in $root"
+      REMOTE_SCRIPT

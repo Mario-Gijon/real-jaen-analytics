@@ -1,7 +1,7 @@
 #!/bin/sh
 # Respaldo consistente de una instalación Docker (README.md).
 #
-#   ENV_FILE=.env.prod sh dashboard/scripts/respaldo-instalacion.sh DESTINO
+#   ENV_FILE=deploy/prod/.env sh dashboard/scripts/respaldo-instalacion.sh DESTINO
 #
 # Desde la raíz del monorepositorio. DESTINO es una carpeta nueva del anfitrión. Contenido:
 #   real-jaen.sqlite          copia SQLite consistente (persistencia copiar: integridad y huella comprobadas)
@@ -16,9 +16,11 @@
 # Se niega si hay una actualización en curso. Nunca toca los datos de origen.
 set -eu
 DEST=${1:?Indica una carpeta de destino nueva}
-ENV_FILE=${ENV_FILE:-.env.prod}
-COMPOSE_FILES=${COMPOSE_FILES:--f compose.prod.yaml}
+ENV_FILE=${ENV_FILE:-deploy/prod/.env}
 test -f "$ENV_FILE" || { echo "No existe $ENV_FILE" >&2; exit 1; }
+COMPOSE_DIR=$(cd deploy/prod && pwd)
+ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
+COMPOSE_FILES=${COMPOSE_FILES:--f compose.yaml}
 test ! -e "$DEST" || { echo "El destino ya existe: $DEST" >&2; exit 1; }
 var() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
 STATE_VOLUME=$(var RJ_PROD_SPORTS_STATE_VOLUME)
@@ -27,7 +29,7 @@ VIDEO_VOLUME=$(var RJ_PROD_VIDEO_STATE_VOLUME)
 SPORTS_DATA_IMAGE=$(var RJ_SPORTS_DATA_IMAGE)
 test -n "$STATE_VOLUME" && test -n "$JOBS_VOLUME" && test -n "$VIDEO_VOLUME" && test -n "$SPORTS_DATA_IMAGE" || { echo "Faltan variables de volúmenes o RJ_SPORTS_DATA_IMAGE en $ENV_FILE" >&2; exit 1; }
 # shellcheck disable=SC2086
-dc() { docker compose --env-file "$ENV_FILE" $COMPOSE_FILES "$@"; }
+dc() (cd "$COMPOSE_DIR" && docker compose --env-file "$ENV_FILE" $COMPOSE_FILES "$@")
 # Ninguna actualización en curso (lectura inmutable: no toca los archivos).
 active=$(docker run --rm --network none -v "$STATE_VOLUME:/state:ro" --entrypoint python "$SPORTS_DATA_IMAGE" -c "
 import os, sqlite3
