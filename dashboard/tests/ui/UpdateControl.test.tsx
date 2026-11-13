@@ -15,9 +15,11 @@ const operatorStatus = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({
   available: true, scope: SCOPE, lastPublished: null, activeJob: null, lastJob: null, lastCoverage: null, ...over });
 
 type Handler = (url: string, init?: RequestInit) => { status?: number; body?: unknown };
-function api(handler: Handler) {
+function api(handler: Handler, canUpdate = true) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const { status = 200, body = null } = handler(String(input), init);
+    const url = String(input);
+    const result = url === "/api/v1/session" ? { body: { required: true, signedIn: true, canUpdate } } : handler(url, init);
+    const { status = 200, body = null } = result;
     return status === 204 ? new Response(null, { status }) : new Response(JSON.stringify(body), { status });
   });
   vi.stubGlobal("fetch", fetch);
@@ -33,7 +35,7 @@ afterEach(() => {
 });
 
 describe("UpdateControl (top bar)", () => {
-  it("is hidden where updates do not exist (the session that reads the data can update them)", async () => {
+  it("is hidden where updates do not exist", async () => {
     for (const status of [{ available: false, scope: null, lastPublished: null, activeJob: null, lastJob: null, lastCoverage: null }]) {
       const fetch = api(() => ({ body: status }));
       const { container, unmount } = render(<UpdateControl />);
@@ -41,6 +43,14 @@ describe("UpdateControl (top bar)", () => {
       expect(container).toBeEmptyDOMElement();
       unmount();
     }
+  });
+
+  it("hides all update controls and polling for a read-only session", async () => {
+    const fetch = api(() => ({ body: operatorStatus() }), false);
+    const { container } = render(<UpdateControl />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything()));
+    expect(container).toBeEmptyDOMElement();
+    expect(fetch.mock.calls.some(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(false);
   });
 
   it("clearly disables starting an update when Acquisition is unavailable", async () => {

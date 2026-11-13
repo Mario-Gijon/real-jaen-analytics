@@ -2,17 +2,34 @@
 
 import { RefreshCw } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { getSession } from "@/client/api";
 import { Button } from "@/ui/Button";
 import { isActive, useUpdates } from "./use-updates";
 import { jobLine, updateTime } from "./labels";
 import css from "./Updates.module.css";
 
 /**
- * Compact update control of the top bar, in an installation that has updates (the session that consults the data
- * can update them). The button just says «Actualizar»; its accessible name and tooltip give the real scope the
- * backend declares (the pilot's or the group's). Details at /operador.
+ * Check the signed capability before mounting the update hook. A read-only session makes only this one session
+ * request; it never polls update status or displays Acquisition state.
  */
 export function UpdateControl() {
+  const [canUpdate, setCanUpdate] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    getSession({ signal: controller.signal })
+      .then((session) => setCanUpdate(session.signedIn && session.canUpdate))
+      .catch(() => {
+        // Fail closed: without a signed update capability, do not mount any update controls or polling.
+      });
+    return () => controller.abort();
+  }, []);
+
+  if (!canUpdate) return null;
+  return <AuthorizedUpdateControl />;
+}
+
+function AuthorizedUpdateControl() {
   const { status, job, busy, problem, publishedNow, start, cancel, reload } = useUpdates();
   if (!status?.scope) return null;
   const scope = status.scope;

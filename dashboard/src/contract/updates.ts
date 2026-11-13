@@ -104,7 +104,7 @@ export type UpdateJob = {
   result: { publishedAt: string; reusedBundle: boolean; changed?: boolean; coverage: UpdateCoverage | null } | null;
 };
 
-/** `GET /api/v1/updates/current` (any session: the same session that consults the data can update them). */
+/** `GET /api/v1/updates/current` (requires a signed session with update capability). */
 export type UpdateStatus = {
   available: boolean;
   scope: UpdateScope | null;

@@ -195,6 +195,7 @@ services:
       LOCAL_DATA_API_URL: http://sports-data:8002
       VIDEO_SERVICE_URL: http://video-service:8010
       RJ_ACCESS_PASSWORD_FILE: /run/secrets/access-password
+      RJ_UPDATE_PASSWORD_FILE: /run/secrets/update-password
       RJ_SESSION_SECRET_FILE: /run/secrets/session/session-secret
       RJ_CONTROL_SECRET_FILE: /run/secrets/control-token
     volumes:
@@ -219,6 +220,11 @@ services:
       - type: bind
         source: ${RJ_DEV_SECRET_DIR:?Set RJ_DEV_SECRET_DIR outside this repository}/access-password
         target: /run/secrets/access-password
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${RJ_DEV_SECRET_DIR:?Set RJ_DEV_SECRET_DIR outside this repository}/update-password
+        target: /run/secrets/update-password
         read_only: true
         bind: {create_host_path: false}
       - type: bind

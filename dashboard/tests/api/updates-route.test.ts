@@ -12,6 +12,7 @@ import { DELETE as logout, POST as login } from "@/app/api/v1/session/route";
 import { clearFailures } from "@/server/auth/session";
 
 const PASSWORD = "shared-password-for-tests";
+const UPDATE_PASSWORD = "update-password-for-tests";
 const SESSION_SECRET = "session-secret-for-tests-0123456789abcdef";
 const CONTROL_SECRET = "control-secret-for-tests-ABCDEFGHIJKLMNOP";
 const ORIGIN = "http://localhost:3000";
@@ -51,8 +52,8 @@ function request(path: string, { method = "GET", cookie, origin = ORIGIN, header
   });
 }
 
-async function session(): Promise<string> {
-  const response = await login(request("/api/v1/session", { method: "POST", body: { password: PASSWORD } }));
+async function session(password = UPDATE_PASSWORD): Promise<string> {
+  const response = await login(request("/api/v1/session", { method: "POST", body: { password } }));
   expect(response.status).toBe(204);
   return response.headers.get("set-cookie")!.split(";")[0];
 }
@@ -60,11 +61,13 @@ async function session(): Promise<string> {
 beforeEach(() => {
   folder = mkdtempSync(join(tmpdir(), "rj-updates-"));
   writeFileSync(join(folder, "password"), PASSWORD);
+  writeFileSync(join(folder, "update-password"), UPDATE_PASSWORD);
   writeFileSync(join(folder, "session"), SESSION_SECRET);
   writeFileSync(join(folder, "control"), CONTROL_SECRET);
   vi.stubEnv("DATA_MODE", "real");
   vi.stubEnv("LOCAL_DATA_API_URL", "http://backend:8001");
   vi.stubEnv("RJ_ACCESS_PASSWORD_FILE", join(folder, "password"));
+  vi.stubEnv("RJ_UPDATE_PASSWORD_FILE", join(folder, "update-password"));
   vi.stubEnv("RJ_SESSION_SECRET_FILE", join(folder, "session"));
   vi.stubEnv("RJ_CONTROL_SECRET_FILE", join(folder, "control"));
   clearFailures();
@@ -78,19 +81,17 @@ afterEach(() => {
 });
 
 describe("update routes", () => {
-  it("are unavailable in the demonstration or without configuration, without asking the backend", async () => {
+  it("returns an empty status for configured admins when updates are unavailable, without calling the backend", async () => {
     backend(() => json(backendStatus));
-    for (const env of [{ DATA_MODE: "demo" }, { RJ_ACCESS_PASSWORD_FILE: join(folder, "missing") }, { RJ_SESSION_SECRET_FILE: "" },
-      { RJ_CONTROL_SECRET_FILE: "" }]) {
+    const cookie = await session();
+    for (const env of [{ DATA_MODE: "demo" }, { RJ_CONTROL_SECRET_FILE: "" }]) {
       for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
-      expect(await (await current(request("/api/v1/updates/current"))).json()).toEqual(
+      expect(await (await current(request("/api/v1/updates/current", { cookie }))).json()).toEqual(
         { available: false, scope: null, lastPublished: null, activeJob: null, lastJob: null, lastCoverage: null });
-      const refused = await start(request("/api/v1/updates", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } }));
+      const refused = await start(request("/api/v1/updates", { method: "POST", cookie, headers: { "Idempotency-Key": crypto.randomUUID() } }));
       expect(refused.status).toBe(409);
       expect(((await refused.json()) as ApiError).error.code).toBe("UPDATE_UNAVAILABLE");
       vi.stubEnv("DATA_MODE", "real");
-      vi.stubEnv("RJ_ACCESS_PASSWORD_FILE", join(folder, "password"));
-      vi.stubEnv("RJ_SESSION_SECRET_FILE", join(folder, "session"));
       vi.stubEnv("RJ_CONTROL_SECRET_FILE", join(folder, "control"));
     }
     expect(calls).toEqual([]);
@@ -111,6 +112,22 @@ describe("update routes", () => {
     expect(calls[0].headers.get("authorization")).toBe(`Bearer ${CONTROL_SECRET}`);
   });
 
+  it("returns 401 to anonymous requests and 403 to read sessions on every update endpoint without reaching the backend", async () => {
+    backend(() => json(backendStatus));
+    const normal = await session(PASSWORD);
+    const params = { params: Promise.resolve({ updateId: JOB_ID }) };
+    expect((await current(request("/api/v1/updates/current"))).status).toBe(401);
+    expect((await start(request("/api/v1/updates", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } }))).status).toBe(401);
+    expect((await job(request(`/api/v1/updates/${JOB_ID}`), params)).status).toBe(401);
+    expect((await cancel(request(`/api/v1/updates/${JOB_ID}/cancel`, { method: "POST" }), params)).status).toBe(401);
+
+    expect((await current(request("/api/v1/updates/current", { cookie: normal }))).status).toBe(403);
+    expect((await start(request("/api/v1/updates", { method: "POST", cookie: normal, headers: { "Idempotency-Key": crypto.randomUUID() } }))).status).toBe(403);
+    expect((await job(request(`/api/v1/updates/${JOB_ID}`, { cookie: normal }), params)).status).toBe(403);
+    expect((await cancel(request(`/api/v1/updates/${JOB_ID}/cancel`, { method: "POST", cookie: normal }), params)).status).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
   it("forwards live Acquisition unavailability without dropping the existing scope or publication", async () => {
     backend(() => json({ ...backendStatus, available: false, active_job: null }));
     const response = await current(request("/api/v1/updates/current", { cookie: await session() }));
@@ -122,11 +139,11 @@ describe("update routes", () => {
     });
   });
 
-  it("open a signed HttpOnly 90-day session only with the password, from the same origin, and throttle guesses", async () => {
+  it("opens signed capability-specific HttpOnly sessions only from the same origin and throttles guesses", async () => {
     const wrongOrigin = await login(request("/api/v1/session", { method: "POST", origin: "https://evil.example", body: { password: PASSWORD } }));
     expect(wrongOrigin.status).toBe(403);
     const cookie = (await login(request("/api/v1/session", { method: "POST", body: { password: PASSWORD } }))).headers.get("set-cookie")!;
-    expect(cookie).toMatch(/^rj_session=v1\.\d+\.[^;]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000$/);
+    expect(cookie).toMatch(/^rj_session=v2\.\d+\.[^;]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000$/);
     expect(cookie).not.toContain(PASSWORD);
     for (let attempt = 0; attempt < 5; attempt++) {
       expect((await login(request("/api/v1/session", { method: "POST", body: { password: "wrong" } }))).status).toBe(401);
@@ -228,9 +245,9 @@ describe("update routes", () => {
     backend(() => json(backendStatus));
     const cookie = await session();
     const [name, value] = cookie.split("=");
-    const [version, expires, nonce, signature] = value.split(".");
-    for (const forged of [`${name}=${version}.${expires}.${nonce}.AAAA`, `${name}=${version}.1.${nonce}.${signature}`,
-      `${name}=v0.${expires}.${nonce}.${signature}`, `${name}=`]) {
+    const [version, expires, nonce, capability, signature] = value.split(".");
+    for (const forged of [`${name}=${version}.${expires}.${nonce}.${capability}.AAAA`, `${name}=${version}.1.${nonce}.${capability}.${signature}`,
+      `${name}=v0.${expires}.${nonce}.${capability}.${signature}`, `${name}=${version}.${expires}.${nonce}.read.${signature}`, `${name}=`]) {
       expect((await start(request("/api/v1/updates", { method: "POST", cookie: forged, headers: { "Idempotency-Key": crypto.randomUUID() } }))).status).toBe(401);
     }
   });

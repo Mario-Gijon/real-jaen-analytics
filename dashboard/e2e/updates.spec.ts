@@ -1,10 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
+import { E2E_UPDATE_PASSWORD } from "./access";
 import { REAL_SOURCE } from "./sources";
 
 /*
- * Update control (docs/contrato-actualizaciones.md) with simulated /api/v1/updates answers: the e2e server is
- * the demonstration, where updates do not exist. The full flow with the real backend and the local provider is
- * validated separately (api/docker/acquisition/test_updates.py).
+ * Update control with simulated /api/v1/updates answers and a test-only administrative session. The full flow
+ * with the real backend and local provider is validated separately.
  */
 
 const SCOPE = { kind: "pilot", label: "Actualización piloto: calendario de la jornada 1 y un partido", round: 1,
@@ -40,8 +40,33 @@ async function serveUpdates(page: Page, { available = true } = {}) {
   return state;
 }
 
+async function signInAsAdmin(page: Page) {
+  await page.context().clearCookies();
+  await page.goto("/acceso");
+  await page.getByLabel("Contraseña").fill(E2E_UPDATE_PASSWORD);
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page).toHaveURL(/\/$/);
+}
+
+test("a read-only session has no update controls or polling and cannot open /operador", async ({ page }) => {
+  let updateRequests = 0;
+  await page.route("**/api/v1/updates/**", (route) => {
+    updateRequests += 1;
+    return route.fulfill({ status: 500 });
+  });
+  await page.goto("/teams");
+  const banner = page.getByRole("banner");
+  await expect(banner.getByRole("button", { name: /Actualizar|Cancelar|No disponible/ })).toHaveCount(0);
+  await expect(banner.getByText(/Publicado el|Sin publicaciones/)).toHaveCount(0);
+  expect(updateRequests).toBe(0);
+  await page.goto("/operador");
+  await expect(page).toHaveURL(/\/$/);
+  expect(updateRequests).toBe(0);
+});
+
 test("the update screen shows the real scope and follows one update to its publication, without a second key", async ({ page }) => {
   const state = await serveUpdates(page);
+  await signInAsAdmin(page);
   await page.goto("/operador");
   await expect(page.getByRole("heading", { name: "Actualización de datos" })).toBeVisible();
   await expect(page.getByText("No actualiza el resto de la jornada ni de la temporada", { exact: false })).toBeVisible();
@@ -61,6 +86,7 @@ test("the update screen shows the real scope and follows one update to its publi
 
 test("the top bar shows the update control only where updates exist, labelled as the pilot", async ({ page }) => {
   await serveUpdates(page, { available: false });
+  await signInAsAdmin(page);
   await page.goto("/teams");
   await expect(page.getByRole("banner").getByRole("button", { name: /Actualizar/ })).toHaveCount(0);
   await page.unrouteAll();
@@ -84,6 +110,7 @@ test("a group update that published with pending resources says so and keeps new
   await page.route("**/api/v1/source", (route) => route.fulfill({ json: REAL_SOURCE }));
   await page.route("**/api/v1/updates/**", (route) => route.fulfill({ json: { available: true, scope: group,
     lastPublished: { at: "2026-10-28T17:02:00Z" }, activeJob: null, lastJob: done } }));
+  await signInAsAdmin(page);
   await page.goto("/operador");
   const main = page.getByRole("main");
   await expect(main.getByText(/^Actualización completada con pendientes/)).toBeVisible();
@@ -106,6 +133,7 @@ test("after a refused update, the last publication's deferred refreshes stay vis
   await page.route("**/api/v1/source", (route) => route.fulfill({ json: REAL_SOURCE }));
   await page.route("**/api/v1/updates/**", (route) => route.fulfill({ json: { available: true, scope: group,
     lastPublished: { at: "2026-10-28T17:02:00Z" }, activeJob: null, lastJob: failed, lastCoverage } }));
+  await signInAsAdmin(page);
   await page.goto("/operador");
   const main = page.getByRole("main");
   await expect(main.getByRole("heading", { name: /^Última publicación/ })).toBeVisible();

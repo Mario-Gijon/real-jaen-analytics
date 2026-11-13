@@ -24,7 +24,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("AccessView (/acceso)", () => {
   it("opens the session with the password and returns where the analyst was going; never keeps the password", async () => {
     const fetch = api((url, init) => {
-      if (init?.method !== "POST") return { body: { required: true, signedIn: false } };
+      if (init?.method !== "POST") return { body: { required: true, signedIn: false, canUpdate: false } };
       const { password } = JSON.parse(String(init?.body));
       return password === "la-buena-contrasena" ? { status: 204 }
         : { status: 401, body: { error: { code: "UNAUTHORIZED", message: "Contraseña incorrecta." } } };
@@ -51,7 +51,7 @@ describe("AccessView (/acceso)", () => {
 
   it("says when there were too many attempts, and when access is not configured", async () => {
     api((url, init) => init?.method === "POST" ? { status: 429, body: { error: { code: "TOO_MANY_REQUESTS", message: "x" } } }
-      : { body: { required: true, signedIn: false } });
+      : { body: { required: true, signedIn: false, canUpdate: false } });
     const { unmount } = render(<AccessView next="/" />);
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("Contraseña"), "lo-que-sea");
@@ -67,7 +67,7 @@ describe("AccessView (/acceso)", () => {
 
 describe("SessionControl (top bar)", () => {
   it("closes the session and goes to the access screen", async () => {
-    const fetch = api((url, init) => init?.method === "DELETE" ? { status: 204 } : { body: { required: true, signedIn: true } });
+    const fetch = api((url, init) => init?.method === "DELETE" ? { status: 204 } : { body: { required: true, signedIn: true, canUpdate: false } });
     render(<SessionControl />);
     await userEvent.setup().click(await screen.findByRole("button", { name: "Cerrar sesión" }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith("http://localhost:3000/acceso"));
@@ -75,7 +75,7 @@ describe("SessionControl (top bar)", () => {
   });
 
   it("is not shown in an open demonstration", async () => {
-    const fetch = api(() => ({ body: { required: false, signedIn: true } }));
+    const fetch = api(() => ({ body: { required: false, signedIn: true, canUpdate: false } }));
     const { container } = render(<SessionControl />);
     await waitFor(() => expect(fetch).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();

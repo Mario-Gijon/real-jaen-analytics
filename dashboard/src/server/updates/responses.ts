@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ApiError, ApiErrorCode } from "@/contract";
 import { ControlConflictError, ControlUnavailableError } from "./control-client";
-import { accessConfigured, controlSecret, hasSession, sameOrigin } from "../auth/session";
+import { controlSecret, sessionCapability, sameOrigin, updateAccessConfigured } from "../auth/session";
 import { dataMode } from "../data-source";
 
 /** Updates exist only with real data, a backend, the access control and the control secret configured. */
@@ -11,7 +11,7 @@ export function updatesConfigured(): boolean {
   } catch {
     return false;
   }
-  return Boolean(process.env.LOCAL_DATA_API_URL) && accessConfigured() && controlSecret() !== null;
+  return Boolean(process.env.LOCAL_DATA_API_URL) && updateAccessConfigured() && controlSecret() !== null;
 }
 
 /** Responses of the update routes: never cached, errors in the contract's shape. */
@@ -29,14 +29,20 @@ export const empty = (headers: Record<string, string> = {}) =>
 export const unavailable = () =>
   failure(409, "UPDATE_UNAVAILABLE", "La actualización no está disponible en esta instalación.");
 
-/**
- * The checks of every update operation, in order: configured, same origin (state changes only), session. The
- * access gate (src/proxy.ts) already requires the session; this is the second barrier. `null` when it may go on.
- */
+/** Require a signed administrative session; repeated at the route even when the proxy already checked it. */
+export function refusePermission(request: Request): NextResponse<ApiError> | null {
+  const capability = sessionCapability(request);
+  if (capability === null) return failure(401, "UNAUTHORIZED", "Inicia sesión.");
+  if (!capability) return failure(403, "FORBIDDEN", "No tienes permiso para actualizar.");
+  return null;
+}
+
+/** Checks session, capability, CSRF origin for mutations, and service configuration. */
 export function refuse(request: Request, { changesState }: { changesState: boolean }): NextResponse<ApiError> | null {
-  if (!updatesConfigured()) return unavailable();
+  const permission = refusePermission(request);
+  if (permission) return permission;
   if (changesState && !sameOrigin(request)) return failure(403, "FORBIDDEN", "Origen no permitido.");
-  if (!hasSession(request)) return failure(401, "UNAUTHORIZED", "Inicia sesión.");
+  if (!updatesConfigured()) return unavailable();
   return null;
 }
 

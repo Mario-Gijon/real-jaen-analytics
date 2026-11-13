@@ -85,18 +85,28 @@ cliente de adquisición → servicio `acquisition` y coordinador.
 
 ## Autorización
 
-No hay una autenticación propia de las actualizaciones. La **sesión de acceso a la aplicación** permite consultar
-y actualizar (`docker.md`, «Acceso»):
-- la protege una contraseña compartida;
-- dura 90 días;
-- la verifican `src/proxy.ts` y, de nuevo, estas rutas.
+No hay usuarios individuales ni roles configurables. La **sesión de acceso a la aplicación** distingue dos
+capacidades compartidas:
+- la contraseña de lectura permite consultar la aplicación;
+- la contraseña de actualización permite consultar y operar actualizaciones;
+- `RJ_ACCESS_PASSWORD_FILE` y `RJ_UPDATE_PASSWORD_FILE` apuntan a archivos privados externos al repositorio. La
+  contraseña administrativa es opcional; si falta, coincide con la normal o no es válida, las actualizaciones
+  quedan deshabilitadas;
+- `RJ_SESSION_SECRET_FILE` firma la cookie durante 90 días. La firma está ligada a la capacidad y a la contraseña
+  que la concedió. Cambiar esa contraseña revoca sus sesiones; rotar el secreto de sesión revoca todas;
+- las cookies `v1` anteriores se invalidan al pasar al formato `v2` para impedir que una sesión antigua conserve
+  permiso de actualización;
+- `src/proxy.ts` y las rutas API verifican la capacidad; una `canUpdate` enviada por el navegador no concede acceso.
 
 Reglas:
-- Sin sesión, las rutas de actualización responden `401 UNAUTHORIZED`, igual que las de datos.
+- Sin sesión, todas las rutas de actualización responden `401 UNAUTHORIZED`.
+- Una sesión de lectura recibe `403 FORBIDDEN` en esas rutas. No se reenvían solicitudes de lectura a Sports Data.
+- Una sesión de lectura que abre `/operador` vuelve al inicio. La cabecera no monta el control ni consulta el estado
+  de actualización; solo hace una consulta de sesión para saber si puede mostrarlo.
 - Toda operación que cambia estado exige además una cabecera `Origin` igual al origen de la petición (protección
   CSRF además de `SameSite`). Con un origen distinto, `403 FORBIDDEN`.
 - La pantalla de actualización es `/operador`, sin enlace en la navegación: se llega desde el estado de la cabecera.
-  La cabecera muestra el control a cualquier sesión, donde haya actualizaciones.
+  La cabecera muestra el control únicamente a una sesión con permiso de actualización.
 
 ## Rutas públicas nuevas
 
@@ -104,11 +114,11 @@ Todas responden con `Cache-Control: no-store`.
 
 | Método y ruta | Quién | Respuesta |
 |---|---|---|
-| GET /api/v1/updates/current | Sesión | `UpdateStatus`: disponibilidad dinámica de Acquisition, alcance, última publicación, trabajos activo y último, y cobertura de la última publicación |
-| POST /api/v1/updates | Sesión | Cuerpo vacío y cabecera `Idempotency-Key` (UUID). `202 {job, reused}`. La misma clave devuelve el mismo trabajo, aunque haya terminado. Con otro trabajo activo, devuelve ese con `reused: true` y no crea otro |
-| GET /api/v1/updates/{id} | Sesión | `200 UpdateJob`; `404` si no existe |
-| POST /api/v1/updates/{id}/cancel | Sesión | `202 UpdateJob`. Idempotente. `409 NOT_CANCELLABLE` si ya verifica, publica o terminó |
-| GET /api/v1/session | Cualquiera | `{required, signedIn}`; `503` si se exige y no está configurado |
+| GET /api/v1/updates/current | Sesión administrativa | `UpdateStatus`: disponibilidad dinámica de Acquisition, alcance, última publicación, trabajos activo y último, y cobertura de la última publicación |
+| POST /api/v1/updates | Sesión administrativa | Cuerpo vacío y cabecera `Idempotency-Key` (UUID). `202 {job, reused}`. La misma clave devuelve el mismo trabajo, aunque haya terminado. Con otro trabajo activo, devuelve ese con `reused: true` y no crea otro |
+| GET /api/v1/updates/{id} | Sesión administrativa | `200 UpdateJob`; `404` si no existe |
+| POST /api/v1/updates/{id}/cancel | Sesión administrativa | `202 UpdateJob`. Idempotente. `409 NOT_CANCELLABLE` si ya verifica, publica o terminó |
+| GET /api/v1/session | Cualquiera | `{required, signedIn, canUpdate}`; `canUpdate` solo refleja la capacidad validada por el servidor; `503` si se exige y no está configurado |
 | POST /api/v1/session | Cualquiera | `{"password": "…"}`: `204` y cookie de 90 días; `401` si no es válida; `429` si hay demasiados intentos |
 | DELETE /api/v1/session | Cualquiera | `204` y cookie borrada |
 

@@ -115,8 +115,8 @@ export type ApiErrorCode =
   | "TOO_MANY_REQUESTS";
 
 /**
- * `GET /api/v1/session`: whether this installation asks for the shared password (always with real data) and
- * whether the request has a valid session. `POST` with `{ password }` opens a 90-day session (HttpOnly cookie);
+ * `GET /api/v1/session`: whether this installation asks for a password, whether the request has a valid session,
+ * and whether that session may update data. `POST` with `{ password }` opens a 90-day session (HttpOnly cookie);
  * `DELETE` closes this browser's session.
  */
-export type AccessSession = { required: boolean; signedIn: boolean };
+export type AccessSession = { required: boolean; signedIn: boolean; canUpdate: boolean };

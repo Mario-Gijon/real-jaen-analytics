@@ -35,8 +35,8 @@ function forgetKey() {
 export const isActive = (job: UpdateJob | null) => job !== null && (job.status === "queued" || job.status === "running");
 
 /**
- * Update status, the job being followed, and its actions (any session). Polls only while a job is active, at the
- * interval the server asks for; a start or a cancel already in flight ignores further clicks.
+ * Update status, the job being followed, and its actions (administrative session only). The UI mounts this hook
+ * only after the signed session capability is confirmed. Polls only while a job is active.
  */
 export function useUpdates() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);

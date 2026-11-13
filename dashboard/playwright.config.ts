@@ -7,7 +7,7 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
   reporter: "list",
-  // The whole application asks for the shared password: one sign-in, reused by every spec (e2e/global-setup.ts).
+  // Read-only session reused by specs; update-specific specs sign in with a separate test-only password.
   globalSetup: "./e2e/global-setup.ts",
   use: { baseURL: "http://127.0.0.1:3100", storageState: STORAGE_STATE },
   projects: [
@@ -25,6 +25,7 @@ export default defineConfig({
     // Always the demonstration, whatever a local .env.local selects; the real-data specs simulate the API themselves.
     // Access configured with test-only files, so the gate is exercised as in a real installation.
     env: { DATA_MODE: "demo", RJ_ACCESS_PASSWORD_FILE: join(ACCESS_FIXTURES, "access-password"),
+      RJ_UPDATE_PASSWORD_FILE: join(ACCESS_FIXTURES, "update-password"),
       RJ_SESSION_SECRET_FILE: join(ACCESS_FIXTURES, "session-secret") },
     url: "http://127.0.0.1:3100/api/v1/session",
     reuseExistingServer: !process.env.CI,
