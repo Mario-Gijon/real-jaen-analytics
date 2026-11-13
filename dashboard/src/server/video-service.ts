@@ -231,7 +231,7 @@ export async function locateMatchVideoEvent(
   if (!isRecord(body) || typeof body.status !== "string") throw new VideoServiceUnavailableError();
   if (body.status === "resolved") {
     const result = body.result;
-    const methods = ["event_second_interpolation", "minute_tail", "boundary_extrapolation"];
+    const methods = ["event_second_interpolation", "minute_tail", "boundary_extrapolation", "later_reference_extrapolation"];
     if (!isRecord(result) || typeof result.video_second !== "number" || !Number.isFinite(result.video_second)
         || result.video_second < 0) throw new VideoServiceUnavailableError();
     if (typeof result.playback_video_second !== "number" || !Number.isFinite(result.playback_video_second)
@@ -239,6 +239,8 @@ export async function locateMatchVideoEvent(
         || typeof result.event_clock_second_start !== "number" || !Number.isFinite(result.event_clock_second_start)
         || typeof result.event_clock_second_estimate !== "number" || !Number.isFinite(result.event_clock_second_estimate)
         || typeof result.lead_seconds !== "number" || typeof result.estimated !== "boolean"
+        || typeof result.extrapolated_seconds !== "number" || !Number.isFinite(result.extrapolated_seconds)
+        || result.extrapolated_seconds < 0
         || typeof result.method !== "string" || !methods.includes(result.method)
         || !isRecord(result.confidence) || !Array.isArray(result.warnings)) {
       throw new VideoServiceUnavailableError();
@@ -247,8 +249,8 @@ export async function locateMatchVideoEvent(
       status: "resolved", videoSecond: result.playback_video_second,
       eventVideoSecond: result.event_video_second, eventClockSecond: result.event_clock_second_start,
       eventClockSecondEstimate: result.event_clock_second_estimate, leadSeconds: result.lead_seconds,
-      estimated: result.estimated,
-      method: result.method as "event_second_interpolation" | "minute_tail" | "boundary_extrapolation",
+      estimated: result.estimated, extrapolatedSeconds: result.extrapolated_seconds,
+      method: result.method as "event_second_interpolation" | "minute_tail" | "boundary_extrapolation" | "later_reference_extrapolation",
       confidence: {
         ocr: typeof result.confidence.ocr === "string" ? result.confidence.ocr : null,
         period: typeof result.confidence.period === "string" ? result.confidence.period : null,
@@ -258,7 +260,10 @@ export async function locateMatchVideoEvent(
     };
   }
   if (["ambiguous", "uncertain", "out_of_coverage"].includes(body.status)) {
-    return { status: body.status as "ambiguous" | "uncertain" | "out_of_coverage" };
+    return {
+      status: body.status as "ambiguous" | "uncertain" | "out_of_coverage",
+      ...(typeof body.reason === "string" && /^[a-z_]{1,80}$/.test(body.reason) ? { reason: body.reason } : {}),
+    };
   }
   throw new VideoServiceUnavailableError();
 }

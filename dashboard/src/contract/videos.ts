@@ -10,11 +10,11 @@ export type MatchVideoReference =
 /** Only a resolved response carries a single playback position. */
 export type VideoEventLocation =
   | { status: "resolved"; videoSecond: number; eventVideoSecond: number; eventClockSecond: number;
-      eventClockSecondEstimate: number; leadSeconds: number; estimated: boolean;
-      method: "event_second_interpolation" | "minute_tail" | "boundary_extrapolation";
+      eventClockSecondEstimate: number; leadSeconds: number; estimated: boolean; extrapolatedSeconds: number;
+      method: "event_second_interpolation" | "minute_tail" | "boundary_extrapolation" | "later_reference_extrapolation";
       confidence: { ocr: string | null; period: string | null; location: string | null };
       warnings: string[] }
-  | { status: "ambiguous" | "uncertain" | "out_of_coverage" };
+  | { status: "ambiguous" | "uncertain" | "out_of_coverage"; reason?: string };
 
 export type VideoJobStatus = "pending" | "downloading" | "calibrating" | "saving" | "completed" | "failed";
 

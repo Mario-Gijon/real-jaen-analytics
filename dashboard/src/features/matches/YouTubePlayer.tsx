@@ -33,6 +33,7 @@ export type YouTubePlaybackSnapshot = {
   error: boolean;
   provisionalTime?: number | null;
   scrubbing?: boolean;
+  manualSeek?: boolean;
 };
 
 declare global {
@@ -243,7 +244,7 @@ export function YouTubePlayer({ videoId, seekRequest, onPlaybackUpdate }: {
     pendingSeekRef.current = { seconds: target, requestedAt: Date.now() };
     updateRangePreview(target);
     player.seekTo(target, true);
-    const next = { ...snapshot, provisionalTime: target, scrubbing: false };
+    const next = { ...snapshot, provisionalTime: target, scrubbing: false, manualSeek: true };
     setSnapshot(next);
     callbackRef.current?.(next);
   }
@@ -257,7 +258,7 @@ export function YouTubePlayer({ videoId, seekRequest, onPlaybackUpdate }: {
     scrubbingRef.current = false;
     updateRangePreview(target);
     player.seekTo(target, true);
-    const next = { ...snapshot, provisionalTime: target, scrubbing: false };
+    const next = { ...snapshot, provisionalTime: target, scrubbing: false, manualSeek: true };
     setSnapshot(next);
     callbackRef.current?.(next);
   }
@@ -285,7 +286,7 @@ export function YouTubePlayer({ videoId, seekRequest, onPlaybackUpdate }: {
           scrubbingRef.current = true;
           pendingRangeRef.current = Number(event.currentTarget.value);
           updateRangePreview(pendingRangeRef.current);
-          const next = { ...snapshot, provisionalTime: pendingRangeRef.current, scrubbing: true };
+          const next = { ...snapshot, provisionalTime: pendingRangeRef.current, scrubbing: true, manualSeek: false };
           setSnapshot(next);
           callbackRef.current?.(next);
         }}
@@ -300,7 +301,7 @@ export function YouTubePlayer({ videoId, seekRequest, onPlaybackUpdate }: {
             scrubbingRef.current = true;
             pendingRangeRef.current = Number(event.currentTarget.value);
             updateRangePreview(pendingRangeRef.current);
-            const next = { ...snapshot, provisionalTime: pendingRangeRef.current, scrubbing: true };
+            const next = { ...snapshot, provisionalTime: pendingRangeRef.current, scrubbing: true, manualSeek: false };
             setSnapshot(next);
             callbackRef.current?.(next);
           }
@@ -316,7 +317,7 @@ export function YouTubePlayer({ videoId, seekRequest, onPlaybackUpdate }: {
           pendingRangeRef.current = value;
           updateRangePreview(value);
           if (scrubbingRef.current) {
-            const next = { ...snapshot, provisionalTime: value, scrubbing: true };
+            const next = { ...snapshot, provisionalTime: value, scrubbing: true, manualSeek: false };
             setSnapshot(next);
             callbackRef.current?.(next);
           } else commitRange(value);

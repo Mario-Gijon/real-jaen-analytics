@@ -90,6 +90,19 @@ describe("YouTubePlayer playback controls", () => {
     expect(timeline).toHaveValue("60");
     expect(onPlaybackUpdate).toHaveBeenLastCalledWith(expect.objectContaining({
       provisionalTime: 60, scrubbing: false, playing: true,
+      manualSeek: true,
+    }));
+  });
+
+  it("marks a step seek as manual so event selection can return to automatic following", async () => {
+    const onPlaybackUpdate = vi.fn();
+    render(<YouTubePlayer videoId="79Rngk2hcC0" seekRequest={null} onPlaybackUpdate={onPlaybackUpdate} />);
+    await waitFor(() => expect(playerConfig).not.toBeNull());
+    act(() => playerConfig?.events.onReady());
+
+    fireEvent.click(screen.getByRole("button", { name: "Avanzar 15 segundos" }));
+    expect(onPlaybackUpdate).toHaveBeenLastCalledWith(expect.objectContaining({
+      provisionalTime: 45, scrubbing: false, manualSeek: true,
     }));
   });
 

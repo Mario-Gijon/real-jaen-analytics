@@ -131,6 +131,137 @@ async def test_first_half_added_time_outside_synthetic_coverage_has_no_position(
     _assert_no_unique_position(body)
 
 
+def _set_early_first_reference(calibration):
+    first = next(segment for segment in calibration["segments"] if segment["period"] == "first")
+    first.update({
+        "game_clock_start": 90,
+        "game_clock_end": 2752,
+        "video_start": 1669,
+        "video_end": 4331,
+        "offset_seconds": 1579,
+        "reference_count": 24,
+        "max_residual_seconds": 0.5,
+        "ocr_confidence": "high",
+        "period_confidence": "high",
+        "location_confidence": "high",
+    })
+    calibration["uncertainty_zones"] = [{
+        "video_start": 0, "video_end": 1669, "reason": "outside_supported_reference_segment",
+    }]
+
+
+@pytest.mark.anyio
+async def test_minute_one_uses_a_safe_later_ocr_reference_and_differs_from_match_start(catalog, tmp_path):
+    record = _record_with_calibration(catalog, _set_early_first_reference)
+    async with async_asgi_client(_app_for_record(record, tmp_path)) as client:
+        shot_response = await client.get(
+            f"/api/v1/videos/{record.video_id}/locate",
+            params={"period": "first", "minute": "1"},
+        )
+        start_response = await client.get(
+            f"/api/v1/videos/{record.video_id}/locate",
+            params={"period": "first", "event_kind": "match_start"},
+        )
+
+    shot = shot_response.json()
+    start = start_response.json()
+    assert shot["status"] == "resolved"
+    assert shot["result"]["event_clock_second_estimate"] == 40
+    assert shot["result"]["playback_game_clock_second"] == 40
+    assert shot["result"]["video_second"] == pytest.approx(1619)
+    assert shot["result"]["extrapolated_seconds"] == pytest.approx(50)
+    assert shot["result"]["method"] == "later_reference_extrapolation"
+    assert any("primera referencia OCR" in warning for warning in shot["result"]["warnings"])
+    assert start["status"] == "resolved"
+    assert start["result"]["video_second"] == pytest.approx(1579)
+    assert shot["result"]["video_second"] != start["result"]["video_second"]
+
+
+@pytest.mark.anyio
+async def test_later_reference_extrapolation_respects_period_and_added_time_clock(catalog, tmp_path):
+    def move_second_segment(calibration):
+        segment = next(item for item in calibration["segments"] if item["period"] == "second")
+        segment.update({"game_clock_start": 2770, "video_start": 4770})
+
+    record = _record_with_calibration(catalog, move_second_segment)
+    async with async_asgi_client(_app_for_record(record, tmp_path)) as client:
+        early_second = await client.get(
+            f"/api/v1/videos/{record.video_id}/locate",
+            params={"period": "second", "minute": "46"},
+        )
+        added_time = await client.get(
+            f"/api/v1/videos/{record.video_id}/locate",
+            params={"period": "second", "minute": "90+4"},
+        )
+
+    early = early_second.json()
+    added = added_time.json()
+    assert early["status"] == "resolved"
+    assert early["result"]["event_clock_second_estimate"] == 2740
+    assert early["result"]["video_second"] == pytest.approx(4740)
+    assert early["result"]["extrapolated_seconds"] == pytest.approx(30)
+    assert early["result"]["method"] == "later_reference_extrapolation"
+    assert added["status"] == "resolved"
+    assert added["result"]["event_clock_second_estimate"] == 5620
+    assert added["result"]["video_second"] == pytest.approx(7620)
+
+
+@pytest.mark.anyio
+async def test_later_reference_extrapolation_stops_at_a_cut_or_conflicting_segments(catalog, tmp_path):
+    def add_cut(calibration):
+        _set_early_first_reference(calibration)
+        calibration["uncertainty_zones"].append({
+            "video_start": 1600, "video_end": 1669, "reason": "broadcast_cut_detected",
+        })
+
+    cut_record = _record_with_calibration(catalog, add_cut)
+    async with async_asgi_client(_app_for_record(cut_record, tmp_path / "cut")) as client:
+        cut = await client.get(
+            f"/api/v1/videos/{cut_record.video_id}/locate",
+            params={"period": "first", "minute": "1"},
+        )
+    assert cut.json()["status"] == "uncertain"
+    assert cut.json()["reason"] == "following_reference_crosses_discontinuity"
+    _assert_no_unique_position(cut.json())
+
+    def add_conflicting_reference(calibration):
+        _set_early_first_reference(calibration)
+        original = next(segment for segment in calibration["segments"] if segment["period"] == "first")
+        replay = dict(original)
+        replay.update({"segment_id": "S01-replay", "offset_seconds": 1604,
+                       "video_start": 1694, "video_end": 4356})
+        calibration["segments"].append(replay)
+
+    conflict_record = _record_with_calibration(catalog, add_conflicting_reference)
+    async with async_asgi_client(_app_for_record(conflict_record, tmp_path / "conflict")) as client:
+        conflict = await client.get(
+            f"/api/v1/videos/{conflict_record.video_id}/locate",
+            params={"period": "first", "minute": "1"},
+        )
+    assert conflict.json()["status"] == "ambiguous"
+    assert conflict.json()["reason"] == "multiple_first_reference_segments"
+    assert len(conflict.json()["candidates"]) == 2
+    _assert_no_unique_position(conflict.json())
+
+
+@pytest.mark.anyio
+async def test_later_reference_extrapolation_keeps_its_sixty_second_limit(catalog, tmp_path):
+    def move_first_reference_too_far(calibration):
+        _set_early_first_reference(calibration)
+        first = next(segment for segment in calibration["segments"] if segment["period"] == "first")
+        first["game_clock_start"] = 101
+        first["video_start"] = 1680
+
+    record = _record_with_calibration(catalog, move_first_reference_too_far)
+    async with async_asgi_client(_app_for_record(record, tmp_path)) as client:
+        response = await client.get(
+            f"/api/v1/videos/{record.video_id}/locate",
+            params={"period": "first", "minute": "1"},
+        )
+    assert response.json()["status"] == "out_of_coverage"
+    _assert_no_unique_position(response.json())
+
+
 @pytest.mark.parametrize(
     ("period", "kind", "expected_second", "gap"),
     [("first", "match_start", 1000, 30), ("second", "period_start", 4700, 40)],

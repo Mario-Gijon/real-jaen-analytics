@@ -7,7 +7,7 @@ import { MatchCommentsPanel } from "@/features/matches/MatchCommentsPanel";
 const youtubePlayerMock = vi.hoisted(() => ({
   playbackCallback: null as null | ((snapshot: {
     currentTime: number; duration: number; ready: boolean; playing: boolean; error: boolean;
-    provisionalTime?: number | null; scrubbing?: boolean;
+    provisionalTime?: number | null; scrubbing?: boolean; manualSeek?: boolean;
   }) => void),
 }));
 
@@ -34,7 +34,7 @@ vi.mock("@/features/matches/YouTubePlayer", () => ({
 
 const resolvedLocation = (videoSecond: number) => ({ status: "resolved" as const, videoSecond,
   eventVideoSecond: videoSecond, eventClockSecond: 3420, eventClockSecondEstimate: 3460,
-  leadSeconds: 0, estimated: true, method: "minute_tail" as const,
+  leadSeconds: 0, estimated: true, extrapolatedSeconds: 0, method: "minute_tail" as const,
   confidence: { ocr: "high", period: "high", location: "high" }, warnings: ["Segundo 40 seleccionado"] });
 
 const participant = (id: string, name: string, role: string) => ({
@@ -142,8 +142,8 @@ describe("MatchCommentsPanel unified events", () => {
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
     expect(await screen.findByTestId("video-player")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getAllByTitle("Reproducción desde 06:40 del reloj futbolístico")).toHaveLength(2));
-    await waitFor(() => expect(screen.getByTitle("Reproducción desde 07:40 del reloj futbolístico")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByTitle("Salto aproximado desde 06:40 del reloj futbolístico")).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTitle("Salto aproximado desde 07:40 del reloj futbolístico")).toBeInTheDocument());
     expect(locateMatchVideoEvent).toHaveBeenCalledTimes(3);
 
     const earlierCard = screen.getByText("Evento anterior.").closest("li");
@@ -163,6 +163,60 @@ describe("MatchCommentsPanel unified events", () => {
     expect(locateMatchVideoEvent).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps the exact manually chosen event for a shared video second, then resumes on a different scrub position", async () => {
+    const items = [
+      event({ id: "shot-first", position: 4, minute: 5, text: "Primer remate.", category: "shot" }),
+      event({ id: "shot-second", position: 3, minute: 5, text: "Segundo remate.", category: "shot" }),
+      event({ id: "shot-third", position: 2, minute: 5, text: "Tercer remate.", category: "shot" }),
+      event({ id: "next-event", position: 1, minute: 6, text: "Evento siguiente.", category: "foul" }),
+    ];
+    vi.mocked(getAllEnrichedComments).mockResolvedValue(page(items));
+    vi.mocked(getMatchVideo).mockResolvedValue({ available: true, youtubeVideoId: "79Rngk2hcC0",
+      synchronizationStatus: "calibrated" });
+    vi.mocked(locateMatchVideoEvent).mockImplementation(async (_matchId, _period, minute) =>
+      resolvedLocation(minute === "5" ? 100 : 200));
+
+    render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
+    await waitFor(() => expect(screen.getAllByTitle("Salto aproximado desde 04:40 del reloj futbolístico")).toHaveLength(3));
+    const list = screen.getByRole("list", { name: "Eventos en orden cronológico" });
+    const secondCard = screen.getByText("Segundo remate.").closest("li")!;
+    const thirdCard = screen.getByText("Tercer remate.").closest("li")!;
+    const nextCard = screen.getByText("Evento siguiente.").closest("li")!;
+    const rect = (left: number, right: number) => ({
+      x: left, y: 0, left, right, top: 0, bottom: 100, width: right - left, height: 100,
+      toJSON: () => ({}),
+    }) as DOMRect;
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue(rect(0, 300));
+    vi.spyOn(secondCard, "getBoundingClientRect").mockReturnValue(rect(320, 420));
+    vi.spyOn(thirdCard, "getBoundingClientRect").mockReturnValue(rect(10, 110));
+    const scrollBy = vi.fn();
+    Object.defineProperty(list, "scrollBy", { configurable: true, value: scrollBy });
+
+    fireEvent.click(within(secondCard).getByRole("button", { name: /Saltar al minuto 5/i }));
+    await waitFor(() => expect(secondCard).toHaveClass(/selected/));
+    expect(scrollBy).toHaveBeenCalledWith({ left: 120, behavior: "smooth" });
+    act(() => youtubePlayerMock.playbackCallback?.({ currentTime: 100, duration: 500,
+      ready: true, playing: true, error: false }));
+    act(() => youtubePlayerMock.playbackCallback?.({ currentTime: 100.6, duration: 500,
+      ready: true, playing: true, error: false }));
+    expect(secondCard).toHaveClass(/selected/);
+    expect(screen.getByText("Primer remate.").closest("li")).not.toHaveClass(/selected/);
+    expect(thirdCard).not.toHaveClass(/selected/);
+
+    fireEvent.click(within(thirdCard).getByRole("button", { name: /Saltar al minuto 5/i }));
+    await waitFor(() => expect(thirdCard).toHaveClass(/selected/));
+    fireEvent.click(within(thirdCard).getByRole("button", { name: /Saltar al minuto 5/i }));
+    act(() => youtubePlayerMock.playbackCallback?.({ currentTime: 100.8, duration: 500,
+      ready: true, playing: true, error: false }));
+    expect(thirdCard).toHaveClass(/selected/);
+    expect(secondCard).not.toHaveClass(/selected/);
+
+    act(() => youtubePlayerMock.playbackCallback?.({ currentTime: 100, provisionalTime: 205,
+      scrubbing: true, duration: 500, ready: true, playing: false, error: false }));
+    await waitFor(() => expect(nextCard).toHaveClass(/selected/));
+    expect(thirdCard).not.toHaveClass(/selected/);
+  });
+
   it("scrolls only when the active event changes and resumes after manual carousel exploration", async () => {
     const items = [
       event({ id: "before", position: 2, minute: 7, periodName: "1ST", text: "Evento del minuto 7.", category: "shot" }),
@@ -175,7 +229,7 @@ describe("MatchCommentsPanel unified events", () => {
       resolvedLocation(minute === "7" ? 100 : 200));
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
-    await waitFor(() => expect(screen.getByTitle("Reproducción desde 07:40 del reloj futbolístico")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTitle("Salto aproximado desde 07:40 del reloj futbolístico")).toBeInTheDocument());
 
     const list = screen.getByRole("list", { name: "Eventos en orden cronológico" });
     const beforeCard = screen.getByText("Evento del minuto 7.").closest("li")!;
@@ -231,7 +285,7 @@ describe("MatchCommentsPanel unified events", () => {
       resolvedLocation(minute === "7" ? 100 : 200));
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
-    await waitFor(() => expect(screen.getByTitle("Reproducción desde 07:40 del reloj futbolístico")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTitle("Salto aproximado desde 07:40 del reloj futbolístico")).toBeInTheDocument());
 
     const list = screen.getByRole("list", { name: "Eventos en orden cronológico" });
     const beforeCard = screen.getByText("Evento del minuto 7.").closest("li")!;
@@ -331,6 +385,40 @@ describe("MatchCommentsPanel unified events", () => {
     expect(screen.queryByText(/inicio de parte estimado desde referencias OCR/i)).not.toBeInTheDocument();
   });
 
+  it("enables the minute-one shot from a safe later OCR reference and keeps it distinct from match start", async () => {
+    const items = [
+      event({ id: "match-start", position: 2, originalType: "matchStarted", minute: 1,
+        periodName: "1ST", category: "match_flow", text: "Empieza primera parte." }),
+      event({ id: "minute-one-shot", position: 1, minute: 1, periodName: "1ST",
+        category: "shot", text: "Remate del minuto uno." }),
+    ];
+    vi.mocked(getAllEnrichedComments).mockResolvedValue(page(items));
+    vi.mocked(getMatchVideo).mockResolvedValue({ available: true, youtubeVideoId: "mo5lqtNeS2w",
+      synchronizationStatus: "calibrated" });
+    vi.mocked(locateMatchVideoEvent).mockImplementation(async (_matchId, _period, _minute, eventKind) =>
+      eventKind === "match_start"
+        ? { ...resolvedLocation(1579), eventClockSecond: 0, eventClockSecondEstimate: 0, method: "boundary_extrapolation" }
+        : { ...resolvedLocation(1619), eventClockSecond: 0, eventClockSecondEstimate: 40,
+          extrapolatedSeconds: 50, method: "later_reference_extrapolation" });
+
+    render(<MatchCommentsPanel matchId="sofascore-match-16599973" />);
+    expect(await screen.findByTestId("video-player")).toBeInTheDocument();
+    const startCard = screen.getByText("Empieza primera parte.").closest("li")!;
+    const shotCard = screen.getByText("Remate del minuto uno.").closest("li")!;
+    const shotButton = await within(shotCard).findByRole("button", { name: /Saltar al minuto 1/i });
+    expect(shotButton).toBeEnabled();
+    fireEvent.click(shotButton);
+
+    await waitFor(() => expect(screen.getByTestId("video-player")).toHaveAttribute("data-seek-to", "1619"));
+    expect(shotCard).toHaveClass(/selected/);
+    expect(startCard).not.toHaveClass(/selected/);
+    expect(within(shotCard).getByRole("status")).toHaveTextContent(
+      "Salto aproximado desde 00:40 del reloj futbolístico, estimado 50 s antes de la primera referencia OCR fiable.",
+    );
+    expect(locateMatchVideoEvent).toHaveBeenCalledWith("sofascore-match-16599973", "first", "1", "match_start");
+    expect(locateMatchVideoEvent).toHaveBeenCalledWith("sofascore-match-16599973", "first", "1", "other");
+  });
+
   it("does not seek after an ambiguous location and explains why the event cannot be replayed", async () => {
     const item = event({ id: "ambiguous-event", position: 1, minute: 58, periodName: "2ND",
       text: "Acción con dos segmentos posibles.", category: "shot" });
@@ -343,7 +431,8 @@ describe("MatchCommentsPanel unified events", () => {
     const action = await screen.findByRole("button", { name: /Saltar al minuto 58/i });
     fireEvent.click(action);
     expect(await screen.findByRole("button", { name: /Vídeo no localizable: Hay más de una posición posible/i })).toBeDisabled();
-    expect(screen.queryByText("Hay más de una posición posible.")).not.toBeInTheDocument();
+    expect(within(screen.getByText("Acción con dos segmentos posibles.").closest("li")!).getByRole("status"))
+      .toHaveTextContent("Hay más de una posición posible.");
     expect(await screen.findByTestId("video-player")).toHaveAttribute("data-seek-to", "");
   });
 

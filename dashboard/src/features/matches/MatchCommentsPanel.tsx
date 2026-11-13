@@ -41,6 +41,12 @@ type Mention = { start: number; end: number; id: string; name: string; player: P
 type ResolvedParticipant = { name: string | null; player: PlayerRef | null; optionName: string | null };
 type EventRow = { item: EnrichedComment; participants: ResolvedParticipant[]; mentions: Mention[] };
 type LocationState = VideoEventLocation | { status: "loading" } | { status: "error"; message: string };
+type ManualEventSelection = {
+  scopedKey: string;
+  eventKey: string;
+  videoSecond: number | null;
+  awaitingPlayback: boolean;
+};
 
 function sourceEventId(matchId: string): string | null {
   return matchIdPattern.exec(matchId)?.[1] ?? null;
@@ -372,12 +378,13 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
   const [playerId, setPlayerId] = useState("");
   const [team, setTeam] = useState<FilterTeam>("all");
   const [locationByKey, setLocationByKey] = useState<Record<string, LocationState>>({});
-  const [selectedEventKey, setSelectedEventKey] = useState<string | null>(null);
+  const [manualSelection, setManualSelection] = useState<ManualEventSelection | null>(null);
   const [seekRequest, setSeekRequest] = useState<{ sequence: number; seconds: number; scope: string } | null>(null);
   const [scrollRange, setScrollRange] = useState({ left: 0, max: 0 });
   const [playback, setPlayback] = useState<YouTubePlaybackSnapshot>({
     currentTime: 0, duration: 0, ready: false, playing: false, error: false,
   });
+  const playbackRef = useRef(playback);
   const [manualCarouselPaused, setManualCarouselPaused] = useState(false);
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const [videoJobLoaded, setVideoJobLoaded] = useState(false);
@@ -416,7 +423,20 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
   const activeJobId = videoJob?.jobId;
   const activeJobStatus = videoJob?.status;
 
-  const playbackUpdate = useCallback((next: YouTubePlaybackSnapshot) => setPlayback(next), []);
+  const playbackUpdate = useCallback((next: YouTubePlaybackSnapshot) => {
+    playbackRef.current = next;
+    const currentTime = next.provisionalTime ?? next.currentTime;
+    setManualSelection((current) => {
+      if (!current || current.videoSecond === null) return current;
+      const distance = Math.abs(currentTime - current.videoSecond);
+      if ((next.scrubbing || next.manualSeek) && distance > 1.25) return null;
+      if (current.awaitingPlayback && next.ready && distance <= 1.25) {
+        return { ...current, awaitingPlayback: false };
+      }
+      return current;
+    });
+    setPlayback(next);
+  }, []);
   const rememberLocation = useCallback((key: string, location: LocationState) => {
     if (location.status !== "loading") locationCache.current.set(key, location);
     setLocationByKey((current) => ({ ...current, [key]: location }));
@@ -461,32 +481,49 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
     return () => { active = false; };
   }, [chronological, requestLocation, videoReference, videoScope]);
 
-  const activePlaybackEventKey = useMemo(() => {
+  const activePlaybackEvent = useMemo(() => {
     if (!hasVideo || !playback.ready) return null;
-    const pointsBySecond = new Map<number, string>();
+    const pointsBySecond = new Map<number, { key: string; second: number }>();
     for (const { item } of chronological) {
       const key = eventKey(item);
       const location = locationByKey[`${videoScope}::${key}`];
       if (location?.status !== "resolved") continue;
       const second = Math.round(location.videoSecond);
-      if (!pointsBySecond.has(second)) pointsBySecond.set(second, key);
+      if (!pointsBySecond.has(second)) pointsBySecond.set(second, { key, second: location.videoSecond });
     }
     const points = [...pointsBySecond.entries()].sort(([left], [right]) => left - right);
-    let activeKey: string | null = null;
-    for (const [second, key] of points) {
+    let active: { key: string; second: number } | null = null;
+    for (const [second, event] of points) {
       if (second > timelineVideoSecond + 0.5) break;
-      activeKey = key;
+      active = event;
     }
-    return activeKey;
+    return active;
   }, [chronological, hasVideo, locationByKey, playback.ready, timelineVideoSecond, videoScope]);
+  const activePlaybackEventKey = activePlaybackEvent?.key ?? null;
+  const manualSelectionActive = useMemo(() => {
+    if (!manualSelection?.scopedKey.startsWith(`${videoScope}::`)) return null;
+    if (manualSelection.videoSecond === null) return manualSelection;
+    const targetGroup = Math.round(manualSelection.videoSecond);
+    const distance = Math.abs(timelineVideoSecond - manualSelection.videoSecond);
+    if ((playback.scrubbing || playback.manualSeek) && distance > 1.25) return null;
+    if (manualSelection.awaitingPlayback) return manualSelection;
+    if (activePlaybackEvent && Math.round(activePlaybackEvent.second) !== targetGroup
+        && activePlaybackEvent.second > manualSelection.videoSecond + 0.5) return null;
+    if (timelineVideoSecond < manualSelection.videoSecond - 1.25) return null;
+    return manualSelection;
+  }, [activePlaybackEvent, manualSelection, playback.manualSeek, playback.scrubbing, timelineVideoSecond, videoScope]);
+  const manualSelectionEventKey = manualSelectionActive?.eventKey;
 
   useEffect(() => {
     let active = true;
-    setVideoJob(null);
-    setVideoJobError(null);
-    setVideoJobLoaded(false);
-    void getCurrentMatchVideoJob(matchId).then((job) => {
-      if (!active) return;
+    void Promise.resolve().then(() => {
+      if (!active) return undefined;
+      setVideoJob(null);
+      setVideoJobError(null);
+      setVideoJobLoaded(false);
+      return getCurrentMatchVideoJob(matchId);
+    }).then((job) => {
+      if (!active || job === undefined) return;
       setVideoJob(job);
       setVideoJobError(null);
       setVideoJobLoaded(true);
@@ -549,7 +586,7 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
 
   useEffect(() => {
     const scrubbingTimeline = playback.scrubbing === true;
-    if (!hasVideo || !activePlaybackEventKey || (!scrubbingTimeline && manualCarouselPaused)) return;
+    if (!hasVideo || !activePlaybackEventKey || manualSelectionActive || (!scrubbingTimeline && manualCarouselPaused)) return;
     const activeChanged = lastAutoFollowedKey.current !== activePlaybackEventKey;
     if (!scrubbingTimeline && !playback.playing && !activeChanged) return;
     const list = eventsRef.current;
@@ -563,7 +600,21 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
       list.scrollBy({ left: cardBounds.right - listBounds.right, behavior: "smooth" });
     }
     lastAutoFollowedKey.current = activePlaybackEventKey;
-  }, [activePlaybackEventKey, hasVideo, manualCarouselPaused, playback.playing, playback.scrubbing]);
+  }, [activePlaybackEventKey, hasVideo, manualCarouselPaused, manualSelectionActive, playback.playing, playback.scrubbing]);
+
+  useEffect(() => {
+    if (!hasVideo || !manualSelectionEventKey) return;
+    const list = eventsRef.current;
+    const card = eventCardRefs.current.get(manualSelectionEventKey);
+    if (!list || !card) return;
+    const listBounds = list.getBoundingClientRect();
+    const cardBounds = card.getBoundingClientRect();
+    if (cardBounds.left < listBounds.left) {
+      list.scrollBy({ left: cardBounds.left - listBounds.left, behavior: "smooth" });
+    } else if (cardBounds.right > listBounds.right) {
+      list.scrollBy({ left: cardBounds.right - listBounds.right, behavior: "smooth" });
+    }
+  }, [hasVideo, manualSelectionEventKey, videoScope]);
 
   useEffect(() => () => {
     if (manualCarouselTimer.current !== null) window.clearTimeout(manualCarouselTimer.current);
@@ -589,16 +640,34 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
     const scopedKey = `${videoScope}::${key}`;
     const requestNumber = latestLocateRequest.current + 1;
     latestLocateRequest.current = requestNumber;
-    setSelectedEventKey(scopedKey);
+    const selectionFor = (videoSecond: number): ManualEventSelection => {
+      const currentPlayback = playbackRef.current;
+      const currentTime = currentPlayback.provisionalTime ?? currentPlayback.currentTime;
+      return {
+        scopedKey,
+        eventKey: key,
+        videoSecond,
+        awaitingPlayback: !currentPlayback.ready || Math.abs(currentTime - videoSecond) > 1.25,
+      };
+    };
     const cached = locationCache.current.get(scopedKey);
     if (cached && cached.status !== "error" && cached.status !== "loading") {
-      if (cached.status === "resolved") setSeekRequest({ sequence: requestNumber, seconds: cached.videoSecond, scope: videoScope });
+      if (cached.status === "resolved") {
+        setManualSelection(selectionFor(cached.videoSecond));
+        setSeekRequest({ sequence: requestNumber, seconds: cached.videoSecond, scope: videoScope });
+      }
       return;
     }
+    setManualSelection({ scopedKey, eventKey: key, videoSecond: null, awaitingPlayback: true });
     setLocationByKey((current) => ({ ...current, [scopedKey]: { status: "loading" } }));
     const location = await requestLocation(item, scopedKey);
     if (latestLocateRequest.current !== requestNumber) return;
-    if (location.status === "resolved") setSeekRequest({ sequence: requestNumber, seconds: location.videoSecond, scope: videoScope });
+    if (location.status === "resolved") {
+      setManualSelection(selectionFor(location.videoSecond));
+      setSeekRequest({ sequence: requestNumber, seconds: location.videoSecond, scope: videoScope });
+    } else {
+      setManualSelection((current) => current?.scopedKey === scopedKey ? null : current);
+    }
   }
 
   async function addVideo(event: import("react").FormEvent<HTMLFormElement>) {
@@ -739,20 +808,19 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
         const location = locationByKey[scopedKey];
         const nonlocalizable = (!periodStart && (item.minute === null || item.minute < 1)) || period === null
           || location?.status === "ambiguous" || location?.status === "uncertain" || location?.status === "out_of_coverage";
-        const reason = location?.status === "ambiguous" ? "Hay más de una posición posible."
-          : location?.status === "uncertain" ? "No se ha identificado con seguridad la parte del partido."
-            : location?.status === "out_of_coverage" ? "El minuto queda fuera de la cobertura OCR verificada."
-              : periodStart ? null
-                : item.minute === null ? "Este comentario no tiene minuto."
-                : item.minute < 1 ? "Este comentario no tiene un minuto futbolístico válido."
-                : !period ? "No se reconoce el periodo de este comentario." : null;
+        const reason = locationUnavailableReason(location) ?? (periodStart ? null
+          : item.minute === null ? "Este comentario no tiene minuto."
+            : item.minute < 1 ? "Este comentario no tiene un minuto futbolístico válido."
+              : !period ? "No se reconoce el periodo de este comentario." : null);
         const actionName = nonlocalizable ? `Vídeo no localizable: ${reason ?? "sin posición única"}`
           : location?.status === "loading" ? "Buscando la posición aproximada en el vídeo"
             : location?.status === "error" ? `Reintentar búsqueda de vídeo para el minuto ${item.minute}`
-              : periodStart ? `Localizar el inicio de la ${period === "first" ? "primera" : "segunda"} parte`
-                : `Saltar al minuto ${item.minute} de la ${period === "first" ? "primera" : "segunda"} parte; reproducción desde el reloj ${footballClockAtMinuteTail(item.minute!)}`;
+              : periodStart ? `Localizar el inicio de la ${period === "first" ? "primera" : "segunda"} parte (posición aproximada)`
+                : `Saltar al minuto ${item.minute} de la ${period === "first" ? "primera" : "segunda"} parte (posición aproximada); reproducción desde el reloj ${footballClockAtMinuteTail(item.minute!)}`;
         const isPlaybackActive = hasVideo && activePlaybackEventKey === key;
-        const isSelected = hasVideo && (playback.ready ? isPlaybackActive : selectedEventKey === scopedKey);
+        const manualSelected = manualSelectionActive?.scopedKey === scopedKey;
+        const isSelected = hasVideo && (manualSelectionActive
+          ? manualSelected : playback.ready && isPlaybackActive);
         const minuteLabel = item.minute === null ? "Sin minuto" : `${item.minute}′`;
         const score = item.score && (item.score.home !== null || item.score.away !== null) ? <p className={css.score}
           aria-label={`Marcador: ${item.score.home ?? "no disponible"} a ${item.score.away ?? "no disponible"}`}>
@@ -764,7 +832,7 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
           <button type="button" className={css.videoButton} aria-label={actionName}
             title={reason ?? (location?.status === "error" ? location.message
               : location?.status === "resolved" && !periodStart
-                ? `Reproducción desde ${footballClockAtMinuteTail(item.minute!)} del reloj futbolístico`
+                ? `Salto aproximado desde ${footballClockAtMinuteTail(item.minute!)} del reloj futbolístico`
                 : "Consultar estado de localización del evento")}
             disabled={nonlocalizable || location?.status === "loading"}
             onClick={() => void locateEvent(item, key)}>
@@ -782,7 +850,15 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
               <span className={css.kind}>{eventLabel(item)}</span>
               {videoAction}
             </div>
-            <div className={css.videoCardContent}>{comment}{score}</div>
+            <div className={css.videoCardContent}>
+              {manualSelected && location?.status === "resolved" ? <p className={css.locationHint} role="status">
+                {location.method === "later_reference_extrapolation"
+                  ? `Salto aproximado desde ${formatFootballClock(location.eventClockSecondEstimate)} del reloj futbolístico, estimado ${location.extrapolatedSeconds} s antes de la primera referencia OCR fiable.`
+                  : `Salto aproximado desde ${formatFootballClock(location.eventClockSecondEstimate)} del reloj futbolístico; SofaScore no aporta el segundo exacto de la acción.`}
+              </p> : null}
+              {nonlocalizable && reason ? <p className={css.locationHint} role="status">{reason}</p> : null}
+              {comment}{score}
+            </div>
           </> : <>
             <div className={css.when}><strong>{minuteLabel}</strong></div>
             <div className={css.content}>
@@ -851,6 +927,29 @@ function periodFor(periodName: string | null): "first" | "second" | null {
   return null;
 }
 
+function locationUnavailableReason(location: LocationState | undefined): string | null {
+  if (location?.status === "ambiguous") {
+    return location.reason === "multiple_first_reference_segments"
+      ? "Hay varias referencias iniciales incompatibles; no se elige una posición única."
+      : "Hay más de una posición posible.";
+  }
+  if (location?.status === "uncertain") {
+    if (location.reason === "following_reference_crosses_discontinuity") {
+      return "La referencia OCR posterior está separada por un posible corte o cambio de desfase.";
+    }
+    if (location.reason === "following_reference_evidence_insufficient") {
+      return "La referencia OCR posterior no reúne suficientes lecturas consistentes.";
+    }
+    return "No se ha identificado con seguridad la parte o continuidad del partido.";
+  }
+  if (location?.status === "out_of_coverage") {
+    return location.reason === "event_outside_verified_ocr_segments_or_safe_extrapolation"
+      ? "No hay una referencia OCR fiable lo bastante cerca de este instante dentro de un tramo continuo."
+      : "El minuto queda fuera de la cobertura OCR verificada.";
+  }
+  return null;
+}
+
 function minuteForVideo(minute: number, period: "first" | "second"): string {
   // SofaScore stores first-half stoppage time as 46′, 47′, etc.; V5.1 expects 45+N.
   return period === "first" && minute > 45 ? `45+${minute - 45}` : String(minute);
@@ -860,5 +959,11 @@ function footballClockAtMinuteTail(minute: number): string {
   const clockSecond = Math.max(0, (minute - 1) * 60 + 40);
   const minutes = Math.floor(clockSecond / 60);
   const seconds = clockSecond % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatFootballClock(clockSecond: number): string {
+  const minutes = Math.floor(Math.max(0, clockSecond) / 60);
+  const seconds = Math.floor(Math.max(0, clockSecond) % 60);
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }

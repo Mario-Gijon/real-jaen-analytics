@@ -12,6 +12,7 @@ EventKind = Literal["other", "match_start", "period_start"]
 OUT_OF_COVERAGE_TEXT = "fuera de los tramos OCR verificados"
 DEFAULT_LEAD_SECONDS = 0
 MAX_EVENT_EDGE_EXTRAPOLATION_SECONDS = 20
+MAX_EVENT_FOLLOWING_REFERENCE_EXTRAPOLATION_SECONDS = 60
 MAX_PERIOD_START_EXTRAPOLATION_SECONDS = 90
 
 
@@ -98,6 +99,92 @@ def _following_minute(minute: str, period: Period) -> str:
     return str(base + 1)
 
 
+def _locate_before_first_reference(calibration: dict[str, Any], *, period: Period,
+                                   target_clock: int) -> tuple[dict[str, Any] | None, str | None]:
+    """Safely estimate an early event from the first later OCR-supported segment.
+
+    This is deliberately limited to the earliest segment of a football period:
+    extrapolating backward from a later segment across an internal gap could
+    cross a cut or a changed broadcast offset. Normal event edge extrapolation
+    remains governed by the smaller V5.1 limit.
+    """
+    period_segments = [segment for segment in calibration.get("segments", [])
+                       if isinstance(segment, dict)
+                       and segment.get("period") == period
+                       and segment.get("football_period", period) == period]
+    if not period_segments:
+        return None, None
+
+    first_clock = min(float(segment["game_clock_start"]) for segment in period_segments)
+    if target_clock >= first_clock:
+        return None, None
+    gap = first_clock - target_clock
+    if gap > MAX_EVENT_FOLLOWING_REFERENCE_EXTRAPOLATION_SECONDS:
+        return None, None
+
+    first_segments = [segment for segment in period_segments
+                      if float(segment["game_clock_start"]) == first_clock]
+    if len(first_segments) != 1:
+        return {"status": "ambiguous", "candidates": [
+            {
+                "segment_id": segment.get("segment_id"),
+                "video_second": round(target_clock + float(segment["offset_seconds"]), 3),
+                "extrapolated_seconds": round(gap, 3),
+                "reference_count": segment.get("reference_count"),
+                "ocr_confidence": segment.get("ocr_confidence", "not_recorded"),
+                "period_confidence": segment.get("period_confidence", "not_recorded"),
+                "location_confidence": segment.get("location_confidence", "not_recorded"),
+            }
+            for segment in first_segments
+        ]}, None
+
+    segment = first_segments[0]
+    strong_evidence = (
+        int(segment.get("reference_count", 0)) >= 3
+        and float(segment.get("max_residual_seconds", 999)) <= 5
+        and segment.get("ocr_confidence") == "high"
+        and segment.get("period_confidence") == "high"
+        and segment.get("location_confidence") == "high"
+    )
+    if not strong_evidence:
+        return {"status": "uncertain"}, "following_reference_evidence_insufficient"
+
+    offset = float(segment["offset_seconds"])
+    video_target = target_clock + offset
+    if video_target < 0:
+        return {"status": "uncertain"}, "following_reference_generated_negative_video_time"
+
+    video_edge = first_clock + offset
+    interval_start, interval_end = sorted((video_target, video_edge))
+    crosses_uncertain_interval = any(
+        isinstance(zone, dict)
+        and float(zone.get("video_start", float("inf"))) <= interval_end
+        and float(zone.get("video_end", float("-inf"))) >= interval_start
+        # An uncovered edge is the case this bounded estimate addresses. Any
+        # other intersecting zone may mark a cut, period boundary, or conflict.
+        and str(zone.get("reason", "")).casefold() != "outside_supported_reference_segment"
+        for zone in calibration.get("uncertainty_zones", [])
+    )
+    if crosses_uncertain_interval:
+        return {"status": "uncertain"}, "following_reference_crosses_discontinuity"
+
+    return {
+        "status": "located",
+        "period": period,
+        "playback_game_clock_second": target_clock,
+        "video_second": round(video_target, 3),
+        "extrapolated_seconds": round(gap, 3),
+        "segment_id": segment.get("segment_id"),
+        "temporal_segment_id": segment.get("temporal_segment_id", segment.get("segment_id")),
+        "football_period": segment.get("football_period", period),
+        "ocr_confidence": segment.get("ocr_confidence"),
+        "period_confidence": segment.get("period_confidence"),
+        "location_confidence": segment.get("location_confidence"),
+        "reference_count": segment.get("reference_count"),
+        "max_residual_seconds": segment.get("max_residual_seconds"),
+    }, None
+
+
 def locate_video(record: VideoRecord, *, period: Period, minute: str | None,
                  lead_seconds: int = DEFAULT_LEAD_SECONDS,
                  event_kind: EventKind = "other",
@@ -161,12 +248,32 @@ def locate_video(record: VideoRecord, *, period: Period, minute: str | None,
         )
     except ValueError as exc:
         if OUT_OF_COVERAGE_TEXT in str(exc):
-            return {
-                **base,
-                "status": "out_of_coverage",
-                "reason": "event_outside_verified_ocr_segments_or_safe_extrapolation",
-            }
-        raise
+            playback_clock = max(0, event_estimate_clock - lead_seconds)
+            result, fallback_reason = _locate_before_first_reference(
+                calibration, period=period, target_clock=playback_clock,
+            )
+            if result is None:
+                return {
+                    **base,
+                    "status": "out_of_coverage",
+                    "reason": "event_outside_verified_ocr_segments_or_safe_extrapolation",
+                }
+            if result.get("status") == "ambiguous":
+                return {
+                    **base,
+                    "status": "ambiguous",
+                    "candidates": result.get("candidates", []),
+                    "reason": "multiple_first_reference_segments",
+                }
+            if result.get("status") != "located":
+                return {**base, "status": "uncertain", "reason": fallback_reason}
+            method = "later_reference_extrapolation"
+            max_extrapolate = MAX_EVENT_FOLLOWING_REFERENCE_EXTRAPOLATION_SECONDS
+            warnings.append(
+                f"Posición estimada {result['extrapolated_seconds']:g} s antes de la primera referencia OCR fiable del tramo."
+            )
+        else:
+            raise
 
     if result.get("status") == "ambiguous":
         return {

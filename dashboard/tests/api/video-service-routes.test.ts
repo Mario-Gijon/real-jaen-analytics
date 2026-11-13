@@ -118,13 +118,14 @@ describe("Video Service BFF routes", () => {
       .mockResolvedValueOnce(jsonResponse({ status: "resolved", result: {
         video_second: 6660, playback_video_second: 6660, event_video_second: 6660,
         event_clock_second_start: 5640, event_clock_second_estimate: 5680, lead_seconds: 0,
+        extrapolated_seconds: 0,
         estimated: true, method: "minute_tail", confidence: { ocr: "high", period: "high", location: "high" }, warnings: [],
       } }));
     const response = await locateVideo(request("/matches/sofascore-match-16599928/video/locate?period=second&minute=95"), context);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "resolved", videoSecond: 6660, eventVideoSecond: 6660,
       eventClockSecond: 5640, eventClockSecondEstimate: 5680, leadSeconds: 0, estimated: true,
-      method: "minute_tail", confidence: { ocr: "high", period: "high", location: "high" }, warnings: [] });
+      extrapolatedSeconds: 0, method: "minute_tail", confidence: { ocr: "high", period: "high", location: "high" }, warnings: [] });
     const secondCall = vi.mocked(fetch).mock.calls[1];
     expect(String(secondCall?.[0])).toContain("/api/v1/videos/real-jaen-rayo-majadahonda/locate?");
     const query = new URL(String(secondCall?.[0])).searchParams;
@@ -137,6 +138,7 @@ describe("Video Service BFF routes", () => {
       .mockResolvedValueOnce(jsonResponse({ status: "resolved", result: {
         video_second: 4800, playback_video_second: 4800, event_video_second: 4800,
         event_clock_second_start: 2760, event_clock_second_estimate: 2800, lead_seconds: 0,
+        extrapolated_seconds: 0,
         estimated: true, method: "minute_tail", confidence: { ocr: "high", period: "high", location: "high" }, warnings: [],
       } }));
     const response = await locateVideo(request("/matches/sofascore-match-16599928/video/locate?period=first&minute=45%2B2"), context);
@@ -146,12 +148,39 @@ describe("Video Service BFF routes", () => {
     expect(new URL(String(secondCall?.[0])).searchParams.get("minute")).toBe("45+2");
   });
 
+  it("preserves the later-reference estimate and extrapolation distance for the Dashboard", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse(catalog))
+      .mockResolvedValueOnce(jsonResponse({ status: "resolved", result: {
+        video_second: 1619, playback_video_second: 1619, event_video_second: 1619,
+        event_clock_second_start: 0, event_clock_second_estimate: 40, lead_seconds: 0,
+        extrapolated_seconds: 50, estimated: true, method: "later_reference_extrapolation",
+        confidence: { ocr: "high", period: "high", location: "high" }, warnings: ["estimated from later OCR"],
+      } }));
+    const response = await locateVideo(request("/matches/sofascore-match-16599928/video/locate?period=first&minute=1"), context);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "resolved", videoSecond: 1619,
+      eventVideoSecond: 1619, eventClockSecond: 0, eventClockSecondEstimate: 40, leadSeconds: 0,
+      estimated: true, extrapolatedSeconds: 50, method: "later_reference_extrapolation",
+      confidence: { ocr: "high", period: "high", location: "high" }, warnings: ["estimated from later OCR"] });
+  });
+
+  it("passes a safe reason for an unresolvable event to the interface", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse(catalog))
+      .mockResolvedValueOnce(jsonResponse({ status: "uncertain", reason: "following_reference_crosses_discontinuity" }));
+    const response = await locateVideo(request("/matches/sofascore-match-16599928/video/locate?period=first&minute=1"), context);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "uncertain", reason: "following_reference_crosses_discontinuity" });
+  });
+
   it("forwards a first-half start without fabricating a minute timestamp", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse(catalog))
       .mockResolvedValueOnce(jsonResponse({ status: "resolved", result: {
         video_second: 2032.032, playback_video_second: 2032.032, event_video_second: 2032.032,
         event_clock_second_start: 0, event_clock_second_estimate: 0, lead_seconds: 0,
+        extrapolated_seconds: 90,
         estimated: true, method: "boundary_extrapolation", confidence: { ocr: "high", period: "high", location: "high" }, warnings: [],
       } }));
     const response = await locateVideo(request("/matches/sofascore-match-16599928/video/locate?period=first&event_kind=match_start"), context);
