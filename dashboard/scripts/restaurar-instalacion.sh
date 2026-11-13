@@ -38,6 +38,8 @@ done
 for vol in $volumes; do docker volume create --label "rj.installation=$PROJECT" "$vol" >/dev/null; echo "Creado $vol"; done
 
 dc run --rm --no-deps --user 0:0 --cap-add CHOWN --entrypoint chown sports-data 10001:10001 /state
+dc run --rm --no-deps --user 0:0 --cap-add CHOWN --entrypoint chown acquisition 10001:10001 /profiles /acquisition-jobs
+dc run --rm --no-deps --user 0:0 --cap-add CHOWN --entrypoint chown video-service 10001:10001 /state
 dc run --rm --no-deps sports-data -m scripts.initialize_snapshot "/imports/$REL/real-jaen.sqlite" /state/real-jaen.sqlite
 dc run --rm --no-deps --entrypoint sh sports-data -c "set -eu
 tar -xf '/imports/$REL/actualizaciones.tar' -C /state
