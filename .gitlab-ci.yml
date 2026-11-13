@@ -5,7 +5,7 @@ deploy_to_sinbad2:
   stage: deploy
   resource_group: sinbad2-production
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
       when: on_success
     - when: never
   before_script:
