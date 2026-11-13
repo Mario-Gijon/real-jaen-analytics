@@ -6,28 +6,52 @@ deploy_to_sinbad2:
   image: alpine:3.22
   resource_group: sinbad2-production
   rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $ENABLE_SINBAD2_DEPLOY == "1"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
       when: on_success
     - when: never
   before_script:
     - apk add --no-cache git openssh-client
-    - test -r "$SSH_PRIVATE_KEY" && test -r "$SSH_KNOWN_HOSTS"
-    - test -n "$SSH_HOST" && test -n "$REMOTE_USER"
-    - mkdir -m 700 -p "$HOME/.ssh"
-    - cp "$SSH_PRIVATE_KEY" "$HOME/.ssh/id_ed25519"
-    - chmod 600 "$HOME/.ssh/id_ed25519"
-    - cp "$SSH_KNOWN_HOSTS" "$HOME/.ssh/known_hosts"
-    - chmod 600 "$HOME/.ssh/known_hosts"
+    - |
+      set -eu
+      test -n "${SSH_PRIVATE_KEY:-}" || { echo "SSH_PRIVATE_KEY is missing" >&2; exit 1; }
+      test -n "${SSH_KNOWN_HOSTS:-}" || { echo "SSH_KNOWN_HOSTS is missing" >&2; exit 1; }
+      test -n "${SSH_HOST:-}" || { echo "SSH_HOST is missing" >&2; exit 1; }
+      test -n "${REMOTE_USER:-}" || { echo "REMOTE_USER is missing" >&2; exit 1; }
+
+      mkdir -m 700 -p "$HOME/.ssh"
+      write_ssh_material() {
+        value=$1
+        destination=$2
+        if [ -f "$value" ]; then
+          cp "$value" "$destination"
+        else
+          printf '%s\n' "$value" > "$destination"
+        fi
+        chmod 600 "$destination"
+      }
+      write_ssh_material "$SSH_PRIVATE_KEY" "$HOME/.ssh/deploy_key"
+      write_ssh_material "$SSH_KNOWN_HOSTS" "$HOME/.ssh/known_hosts"
+      ssh-keygen -y -f "$HOME/.ssh/deploy_key" >/dev/null
+      ssh-keygen -lf "$HOME/.ssh/known_hosts" >/dev/null
+      eval "$(ssh-agent -s)" >/dev/null
+      ssh-add "$HOME/.ssh/deploy_key" >/dev/null
   script:
     - |
       set -eu
       set -o pipefail
       target="${REMOTE_USER}@${SSH_HOST}"
       release_id="${CI_COMMIT_SHA}-${CI_PIPELINE_ID}-${CI_JOB_ID}"
-      ssh_opts="-i $HOME/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+      ssh_remote() {
+        ssh \
+          -o BatchMode=yes \
+          -o StrictHostKeyChecking=yes \
+          -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+          -o GlobalKnownHostsFile=/dev/null \
+          "$@"
+      }
       git archive --format=tar "$CI_COMMIT_SHA" |
-        ssh $ssh_opts "$target" "set -eu; root=\"\$HOME/deploy_real-jaen-analytics\"; release=\"\$root/releases/${release_id}\"; mkdir -p \"\$release\"; tar -xf - -C \"\$release\""
-      ssh $ssh_opts "$target" sh -s -- "$release_id" "$CI_COMMIT_SHA" <<'REMOTE_SCRIPT'
+        ssh_remote "$target" "set -eu; root=\"\$HOME/deploy_real-jaen-analytics\"; release=\"\$root/releases/${release_id}\"; mkdir -p \"\$release\"; tar -xf - -C \"\$release\""
+      ssh_remote "$target" sh -s -- "$release_id" "$CI_COMMIT_SHA" <<'REMOTE_SCRIPT'
       set -eu
       release_id=$1
       commit_sha=$2
@@ -39,6 +63,17 @@ deploy_to_sinbad2:
       test -d "$release"
       test -f "$compose_file"
       test -f "$env_file" || { echo "Missing private deployment config: $env_file" >&2; exit 1; }
+
+      dashboard_bind=$(sed -n 's/^RJ_DASHBOARD_BIND=//p' "$env_file" | tail -n 1)
+      dashboard_port=$(sed -n 's/^RJ_DASHBOARD_PORT=//p' "$env_file" | tail -n 1)
+      test "$dashboard_bind" = "0.0.0.0" || {
+        echo "RJ_DASHBOARD_BIND must be 0.0.0.0 for SINBAD²" >&2
+        exit 1
+      }
+      test "$dashboard_port" = "8120" || {
+        echo "RJ_DASHBOARD_PORT must be 8120 for SINBAD²" >&2
+        exit 1
+      }
 
       cd "$compose_dir"
       dc() {
