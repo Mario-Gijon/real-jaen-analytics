@@ -54,7 +54,6 @@ describe("installation restore script", () => {
           "RJ_PROD_ACQUISITION_PROFILES_VOLUME=rja-test-profiles",
           "RJ_PROD_VIDEO_STATE_VOLUME=rja-test-video",
           `RJ_IMPORT_DIR=${imports}`,
-          "RJ_SPORTS_DATA_IMAGE=fake:sports-data",
         ].join("\n") + "\n",
       );
 
@@ -83,11 +82,15 @@ describe("installation restore script", () => {
       );
       const acquisitionRestore = calls.findIndex((call) => call.includes("acquisition-jobs.tar"));
       const videoRestore = calls.findIndex((call) => call.includes("video-service-state.tar"));
+      const profileInitialization = calls.findIndex(
+        (call) => call.includes("-f compose.prod.yaml run") && call.includes("acquisition.admin initialize-profile"),
+      );
 
       expect(acquisitionOwnership).toBeGreaterThan(-1);
       expect(videoOwnership).toBeGreaterThan(-1);
       expect(acquisitionRestore).toBeGreaterThan(acquisitionOwnership);
       expect(videoRestore).toBeGreaterThan(videoOwnership);
+      expect(profileInitialization).toBeGreaterThan(-1);
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }

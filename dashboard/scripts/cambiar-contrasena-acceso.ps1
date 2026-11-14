@@ -27,10 +27,6 @@ if (-not $PasswordFile -and $env:RJ_PROD_SECRET_DIR) {
   $PasswordFile = Join-Path $env:RJ_PROD_SECRET_DIR 'access-password'
 }
 if (-not $PasswordFile) { throw 'Indica -PasswordFile o configura RJ_PROD_SECRET_DIR con la carpeta externa de secretos.' }
-if (-not $PasswordFile -and $env:RJ_PROD_SECRET_DIR) {
-  $PasswordFile = Join-Path $env:RJ_PROD_SECRET_DIR 'access-password'
-}
-if (-not $PasswordFile) { throw 'Indica -PasswordFile o configura RJ_PROD_SECRET_DIR con la carpeta externa de secretos.' }
 
 function ConvertTo-Plain([Security.SecureString]$Secure) {
   $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
@@ -70,7 +66,7 @@ try {
   switch ($status) {
     204 { Write-Host 'Comprobado: la instalación acepta la contraseña nueva, sin recrear el frontend. Todas las sesiones anteriores se han cerrado.' -ForegroundColor Green }
     401 { Write-Warning ("El frontend todavía no acepta la contraseña nueva. Recréalo desde la raíz del monorepositorio con:`n" +
-          "  Set-Location deploy/prod; docker compose --env-file .env -f compose.yaml up -d --no-build --no-deps --force-recreate dashboard`n" +
+          "  docker compose --env-file .env.prod -f compose.prod.yaml up -d --no-build --no-deps --force-recreate dashboard`n" +
           "Para volver a la anterior: copia $backup sobre $PasswordFile."); exit 2 }
     429 { Write-Warning 'Demasiados intentos recientes: no se ha podido comprobar. Espera 15 minutos y entra con la contraseña nueva.'; exit 3 }
     0 { Write-Warning "No se ha podido contactar con $Url para comprobarla. Comprueba que la instalación está en marcha."; exit 4 }

@@ -62,8 +62,8 @@ deploy_to_sinbad2:
       commit_sha=$2
       root="$HOME/deploy_real-jaen-analytics"
       release="$root/releases/$release_id"
-      compose_dir="$release/deploy/prod"
-      compose_file="$compose_dir/compose.yaml"
+      compose_dir="$release"
+      compose_file="$compose_dir/compose.prod.yaml"
       env_file="$root/.env.prod"
       test -d "$release"
       test -f "$compose_file"
@@ -83,7 +83,7 @@ deploy_to_sinbad2:
       cd "$compose_dir"
       dc() {
         docker compose --project-directory "$compose_dir" \
-          --env-file "$env_file" -f compose.yaml "$@"
+          --env-file "$env_file" -f compose.prod.yaml "$@"
       }
 
       dc config -q
@@ -98,13 +98,6 @@ deploy_to_sinbad2:
           exit 1
         }
       done
-      runtime_image=$(sed -n 's/^RJ_SCRAPER_RUNTIME_IMAGE=//p' "$env_file" | tail -n 1)
-      test -n "$runtime_image" || { echo "RJ_SCRAPER_RUNTIME_IMAGE is required in $env_file" >&2; exit 1; }
-      docker image inspect "$runtime_image" >/dev/null 2>&1 || {
-        echo "Audited browser runtime image $runtime_image is not present on SINBAD²" >&2
-        exit 1
-      }
-
       dc up -d --build --wait --wait-timeout 300 dashboard sports-data acquisition video-service
       for service in dashboard sports-data acquisition video-service; do
         container_id=$(dc ps -q "$service")

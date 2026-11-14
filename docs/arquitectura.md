@@ -58,4 +58,4 @@ El contrato entre Sports Data y Acquisition está descrito en [contrato-adquisic
 - **Video Service:** su SQLite y estado persistente usan `rja-dev-video-state`. El catálogo operativo se monta por separado y en solo lectura.
 - **Dashboard:** el volumen `rja-dev-dashboard-next` conserva artefactos de desarrollo; no contiene la base deportiva.
 
-Los nombres de producción son configurables en `deploy/prod/.env.example`. Mantener la misma identidad de proyecto y los mismos nombres de volumen permite actualizar imágenes sin sustituir los datos.
+Los nombres de producción se configuran en `.env.prod.example`. Mantener la misma identidad de proyecto y los mismos nombres de volumen permite actualizar imágenes sin sustituir los datos.

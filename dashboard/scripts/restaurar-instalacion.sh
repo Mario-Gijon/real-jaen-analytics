@@ -2,7 +2,8 @@
 # Recuperación conjunta de un respaldo de scripts/respaldo-instalacion.sh en volúmenes NUEVOS
 # Sirve también para una primera carga del servidor.
 #
-#   ENV_FILE=deploy/prod/.env sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
+#   ENV_FILE=.env.prod sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
+#   COMPOSE_FILE=compose.dev.yaml ENV_FILE=.env.dev sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
 #
 # RESPALDO es una carpeta dentro de RJ_IMPORT_DIR, configurado en relación con la raíz del workspace; el backend la lee en /imports, en solo lectura.
 # Comprueba SHA256SUMS; se niega si algún volumen de destino ya existe; restaura la base, sus registros de
@@ -10,28 +11,53 @@
 # de navegador nuevo y verifica que el coordinador acepta la generación del respaldo. No arranca servicios.
 set -eu
 SRC=${1:?Indica la carpeta del respaldo}
-ENV_FILE=${ENV_FILE:-deploy/prod/.env}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+COMPOSE_FILE=${COMPOSE_FILE:-compose.prod.yaml}
+case "$COMPOSE_FILE" in
+  compose.dev.yaml) DEFAULT_ENV=.env.dev ;;
+  compose.prod.yaml) DEFAULT_ENV=.env.prod ;;
+  *) echo "COMPOSE_FILE must be compose.dev.yaml or compose.prod.yaml" >&2; exit 1 ;;
+esac
+ENV_FILE=${ENV_FILE:-$DEFAULT_ENV}
+case "$ENV_FILE" in /*) ;; *) ENV_FILE="$ROOT_DIR/$ENV_FILE" ;; esac
 test -f "$ENV_FILE" || { echo "No existe $ENV_FILE" >&2; exit 1; }
-COMPOSE_DIR=$(cd deploy/prod && pwd)
+test -f "$ROOT_DIR/$COMPOSE_FILE" || { echo "No existe $ROOT_DIR/$COMPOSE_FILE" >&2; exit 1; }
 ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
-COMPOSE_FILES=${COMPOSE_FILES:--f compose.yaml}
 var() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
-STATE_VOLUME=$(var RJ_PROD_SPORTS_STATE_VOLUME)
-JOBS_VOLUME=$(var RJ_PROD_ACQUISITION_JOBS_VOLUME)
-PROFILE_VOLUME=$(var RJ_PROD_ACQUISITION_PROFILES_VOLUME)
-VIDEO_VOLUME=$(var RJ_PROD_VIDEO_STATE_VOLUME)
-IMPORT_DIR=$(var RJ_IMPORT_DIR)
-PROJECT=$(var COMPOSE_PROJECT_NAME)
-PROJECT=${PROJECT:-real-jaen-analytics-prod}
-# shellcheck disable=SC2086
-dc() (cd "$COMPOSE_DIR" && docker compose --env-file "$ENV_FILE" $COMPOSE_FILES "$@")
+case "$COMPOSE_FILE" in
+  compose.dev.yaml)
+    STATE_VOLUME=rja-dev-sports-state
+    JOBS_VOLUME=rja-dev-acquisition-jobs
+    PROFILE_VOLUME=rja-dev-acquisition-profiles
+    VIDEO_VOLUME=rja-dev-video-state
+    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:dev
+    IMPORT_DIR=$(var RJ_DEV_IMPORT_DIR)
+    PROJECT=real-jaen-analytics-dev
+    ;;
+  compose.prod.yaml)
+    STATE_VOLUME=$(var RJ_PROD_SPORTS_STATE_VOLUME)
+    JOBS_VOLUME=$(var RJ_PROD_ACQUISITION_JOBS_VOLUME)
+    PROFILE_VOLUME=$(var RJ_PROD_ACQUISITION_PROFILES_VOLUME)
+    VIDEO_VOLUME=$(var RJ_PROD_VIDEO_STATE_VOLUME)
+    STATE_VOLUME=${STATE_VOLUME:-rja-prod-sports-state}
+    JOBS_VOLUME=${JOBS_VOLUME:-rja-prod-acquisition-jobs}
+    PROFILE_VOLUME=${PROFILE_VOLUME:-rja-prod-acquisition-profiles}
+    VIDEO_VOLUME=${VIDEO_VOLUME:-rja-prod-video-state}
+    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:prod
+    IMPORT_DIR=$(var RJ_IMPORT_DIR)
+    PROJECT=$(var COMPOSE_PROJECT_NAME)
+    PROJECT=${PROJECT:-real-jaen-analytics-prod}
+    ;;
+esac
+dc() (cd "$ROOT_DIR" && docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@")
 # The backup must be inside the import directory, which the backend mounts read-only at /imports.
 src_abs=$(cd "$SRC" && pwd)
 imp_abs=$(cd "$IMPORT_DIR" && pwd)
 case "$src_abs/" in "$imp_abs"/*) REL=${src_abs#"$imp_abs"/} ;; *) echo "El respaldo debe estar dentro de RJ_IMPORT_DIR ($imp_abs)" >&2; exit 1 ;; esac
 (cd "$src_abs" && sha256sum -c SHA256SUMS) || { echo "Las sumas del respaldo no coinciden" >&2; exit 1; }
 # Git Bash (Windows): paths for Docker in Windows form, and no automatic conversion of container paths.
-case "$(uname -s)" in MINGW*|MSYS*) ENV_FILE=$(cygpath -m "$ENV_FILE"); imp_abs=$(cygpath -m "$imp_abs"); export MSYS_NO_PATHCONV=1 ;; esac
+case "$(uname -s)" in MINGW*|MSYS*) ENV_FILE=$(cygpath -m "$ENV_FILE"); ROOT_DIR=$(cygpath -m "$ROOT_DIR"); imp_abs=$(cygpath -m "$imp_abs"); export MSYS_NO_PATHCONV=1 ;; esac
 
 volumes="$STATE_VOLUME $JOBS_VOLUME $PROFILE_VOLUME $VIDEO_VOLUME"
 for vol in $volumes; do
@@ -57,10 +83,9 @@ with Coordinador('/state/real-jaen.sqlite', '/app/ambito.json', reserva=0) as c:
 assert g.id == expected, (g.id, expected)
 print('Coordinador: generación', g.id, 'aceptada')"
 
-SPORTS_DATA_IMAGE=$(var RJ_SPORTS_DATA_IMAGE)
 docker run --rm --network none --user 10001:10001 -v "$JOBS_VOLUME:/acquisition-jobs" -v "$imp_abs:/imports:ro" \
   --entrypoint tar "$SPORTS_DATA_IMAGE" -xf "/imports/$REL/acquisition-jobs.tar" -C /acquisition-jobs
 docker run --rm --network none --user 10001:10001 -v "$VIDEO_VOLUME:/video" -v "$imp_abs:/imports:ro" \
   --entrypoint tar "$SPORTS_DATA_IMAGE" -xf "/imports/$REL/video-service-state.tar" -C /video
-dc --profile admin run --rm --no-deps acquisition-admin initialize-profile --confirm-new-profile
-echo "Restaurado sin arrancar servicios. Consulta README.md para iniciar deploy/prod/compose.yaml."
+dc run --rm --no-deps --network none --entrypoint python acquisition -B -m acquisition.admin initialize-profile --confirm-new-profile
+echo "Restaurado sin arrancar servicios. Consulta README.md para iniciar con $COMPOSE_FILE."

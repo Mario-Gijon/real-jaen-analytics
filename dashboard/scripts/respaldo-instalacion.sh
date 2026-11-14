@@ -1,7 +1,8 @@
 #!/bin/sh
 # Respaldo consistente de una instalación Docker (README.md).
 #
-#   ENV_FILE=deploy/prod/.env sh dashboard/scripts/respaldo-instalacion.sh DESTINO
+#   ENV_FILE=.env.prod sh dashboard/scripts/respaldo-instalacion.sh DESTINO
+#   COMPOSE_FILE=compose.dev.yaml ENV_FILE=.env.dev sh dashboard/scripts/respaldo-instalacion.sh DESTINO
 #
 # Desde la raíz del monorepositorio. DESTINO es una carpeta nueva del anfitrión. Contenido:
 #   real-jaen.sqlite          copia SQLite consistente (persistencia copiar: integridad y huella comprobadas)
@@ -16,20 +17,40 @@
 # Se niega si hay una actualización en curso. Nunca toca los datos de origen.
 set -eu
 DEST=${1:?Indica una carpeta de destino nueva}
-ENV_FILE=${ENV_FILE:-deploy/prod/.env}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+COMPOSE_FILE=${COMPOSE_FILE:-compose.prod.yaml}
+case "$COMPOSE_FILE" in
+  compose.dev.yaml) DEFAULT_ENV=.env.dev ;;
+  compose.prod.yaml) DEFAULT_ENV=.env.prod ;;
+  *) echo "COMPOSE_FILE must be compose.dev.yaml or compose.prod.yaml" >&2; exit 1 ;;
+esac
+ENV_FILE=${ENV_FILE:-$DEFAULT_ENV}
+case "$ENV_FILE" in /*) ;; *) ENV_FILE="$ROOT_DIR/$ENV_FILE" ;; esac
 test -f "$ENV_FILE" || { echo "No existe $ENV_FILE" >&2; exit 1; }
-COMPOSE_DIR=$(cd deploy/prod && pwd)
+test -f "$ROOT_DIR/$COMPOSE_FILE" || { echo "No existe $ROOT_DIR/$COMPOSE_FILE" >&2; exit 1; }
 ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
-COMPOSE_FILES=${COMPOSE_FILES:--f compose.yaml}
 test ! -e "$DEST" || { echo "El destino ya existe: $DEST" >&2; exit 1; }
 var() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
-STATE_VOLUME=$(var RJ_PROD_SPORTS_STATE_VOLUME)
-JOBS_VOLUME=$(var RJ_PROD_ACQUISITION_JOBS_VOLUME)
-VIDEO_VOLUME=$(var RJ_PROD_VIDEO_STATE_VOLUME)
-SPORTS_DATA_IMAGE=$(var RJ_SPORTS_DATA_IMAGE)
-test -n "$STATE_VOLUME" && test -n "$JOBS_VOLUME" && test -n "$VIDEO_VOLUME" && test -n "$SPORTS_DATA_IMAGE" || { echo "Faltan variables de volúmenes o RJ_SPORTS_DATA_IMAGE en $ENV_FILE" >&2; exit 1; }
-# shellcheck disable=SC2086
-dc() (cd "$COMPOSE_DIR" && docker compose --env-file "$ENV_FILE" $COMPOSE_FILES "$@")
+case "$COMPOSE_FILE" in
+  compose.dev.yaml)
+    STATE_VOLUME=rja-dev-sports-state
+    JOBS_VOLUME=rja-dev-acquisition-jobs
+    VIDEO_VOLUME=rja-dev-video-state
+    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:dev
+    ;;
+  compose.prod.yaml)
+    STATE_VOLUME=$(var RJ_PROD_SPORTS_STATE_VOLUME)
+    JOBS_VOLUME=$(var RJ_PROD_ACQUISITION_JOBS_VOLUME)
+    VIDEO_VOLUME=$(var RJ_PROD_VIDEO_STATE_VOLUME)
+    STATE_VOLUME=${STATE_VOLUME:-rja-prod-sports-state}
+    JOBS_VOLUME=${JOBS_VOLUME:-rja-prod-acquisition-jobs}
+    VIDEO_VOLUME=${VIDEO_VOLUME:-rja-prod-video-state}
+    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:prod
+    ;;
+esac
+test -n "$STATE_VOLUME" && test -n "$JOBS_VOLUME" && test -n "$VIDEO_VOLUME" && test -n "$SPORTS_DATA_IMAGE" || { echo "No se pudieron determinar los volúmenes de datos para $COMPOSE_FILE" >&2; exit 1; }
+dc() (cd "$ROOT_DIR" && docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@")
 # Ninguna actualización en curso (lectura inmutable: no toca los archivos).
 active=$(docker run --rm --network none -v "$STATE_VOLUME:/state:ro" --entrypoint python "$SPORTS_DATA_IMAGE" -c "
 import os, sqlite3
@@ -41,7 +62,7 @@ test "$active" = 0 || { echo "Hay una actualización en curso: espera a que term
 mkdir -p "$DEST"
 OUT=$(cd "$DEST" && pwd)
 # Git Bash (Windows): paths for Docker in Windows form, and no automatic conversion of container paths.
-case "$(uname -s)" in MINGW*|MSYS*) OUT=$(cd "$DEST" && pwd -W); ENV_FILE=$(cygpath -m "$ENV_FILE"); export MSYS_NO_PATHCONV=1 ;; esac
+case "$(uname -s)" in MINGW*|MSYS*) OUT=$(cd "$DEST" && pwd -W); ENV_FILE=$(cygpath -m "$ENV_FILE"); ROOT_DIR=$(cygpath -m "$ROOT_DIR"); export MSYS_NO_PATHCONV=1 ;; esac
 
 services="dashboard sports-data acquisition video-service"
 echo "Deteniendo: $services"
