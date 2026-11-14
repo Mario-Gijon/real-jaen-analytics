@@ -4,13 +4,14 @@ Plataforma para analizar partidos, equipos y jugadores del Real Jaén CF, con ac
 
 ## Desarrollo
 
-Mario proporciona `.env.dev` y los archivos privados necesarios. Desde la raíz:
+Para utilizar la instalación con los datos actuales, Álvaro recibe aparte el paquete privado `real-jaen-analytics-dev-alvaro.tar.gz`. Guárdalo en la raíz del repositorio clonado, descomprímelo y arranca los servicios:
 
 ```sh
+tar -xzf real-jaen-analytics-dev-alvaro.tar.gz -C .
 docker compose --env-file .env.dev -f compose.dev.yaml up -d --build
 ```
 
-El Dashboard queda en `http://127.0.0.1:33201`. Los datos reales permanecen en los volúmenes `rja-dev-*`; para instalarlo en otro ordenador hay que transferir y restaurar un respaldo verificado una sola vez.
+El archivo incluye `.env.dev`, las contraseñas de desarrollo y los datos iniciales. No contiene vídeos originales ni cookies. El Dashboard queda en `http://localhost:33201`. La primera ejecución carga los datos solo en volúmenes vacíos; la lectura inicial de Sports Data puede tardar varios minutos y Compose espera antes de iniciar Dashboard. Los volúmenes que ya contienen datos no se sustituyen. Después, los cambios persisten en Docker.
 
 ## Producción
 
@@ -20,6 +21,6 @@ Configura `.env.prod`, los secretos externos y los volúmenes persistentes de la
 docker compose --env-file .env.prod -f compose.prod.yaml up -d --build
 ```
 
-El código y los archivos privados se entregan por separado. Los secretos, bases de datos, respaldos, el catálogo de vídeos y los datos operativos no se publican en Git. Las actualizaciones deportivas y los trabajos de vídeo solo comienzan mediante acciones explícitas desde el Dashboard.
+El paquete privado, las bases de datos, el catálogo, las calibraciones y los secretos no se publican en Git. Acquisition no ejecuta trabajos al arrancar; las actualizaciones deportivas y los trabajos de vídeo solo comienzan mediante acciones explícitas desde el Dashboard.
 
 Para la preparación inicial, la copia de datos o las operaciones de respaldo, consulta [despliegue](docs/despliegue.md). La arquitectura de los cuatro servicios se describe en [arquitectura](docs/arquitectura.md).

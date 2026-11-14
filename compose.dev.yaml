@@ -1,4 +1,4 @@
-name: real-jaen-analytics-dev
+name: ${RJ_DEV_PROJECT_NAME:-real-jaen-analytics-dev}
 
 services:
   sports-data:
@@ -13,8 +13,36 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m,uid=10001,gid=10001,mode=0700
+    entrypoint: ["python", "-B", "-c"]
     command:
-      ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
+      - |
+        import os, pathlib, shutil, sqlite3, sys
+        state = pathlib.Path('/state')
+        database = state / 'real-jaen.sqlite'
+        seed = pathlib.Path('/run/rja-seed')
+        def verify(path):
+            connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+            try:
+                if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                    raise RuntimeError('La base deportiva de desarrollo no supera integrity_check.')
+            finally:
+                connection.close()
+        if database.is_file():
+            verify(database)
+        elif any(path.is_file() or path.is_symlink() for path in state.rglob('*')):
+            raise RuntimeError('El volumen deportivo no está vacío y no contiene real-jaen.sqlite; se rechaza sembrarlo.')
+        else:
+            if not (seed / 'real-jaen.sqlite').is_file():
+                raise RuntimeError('Falta el paquete privado de datos deportivos en .rja-private/seed/sports.')
+            shutil.copytree(seed, state, dirs_exist_ok=True)
+            verify(database)
+        os.execv(sys.executable, [sys.executable, '-B', '-m', 'uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8002'])
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
     environment:
       SPORTS_DATA_STORAGE: sql
       SPORTS_DATA_DB: /state/real-jaen.sqlite
@@ -35,6 +63,11 @@ services:
       - type: volume
         source: sports-state
         target: /state
+      - type: bind
+        source: ${RJ_DEV_SEED_DIR:-./.rja-private/seed}/sports
+        target: /run/rja-seed
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${RJ_DEV_IMPORT_DIR:?Set RJ_DEV_IMPORT_DIR to a separate copy of import files}
         target: /imports
@@ -72,8 +105,16 @@ services:
     mem_limit: 2g
     cpus: 2
     pids_limit: 512
+    entrypoint: ["python", "-B", "-c"]
     command:
-      ["acquisition.app:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1", "--no-access-log", "--reload", "--reload-dir", "/opt/app/acquisition"]
+      - |
+        import os, pathlib, sys
+        profile_root = pathlib.Path('/profiles')
+        if not any(profile_root.iterdir()):
+            from acquisition.profile import Profile
+            with Profile(profile_root) as owner:
+                owner.initialize(confirm_new=True)
+        os.execv(sys.executable, [sys.executable, '-B', '-m', 'uvicorn', 'acquisition.app:app', '--host', '0.0.0.0', '--port', '8002', '--workers', '1', '--no-access-log', '--reload', '--reload-dir', '/opt/app/acquisition'])
     environment:
       ACQ_PROVIDER: sofascore
       ACQ_ENABLE_REAL: ${RJ_ACQUISITION_ENABLE_REAL:-0}
@@ -127,7 +168,30 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     read_only: true
-    command: ["python", "-B", "-m", "uvicorn", "video_service.main:app", "--host", "0.0.0.0", "--port", "8010", "--reload", "--reload-dir", "/app/src"]
+    entrypoint: ["python", "-B", "-c"]
+    command:
+      - |
+        import os, pathlib, shutil, sqlite3, sys
+        state = pathlib.Path('/state')
+        database = state / 'video-service.sqlite'
+        seed = pathlib.Path('/run/rja-seed')
+        def verify(path):
+            connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+            try:
+                if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                    raise RuntimeError('La base persistente de vídeo no supera integrity_check.')
+            finally:
+                connection.close()
+        if database.is_file():
+            verify(database)
+        elif any(path.is_file() or path.is_symlink() for path in state.rglob('*')):
+            raise RuntimeError('El volumen de vídeo no está vacío y no contiene video-service.sqlite; se rechaza sembrarlo.')
+        else:
+            if not (seed / 'video-service.sqlite').is_file():
+                raise RuntimeError('Falta el paquete privado del estado de vídeo en .rja-private/seed/video.')
+            shutil.copytree(seed, state, dirs_exist_ok=True)
+            verify(database)
+        os.execv(sys.executable, [sys.executable, '-B', '-m', 'uvicorn', 'video_service.main:app', '--host', '0.0.0.0', '--port', '8010', '--reload', '--reload-dir', '/app/src'])
     environment:
       VIDEO_SERVICE_HOST: 0.0.0.0
       VIDEO_SERVICE_PORT: "8010"
@@ -141,6 +205,11 @@ services:
       - type: volume
         source: video-state
         target: /state
+      - type: bind
+        source: ${RJ_DEV_SEED_DIR:-./.rja-private/seed}/video
+        target: /run/rja-seed
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${RJ_DEV_VIDEO_CATALOG_DIR:?Set RJ_DEV_VIDEO_CATALOG_DIR outside this repository}
         target: /app/data
@@ -237,29 +306,29 @@ services:
 
 networks:
   dashboard-edge:
-    name: rja-dev-dashboard-edge
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-dashboard-edge
   sports-data-internal:
-    name: rja-dev-sports-data-internal
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-sports-data-internal
     internal: true
   video-internal:
-    name: rja-dev-video-internal
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-video-internal
     internal: true
   acquisition-control:
-    name: rja-dev-acquisition-control
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-acquisition-control
     internal: true
   acquisition-egress:
-    name: rja-dev-acquisition-egress
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-acquisition-egress
   video-egress:
-    name: rja-dev-video-egress
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-video-egress
 
 volumes:
   sports-state:
-    name: rja-dev-sports-state
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-sports-state
   acquisition-profiles:
-    name: rja-dev-acquisition-profiles
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-acquisition-profiles
   acquisition-jobs:
-    name: rja-dev-acquisition-jobs
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-acquisition-jobs
   video-state:
-    name: rja-dev-video-state
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-video-state
   dashboard-next:
-    name: rja-dev-dashboard-next
+    name: ${RJ_DEV_VOLUME_PREFIX:-rja-dev}-dashboard-next

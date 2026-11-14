@@ -2,6 +2,8 @@
 .env
 .env.*
 .secrets/
+.rja-private/
+real-jaen-analytics-dev-alvaro.tar.gz
 **/.env
 **/.env.*
 !.env.*.example

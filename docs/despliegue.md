@@ -8,14 +8,14 @@ Acquisition construye su propio runtime de Chromium desde el Dockerfile. La revi
 
 ## Desarrollo
 
-Usa el archivo privado `.env.dev` y mantén los volúmenes existentes `rja-dev-*`. Sus rutas externas deben apuntar a los secretos, archivos de importación y catálogo de vídeo de esa instalación.
+Mario entrega a Álvaro un paquete privado que se extrae en la raíz del repositorio clonado. Incluye `.env.dev`, secretos locales de desarrollo, el catálogo/calibraciones de vídeo y los estados SQLite que permiten reproducir la instalación. No incluye vídeos originales, perfiles del navegador ni cookies. Sus rutas son relativas al repositorio y no requieren editarse.
 
 ```sh
 docker compose --env-file .env.dev -f compose.dev.yaml up -d --build
 docker compose --env-file .env.dev -f compose.dev.yaml ps
 ```
 
-El Dashboard se publica en `http://127.0.0.1:33201`. Dashboard, Acquisition y Video Service conservan la recarga de código durante el desarrollo. Sports Data, Acquisition y Video Service no publican puertos al anfitrión.
+El Dashboard se publica en `http://localhost:33201`. Al arrancar, Sports Data y Video Service copian su semilla privada solo si el volumen correspondiente está vacío. Un volumen con datos nunca se restaura encima. La lectura inicial de Sports Data puede tardar varios minutos; Compose espera a que termine antes de iniciar Dashboard. Acquisition crea un perfil nuevo y vacío, sin sesiones del navegador. Dashboard, Acquisition y Video Service conservan la recarga de código durante el desarrollo. Sports Data, Acquisition y Video Service no publican puertos al anfitrión.
 
 Para detener o reanudar los contenedores sin eliminar datos:
 
@@ -24,15 +24,7 @@ docker compose --env-file .env.dev -f compose.dev.yaml stop
 docker compose --env-file .env.dev -f compose.dev.yaml start
 ```
 
-En otro ordenador, copia el repositorio, el `.env.dev` y los archivos privados. Transfiere el respaldo verificado de la instalación de origen dentro del directorio de importación indicado por `RJ_DEV_IMPORT_DIR` y restaura una sola vez sobre volúmenes nuevos:
-
-```sh
-COMPOSE_FILE=compose.dev.yaml ENV_FILE=.env.dev \
-  sh dashboard/scripts/restaurar-instalacion.sh \
-  /ruta/de/importaciones/RESPALDO_VERIFICADO
-```
-
-La restauración valida las sumas y la generación deportiva; no se repite al actualizar el código. El catálogo externo de vídeos se transfiere por separado. No se copian cookies ni perfiles del navegador: al restaurar se inicializa un perfil nuevo.
+Las carpetas y claves del paquete están excluidas de Git. La clave de acceso y la clave administrativa corresponden exclusivamente al desarrollo local. Las claves internas de Acquisition, Sports Data y sesión se generan para el paquete y no se comparten con producción. No se consulta SofaScore, descarga vídeo ni ejecuta OCR al iniciar.
 
 ## Producción
 
