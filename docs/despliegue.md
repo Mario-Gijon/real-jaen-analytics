@@ -69,30 +69,34 @@ El `resource_group` evita despliegues simultáneos. Como el orden de jobs que es
 
 ### Variables en GitLab
 
-Configúralas en el proyecto que recibe esta pipeline, en **Settings → CI/CD → Variables**. Para cada variable sensible, selecciona tipo **File**, marca **Protected** y limita el ámbito a **production**. Desactiva la expansión de referencias de variables. Usa visibilidad **Masked** o **Masked and hidden** cuando GitLab acepte el formato; las claves SSH multilínea pueden no cumplir las restricciones de enmascarado. El script no imprime valores de variables ni contenido de archivos.
+Configúralas en el proyecto que recibe esta pipeline, en **Settings → CI/CD → Variables**. La configuración SSH existente de Francisco (`SSH_PRIVATE_KEY`, `SSH_HOST`, `REMOTE_USER`) se puede reutilizar; no es necesario cambiar el tipo de `SSH_PRIVATE_KEY`. Admite una variable normal con la clave privada multilínea o una variable File cuyo valor sea la ruta temporal del archivo. El job copia la clave a un directorio temporal privado, normaliza CRLF, aplica modo `0600` y valida la clave antes de abrir una conexión. No muestra la clave.
+
+La verificación de host requiere una clave pública del servidor que haya sido verificada de forma independiente. Si existe `SSH_KNOWN_HOSTS`, puede ser una variable File o una variable de texto con entradas `known_hosts`. Si no está definida, el job busca una entrada confiable en `$HOME/.ssh/known_hosts` del Runner. Aún no sabemos si esa variable o ese archivo ya están configurados. Si no encuentra una entrada válida para `SSH_HOST`, falla antes de conectar y solicita registrar la clave pública verificada. Mantiene `StrictHostKeyChecking=yes`; no usa `ssh-keyscan` para establecer confianza automáticamente.
 
 | Clave | Tipo | Contenido esperado |
 |---|---|---|
 | `ENV_PROD` | File | Contenido completo de `.env.prod`, basado en `.env.prod.example`. Mantén exactamente los nombres del proyecto, redes y volúmenes, el puerto y las rutas `${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/...`. Las claves críticas deben aparecer una sola vez y conservar los valores de producción esperados; las declaraciones duplicadas o alteradas se rechazan antes de consultar los volúmenes. No incluyas contraseñas ni tokens. |
-| `SSH_PRIVATE_KEY` | File | Clave privada dedicada al despliegue, sin frase de paso, autorizada en `REMOTE_USER`. |
-| `SSH_KNOWN_HOSTS` | File | Entrada `known_hosts` para `SSH_HOST`, obtenida y verificada por administración fuera de la pipeline. No uses `ssh-keyscan` durante el job. |
-| `SSH_HOST` | Variable | Nombre DNS o IPv4 del host SSH; se usa el puerto 22. |
-| `REMOTE_USER` | Variable | Cuenta de despliegue con escritura en su `$HOME` y acceso directo a Docker. |
+| `SSH_PRIVATE_KEY` | Variable o File | Reutiliza la variable existente. Puede contener la clave privada multilínea directamente o ser la ruta temporal que entrega una variable File. Usa una clave sin frase de paso, autorizada en `REMOTE_USER`. |
+| `SSH_KNOWN_HOSTS` | File o Variable, opcional si el Runner ya tiene el archivo confiable | Entradas `known_hosts` que incluyan `SSH_HOST`, con clave pública verificada fuera de banda. No se presupone que ya exista. |
+| `SSH_HOST` | Variable | Reutiliza la variable existente con el nombre DNS o IPv4 del host SSH; se usa el puerto 22. |
+| `REMOTE_USER` | Variable | Reutiliza la cuenta existente de despliegue. Debe tener escritura en su `$HOME` y acceso directo a Docker. |
 | `APP_ACCESS_PASSWORD` | File | Contraseña de acceso, al menos 12 caracteres imprimibles ASCII. |
 | `APP_UPDATE_PASSWORD` | File | Contraseña administrativa, al menos 9 caracteres imprimibles ASCII y distinta de la anterior. |
 | `APP_SESSION_SECRET` | File | Secreto de sesión de al menos 32 caracteres imprimibles ASCII. |
 | `APP_CONTROL_TOKEN` | File | Token interno de al menos 32 caracteres imprimibles ASCII. |
 | `APP_ACQUISITION_TOKEN` | File | Token de Acquisition de al menos 32 caracteres imprimibles ASCII y distinto del token de control. |
 
+Para Real Jaén Analytics hay que crear seis variables de aplicación: `ENV_PROD` y los cinco secretos `APP_*` de la tabla. Los tres valores SSH ya definidos pueden reutilizarse. `SSH_KNOWN_HOSTS` solo debe añadirse si el Runner no dispone del archivo confiable indicado arriba.
+
 Los cinco archivos `APP_*` deben contener una sola línea de ASCII imprimible, de hasta 256 caracteres, sin espacios ni controles; se permite un salto de línea final. GitLab entrega una variable File al proceso como la ruta de un archivo temporal. El script comprueba que esa ruta sea un archivo File no vacío, valida tamaños y contenido, instala los archivos bajo `shared/secrets/` y cambia el enlace `current` mediante renombrado atómico. Cuando un valor rota, Compose recrea los servicios que lo consumen incluso si el commit no ha cambiado. El job no usa esas credenciales como argumentos, variables de entorno de los contenedores ni contenido de build.
 
 Pasos para añadir cada entrada:
 
-1. Abre **Settings → CI/CD → Variables → Add variable**.
-2. Escribe la clave exacta de la tabla y pega el contenido esperado en **Value**. En **Type**, selecciona **File** salvo para `SSH_HOST` y `REMOTE_USER`, que son variables normales.
-3. Marca **Protect variable** después de confirmar que `main` está protegida. Selecciona **production** en **Environment scope**.
-4. Desactiva **Expand variable reference** y guarda. Para entradas de una sola línea, activa **Masked** si GitLab acepta el formato.
-5. Repite para las diez claves. No subas los archivos ni copies sus contenidos a `.gitlab-ci.yml`, artifacts o imágenes.
+1. Confirma con el administrador que `SSH_PRIVATE_KEY`, `SSH_HOST` y `REMOTE_USER` existentes estén disponibles para esta pipeline y para el entorno `production`; conserva sus valores y tipos actuales y verifica que estén protegidos.
+2. Comprueba si el Runner tiene `$HOME/.ssh/known_hosts` con una entrada para `SSH_HOST` cuya clave se verificó por un canal independiente. Si no, registra la entrada verificada en `SSH_KNOWN_HOSTS` como File o Variable, protegida y con ámbito `production`. No aceptes automáticamente la salida de `ssh-keyscan` como prueba de identidad.
+3. En **Settings → CI/CD → Variables → Add variable**, crea `ENV_PROD` y los cinco `APP_*` como variables File, protegidas, con ámbito `production` y sin expansión de referencias.
+4. Marca `main` como protegida para que el Runner pueda recibir las variables protegidas. Usa visibilidad **Masked** o **Masked and hidden** cuando GitLab acepte el formato; las claves SSH multilínea pueden no cumplir las restricciones de enmascarado.
+5. No subas archivos de secretos ni copies su contenido a `.gitlab-ci.yml`, artifacts o imágenes.
 
 La pantalla y algunas opciones pueden variar según la versión del GitLab autohospedado. La semántica de File, el ámbito de entorno y la protección se describe en la [documentación de variables CI/CD de GitLab](https://docs.gitlab.com/ci/variables/) y la [guía de claves SSH para jobs](https://docs.gitlab.com/ci/jobs/ssh_keys/).
 
@@ -106,7 +110,7 @@ El bootstrap crea automáticamente las rutas bajo el home SSH. Si el directorio 
 
 El directorio debe contener `real-jaen.sqlite`, `actualizaciones.tar`, `acquisition-jobs.tar`, `video-service-state.tar`, `manifest.json` y `SHA256SUMS`. `procedencia.tar` es opcional. El respaldo debe proceder de `dashboard/scripts/respaldo-instalacion.sh` y corresponder con los datos y el esquema que se van a desplegar. Antes de restaurar, el job comprueba que UID `10001` pueda recorrer el directorio y abrir cada archivo requerido. El catálogo operativo de vídeo se suministra aparte en `shared/video-catalog/`; no forma parte del respaldo conjunto. Si aún no hay catálogo, el sistema crea un manifiesto vacío de vídeo solo cuando ese directorio está completamente vacío.
 
-Después de proteger `main` y configurar las diez variables, inicia en GitLab una pipeline **Run pipeline** para la rama `main` y ejecuta el job manual `bootstrap_sinbad2`. Si el respaldo aún no está, el job fallará de forma segura y dejará creadas las carpetas necesarias. Tras copiar el respaldo, inicia otra pipeline web en `main` y ejecuta nuevamente el job. Ese job:
+Después de proteger `main`, confirmar las tres variables SSH existentes, verificar que haya una host key confiable y configurar las seis variables de aplicación, inicia en GitLab una pipeline **Run pipeline** para la rama `main` y ejecuta el job manual `bootstrap_sinbad2`. Si el respaldo aún no está, el job fallará de forma segura y dejará creadas las carpetas necesarias. Tras copiar el respaldo, inicia otra pipeline web en `main` y ejecuta nuevamente el job. Ese job:
 
 1. Se niega si ya existe cualquiera de los cuatro volúmenes destino.
 2. Comprueba la presencia y `SHA256SUMS` del respaldo antes de crear volúmenes.
@@ -127,8 +131,8 @@ Las releases, versiones de configuración y secretos antiguos no se podan autom�
 
 ### Requisitos de infraestructura que faltan por confirmar
 
-- **GitLab y Runner:** el proyecto autohospedado debe recibir los commits publicados en GitHub (por ejemplo, mediante un espejo autorizado); `main` debe estar protegida y el Runner seleccionado debe tener las herramientas anteriores y poder acceder a las variables protegidas del entorno `production`. No se declaran tags porque se desconoce la configuración disponible.
-- **SSH:** salida de red desde Runner al host por TCP 22, clave pública autorizada para la cuenta y entrada de host verificada en `SSH_KNOWN_HOSTS`.
+- **GitLab y Runner:** el proyecto autohospedado debe recibir los commits publicados en GitHub (por ejemplo, mediante un espejo autorizado); `main` debe estar protegida y el Runner seleccionado debe recibir las variables protegidas del entorno `production`. El Runner necesita `bash`, `git`, `ssh`, `ssh-keygen`, `tar`, `mktemp`, `install` y `tr`, salida al host por TCP 22, y un `$HOME/.ssh/known_hosts` confiable o la variable `SSH_KNOWN_HOSTS`. No se declaran tags porque se desconoce la configuración disponible.
+- **SSH:** la clave privada reutilizada debe corresponder con una clave pública autorizada en `REMOTE_USER`; esa cuenta necesita escritura en su `$HOME` y acceso directo al daemon Docker. La entrada de host para `SSH_HOST` debe estar verificada fuera de banda antes del primer despliegue.
 - **Docker:** Docker Engine y Compose v2.17 o posterior en el host, permisos para el daemon y capacidad de ejecutar builds, redes, volúmenes y contenedores UID `0` con `CAP_CHOWN` durante el bootstrap. El acceso a un daemon rootful equivale prácticamente a privilegios root; debe aprobarlo administración. Un daemon rootless solo sirve si su mapeo de UID permite esos cambios de propiedad y los bind mounts requeridos. No se presupone `sudo`.
 - **Red del host:** acceso durante la compilación a registros e índices de dependencias; el Dashboard publica el puerto TCP 8120. Firewall, DNS, proxy inverso y TLS institucional deben configurarse aparte.
 - **Datos:** respaldo con checksum verificado y compatible; catálogo de vídeo operativo y sus permisos de lectura para UID `10001` si ya existe.

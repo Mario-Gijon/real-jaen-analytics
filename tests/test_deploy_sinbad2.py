@@ -32,9 +32,18 @@ set -eu
 
 FAKE_SSH = r"""#!/bin/sh
 set -eu
+if [ -n "${RJA_TEST_SSH_LOG:-}" ]; then
+  for argument do printf '%s\n' "$argument" >> "$RJA_TEST_SSH_LOG"; done
+fi
+ssh_key=
+known_hosts=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -i|-o) shift 2 ;;
+    -i) ssh_key=$2; shift 2 ;;
+    -o)
+      case "$2" in UserKnownHostsFile=*) known_hosts=${2#*=} ;; esac
+      shift 2
+      ;;
     *) break ;;
   esac
 done
@@ -42,6 +51,17 @@ done
 target=$1
 shift
 case "$target" in *@*) ;; *) exit 92 ;; esac
+python3 - "$ssh_key" "$known_hosts" "$RJA_TEST_SSH_MATERIAL_LOG" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+key, hosts, log = map(Path, sys.argv[1:])
+with log.open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"key_mode": key.stat().st_mode & 0o777,
+                             "known_hosts_mode": hosts.stat().st_mode & 0o777,
+                             "private_key_env_present": "SSH_PRIVATE_KEY" in os.environ}) + "\n")
+PY
 export HOME="$RJA_TEST_REMOTE_HOME"
 if [ "$1" = sh ]; then
   shift
@@ -255,6 +275,8 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.files = self.base / "file-vars"
         self.files.mkdir()
         self.logs = self.base / "docker.jsonl"
+        self.ssh_log = self.base / "ssh-args.log"
+        self.ssh_material_log = self.base / "ssh-material.jsonl"
         self.state = self.base / "docker-state.json"
         self.write_file(self.bin_dir / "git", FAKE_GIT, 0o755)
         self.write_file(self.bin_dir / "ssh", FAKE_SSH, 0o755)
@@ -295,6 +317,8 @@ class DeploySinbad2Tests(unittest.TestCase):
                 "RJA_TEST_REMOTE_HOME": str(self.remote_home),
                 "RJA_TEST_DOCKER_LOG": str(self.logs),
                 "RJA_TEST_DOCKER_STATE": str(self.state),
+                "RJA_TEST_SSH_LOG": str(self.ssh_log),
+                "RJA_TEST_SSH_MATERIAL_LOG": str(self.ssh_material_log),
                 "RJA_TEST_RESTORE_PRESTATE": str(self.base / "restore-prestate.json"),
                 "RJA_TEST_VOLUMES": "rja-sinbad2-sports-state rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs rja-sinbad2-video-state",
                 "RJA_TEST_MANAGED_VOLUMES": "rja-sinbad2-sports-state rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs rja-sinbad2-video-state",
@@ -338,6 +362,19 @@ class DeploySinbad2Tests(unittest.TestCase):
         if not self.logs.exists():
             return []
         return [json.loads(line) for line in self.logs.read_text(encoding="utf-8").splitlines()]
+
+    def assert_ssh_material_is_private(self, result: subprocess.CompletedProcess[str], key_text: str) -> None:
+        logged = result.stdout + result.stderr
+        if self.ssh_log.exists():
+            logged += self.ssh_log.read_text(encoding="utf-8")
+        if self.logs.exists():
+            logged += self.logs.read_text(encoding="utf-8")
+        self.assertNotIn(key_text.strip(), logged)
+        material = [json.loads(line) for line in self.ssh_material_log.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(material)
+        self.assertTrue(all(item["key_mode"] == 0o600 for item in material))
+        self.assertTrue(all(item["known_hosts_mode"] == 0o600 for item in material))
+        self.assertTrue(all(not item["private_key_env_present"] for item in material))
 
     def test_fake_docker_creates_implicit_named_volumes(self) -> None:
         env = self.environment()
@@ -411,6 +448,7 @@ class DeploySinbad2Tests(unittest.TestCase):
     def test_file_variables_deploy_and_secret_permissions(self) -> None:
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assert_ssh_material_is_private(result, self.key.read_text(encoding="utf-8"))
         for secret in SECRETS.values():
             self.assertNotIn(secret, result.stdout + result.stderr)
 
@@ -441,6 +479,80 @@ class DeploySinbad2Tests(unittest.TestCase):
         logged_arguments = self.logs.read_text(encoding="utf-8")
         for secret in SECRETS.values():
             self.assertNotIn(secret, logged_arguments, "private value appeared in a Docker command")
+
+    def test_ssh_private_key_variable_text_is_supported_without_logging_it(self) -> None:
+        env = self.environment()
+        private_key = self.key.read_text(encoding="utf-8")
+        env["SSH_PRIVATE_KEY"] = private_key
+
+        result = self.invoke(env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assert_ssh_material_is_private(result, private_key)
+
+    def test_ssh_private_key_crlf_is_normalized(self) -> None:
+        env = self.environment()
+        private_key = self.key.read_text(encoding="utf-8").replace("\n", "\r\n")
+        env["SSH_PRIVATE_KEY"] = private_key
+
+        result = self.invoke(env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assert_ssh_material_is_private(result, private_key)
+
+    def test_missing_or_invalid_ssh_private_key_fails_before_ssh(self) -> None:
+        cases = (None, str(self.base / "missing-deploy-key"), "this is not an SSH private key")
+        for index, value in enumerate(cases):
+            with self.subTest(value=value):
+                env = self.environment(pipeline_id=101 + index, job_id=501 + index)
+                if value is None:
+                    env.pop("SSH_PRIVATE_KEY")
+                else:
+                    env["SSH_PRIVATE_KEY"] = value
+                result = self.invoke(env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.ssh_log.exists())
+                self.assertNotIn("this is not an SSH private key", result.stdout + result.stderr)
+
+    def test_ssh_known_hosts_variable_text_is_supported(self) -> None:
+        env = self.environment()
+        env["SSH_KNOWN_HOSTS"] = (self.files / "known_hosts").read_text(encoding="utf-8")
+
+        result = self.invoke(env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assert_ssh_material_is_private(result, self.key.read_text(encoding="utf-8"))
+        self.assertIn("StrictHostKeyChecking=yes", self.ssh_log.read_text(encoding="utf-8"))
+
+    def test_runner_known_hosts_file_is_used_when_variable_is_missing(self) -> None:
+        env = self.environment()
+        env.pop("SSH_KNOWN_HOSTS")
+        runner_home = self.base / "runner-home"
+        runner_known_hosts = runner_home / ".ssh/known_hosts"
+        runner_known_hosts.parent.mkdir(parents=True)
+        shutil.copyfile(self.files / "known_hosts", runner_known_hosts)
+        env["HOME"] = str(runner_home)
+
+        result = self.invoke(env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assert_ssh_material_is_private(result, self.key.read_text(encoding="utf-8"))
+
+    def test_absent_trusted_host_key_fails_before_ssh(self) -> None:
+        env = self.environment()
+        env.pop("SSH_KNOWN_HOSTS")
+        env["HOME"] = str(self.base / "runner-home-without-known-hosts")
+
+        result = self.invoke(env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No trusted SSH host key is configured", result.stderr)
+        self.assertIn("verifying its fingerprint out of band", result.stderr)
+        self.assertFalse(self.ssh_log.exists())
+
+        mismatch = self.environment(pipeline_id=102, job_id=502)
+        mismatch["SSH_KNOWN_HOSTS"] = (self.files / "known_hosts").read_text(encoding="utf-8").replace(
+            "sinbad2.test", "other-host.test"
+        )
+        mismatch_result = self.invoke(env=mismatch)
+        self.assertNotEqual(mismatch_result.returncode, 0)
+        self.assertIn("No trusted SSH host key matches SSH_HOST", mismatch_result.stderr)
+        self.assertFalse(self.ssh_log.exists())
 
     def test_missing_file_variable_fails_before_ssh(self) -> None:
         env = self.environment()
