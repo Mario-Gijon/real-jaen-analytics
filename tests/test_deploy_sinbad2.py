@@ -50,6 +50,24 @@ fi
 exec /bin/sh -c "$1"
 """
 
+FAKE_SH = r"""#!/bin/sh
+set -eu
+case " $* " in
+  *"dashboard/scripts/restaurar-instalacion.sh"*)
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+state = json.loads(Path(os.environ["RJA_TEST_DOCKER_STATE"]).read_text(encoding="utf-8"))
+Path(os.environ["RJA_TEST_RESTORE_PRESTATE"]).write_text(
+    json.dumps({"volumes": state["volumes"]}), encoding="utf-8"
+)
+PY
+    ;;
+esac
+exec "$RJA_REAL_SH" "$@"
+"""
+
 FAKE_MV = r"""#!/bin/sh
 set -eu
 target=
@@ -77,8 +95,30 @@ else:
     state = {"volumes": os.environ.get("RJA_TEST_VOLUMES", "").split(), "up_count": 0,
              "deployed": False, "network_detached": False}
 
+state.setdefault("implicit_volume_creations", [])
+
 def save():
     state_path.write_text(json.dumps(state), encoding="utf-8")
+
+def add_implicit_volume(name, trigger):
+    if name and name not in state["volumes"]:
+        state["volumes"].append(name)
+        state["implicit_volume_creations"].append({"name": name, "trigger": trigger})
+        save()
+
+def implicit_volumes_for_compose(command, command_args):
+    managed = os.environ.get("RJA_TEST_MANAGED_VOLUMES", "").split()
+    if command == "up":
+        for name in managed:
+            add_implicit_volume(name, "compose up")
+    elif command == "run":
+        services = {"sports-data", "acquisition", "video-service", "dashboard"}
+        service = next((arg for arg in command_args if arg in services), None)
+        if service and len(managed) == 4:
+            indexes = {"sports-data": (0,), "acquisition": (1, 2),
+                       "video-service": (3,), "dashboard": ()}[service]
+            for index in indexes:
+                add_implicit_volume(managed[index], "compose run " + service)
 
 def uid_10001_can_access(path, *, read=False, execute=False):
     # Evaluate actual host mode bits using the application's numeric UID/GID.
@@ -143,6 +183,9 @@ elif args and args[0] == "compose":
     subcommands = {"config", "build", "up", "ps", "run"}
     index = next((i for i, arg in enumerate(args[1:], 1) if arg in subcommands), None)
     command = args[index] if index is not None else ""
+    command_args = args[index + 1:] if index is not None else []
+    if command in ("up", "run"):
+        implicit_volumes_for_compose(command, command_args)
     if command == "build":
         raise SystemExit(1 if os.environ.get("RJA_TEST_FAIL_BUILD") == "1" else 0)
     elif command == "up":
@@ -182,6 +225,12 @@ elif args[:2] == ["network", "connect"]:
     save()
 elif args and args[0] in ("info", "run", "image"):
     if args[0] == "run":
+        for index, argument in enumerate(args[:-1]):
+            if argument == "-v":
+                source = args[index + 1].split(":", 1)[0]
+                if source and not source.startswith("/") and source not in (".", "..") \
+                        and not source.startswith(("./", "../")):
+                    add_implicit_volume(source, "docker run -v")
         if not check_host_mounts_for_uid_10001():
             raise SystemExit(1)
         if os.environ.get("RJA_TEST_FAIL_CATALOG") == "1" and any("VideoCatalog.load" in x for x in args):
@@ -209,6 +258,7 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.state = self.base / "docker-state.json"
         self.write_file(self.bin_dir / "git", FAKE_GIT, 0o755)
         self.write_file(self.bin_dir / "ssh", FAKE_SSH, 0o755)
+        self.write_file(self.bin_dir / "sh", FAKE_SH, 0o755)
         self.write_file(self.bin_dir / "docker", FAKE_DOCKER, 0o755)
         self.write_file(self.bin_dir / "mv", FAKE_MV, 0o755)
         self.make_file_variables()
@@ -245,7 +295,10 @@ class DeploySinbad2Tests(unittest.TestCase):
                 "RJA_TEST_REMOTE_HOME": str(self.remote_home),
                 "RJA_TEST_DOCKER_LOG": str(self.logs),
                 "RJA_TEST_DOCKER_STATE": str(self.state),
+                "RJA_TEST_RESTORE_PRESTATE": str(self.base / "restore-prestate.json"),
                 "RJA_TEST_VOLUMES": "rja-sinbad2-sports-state rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs rja-sinbad2-video-state",
+                "RJA_TEST_MANAGED_VOLUMES": "rja-sinbad2-sports-state rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs rja-sinbad2-video-state",
+                "RJA_REAL_SH": shutil.which("sh") or "/bin/sh",
                 "SSH_HOST": "sinbad2.test",
                 "REMOTE_USER": "deploy",
                 "CI_COMMIT_SHA": COMMIT,
@@ -285,6 +338,31 @@ class DeploySinbad2Tests(unittest.TestCase):
         if not self.logs.exists():
             return []
         return [json.loads(line) for line in self.logs.read_text(encoding="utf-8").splitlines()]
+
+    def test_fake_docker_creates_implicit_named_volumes(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_VOLUMES"] = ""
+        direct = subprocess.run(
+            [str(self.bin_dir / "docker"), "run", "--rm", "-v", "implicit-run-volume:/state", "alpine", "true"],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        compose_run = subprocess.run(
+            [str(self.bin_dir / "docker"), "compose", "run", "--rm", "sports-data", "true"],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(compose_run.returncode, 0, compose_run.stderr)
+        compose_up = subprocess.run(
+            [str(self.bin_dir / "docker"), "compose", "up", "-d"],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(compose_up.returncode, 0, compose_up.stderr)
+
+        state = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIn("implicit-run-volume", state["volumes"])
+        self.assertCountEqual(state["volumes"], env["RJA_TEST_MANAGED_VOLUMES"].split() + ["implicit-run-volume"])
+        self.assertTrue(any(item["trigger"] == "docker run -v" for item in state["implicit_volume_creations"]))
+        self.assertTrue(any(item["trigger"].startswith("compose ") for item in state["implicit_volume_creations"]))
 
     @staticmethod
     def compose_call(call: list[str], subcommand: str) -> bool:
@@ -488,6 +566,8 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.add_verified_backup()
         result = self.invoke("bootstrap", env)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        pre_restore = json.loads((self.base / "restore-prestate.json").read_text(encoding="utf-8"))
+        self.assertEqual(pre_restore["volumes"], [], "persistent volumes existed immediately before restore")
         calls = self.docker_calls()
         created = [call[-1] for call in calls if call[:2] == ["volume", "create"]]
         self.assertEqual(
@@ -499,9 +579,20 @@ class DeploySinbad2Tests(unittest.TestCase):
                 "rja-sinbad2-video-state",
             ],
         )
+        tar_restores = [call for call in calls if call and call[0] == "run" and "--entrypoint" in call
+                        and call[call.index("--entrypoint") + 1] == "tar"]
+        self.assertEqual(len(tar_restores), 2)
+        self.assertTrue(any(any("acquisition-jobs.tar" in arg for arg in call) for call in tar_restores))
+        self.assertTrue(any(any("video-service-state.tar" in arg for arg in call) for call in tar_restores))
+        self.assertTrue(any(self.compose_call(call, "run") for call in calls))
         self.assertFalse(any("down" in call for call in calls))
         self.assertFalse(any(call[:2] == ["volume", "rm"] for call in calls))
+        final_state = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(final_state["implicit_volume_creations"], [])
         self.assertTrue((self.remote_home / "deploy_real-jaen-analytics/shared/deploy-state/last-good").is_file())
+
+        later = self.invoke("deploy", self.environment(pipeline_id=102, job_id=502))
+        self.assertEqual(later.returncode, 0, later.stderr + later.stdout)
 
     def test_build_failure_keeps_previous_healthy_release(self) -> None:
         first = self.invoke()

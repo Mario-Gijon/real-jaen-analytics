@@ -429,13 +429,19 @@ else
   mv "$temporary" "$manifest"
 fi
 
+# VideoCatalog.load reads the manifest and its calibration files; it does not need state.
 docker run --rm --network none --user 10001:10001 \
-  -v "$video_volume:/state" -v "$catalog:/app/data:ro" \
+  -v "$catalog:/app/data:ro" \
   --entrypoint python "$video_image" -B -c \
   "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
   >/dev/null 2>&1 || fail 'video catalog is invalid or unreadable by UID 10001; existing catalog data was left untouched'
 
 if [ "$mode" = bootstrap ]; then
+  for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume"; do
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+      fail 'bootstrap target volume appeared during preflight; restore was not started'
+    fi
+  done
   if ! (cd "$release" && ENV_FILE="$env_file" COMPOSE_FILE=compose.prod.yaml \
       RJ_IMAGE_TAG="$commit_sha" sh dashboard/scripts/restaurar-instalacion.sh "$backup_dir"); then
     fail 'bootstrap restore failed; volumes were not removed. Inspect every target volume before any retry'
