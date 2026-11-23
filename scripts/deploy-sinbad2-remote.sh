@@ -71,6 +71,16 @@ restore_previous_links() {
   links_promoted=0
 }
 
+ensure_uid_read_directory() {
+  path=$1
+  if [ -e "$path" ]; then
+    [ -d "$path" ] && [ ! -L "$path" ] || fail 'shared imports/catalog path is not a real directory'
+    return 0
+  fi
+  mkdir -m 700 "$path" || fail 'could not create shared imports/catalog directory'
+  chmod 755 "$path" || fail 'could not make new shared imports/catalog directory readable'
+}
+
 cleanup() {
   status=$?
   trap - EXIT
@@ -126,9 +136,11 @@ for path in "$root" "$root/releases" "$root/shared" "$config_base" "$secrets_bas
   [ ! -L "$path" ] || fail 'deployment path contains a symbolic link'
 done
 mkdir -p "$root/releases" "$root/shared" "$config_base/versions" "$secrets_base/versions" \
-  "$imports" "$catalog" "$root/shared/incoming" "$state_dir"
+  "$root/shared/incoming" "$state_dir"
 chmod 700 "$root" "$root/shared" "$config_base" "$secrets_base" \
   "$config_base/versions" "$secrets_base/versions" "$root/shared/incoming" "$state_dir"
+ensure_uid_read_directory "$imports"
+ensure_uid_read_directory "$catalog"
 
 [ -d "$release" ] && [ ! -L "$release" ] || fail 'code release directory is missing'
 [ -f "$release/compose.prod.yaml" ] || fail 'production Compose file is missing from the release'
@@ -172,8 +184,11 @@ done
 
 require_line() {
   expected=$1
+  key=${expected%%=*}
+  declarations=$(grep -Ec "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$bundle_env" || true)
+  [ "$declarations" = 1 ] || fail "ENV_PROD declares critical key $key more than once"
   count=$(grep -Fxc "$expected" "$bundle_env" || true)
-  [ "$count" = 1 ] || fail 'ENV_PROD is missing a required production setting or contains a duplicate'
+  [ "$count" = 1 ] || fail "ENV_PROD critical setting $key does not match the required production value"
 }
 
 require_line 'COMPOSE_PROJECT_NAME=real-jaen-analytics-sinbad2-prod'
@@ -373,6 +388,33 @@ else
   fi
 fi
 
+if [ "$code_changed" -eq 1 ]; then
+  dc "$release" build sports-data acquisition video-service dashboard \
+    || fail 'image build failed; running services were not changed'
+fi
+
+sports_image="local/real-jaen-analytics/sports-data:$commit_sha"
+acquisition_image="local/real-jaen-analytics/acquisition:$commit_sha"
+video_image="local/real-jaen-analytics/video-service:$commit_sha"
+dashboard_image="local/real-jaen-analytics/dashboard:$commit_sha"
+
+docker run --rm --network none --user 10001:10001 -v "$imports:/imports:ro" \
+  --entrypoint python "$sports_image" -B -c \
+  "import os; os.listdir('/imports')" \
+  >/dev/null 2>&1 || fail 'shared/imports is not readable and traversable by UID 10001'
+
+if [ "$mode" = bootstrap ]; then
+  docker run --rm --network none --user 10001:10001 -v "$imports:/imports:ro" \
+    --entrypoint python "$sports_image" -B -c \
+    "import os; root='/imports'; backup=root+'/initial-backup'; os.listdir(root); os.listdir(backup); names=['real-jaen.sqlite','actualizaciones.tar','acquisition-jobs.tar','video-service-state.tar','manifest.json','SHA256SUMS']; names += ['procedencia.tar'] if os.path.isfile(backup+'/procedencia.tar') else []; [os.close(os.open(backup+'/'+name, os.O_RDONLY)) for name in names]" \
+    >/dev/null 2>&1 || fail 'bootstrap backup is not readable by UID 10001; no volume was restored'
+fi
+
+docker run --rm --network none --user 10001:10001 -v "$catalog:/app/data:ro" \
+  --entrypoint python "$video_image" -B -c \
+  "import os; os.listdir('/app/data')" \
+  >/dev/null 2>&1 || fail 'shared/video-catalog is not readable and traversable by UID 10001'
+
 manifest="$catalog/videos.json"
 if [ -e "$manifest" ] || [ -L "$manifest" ]; then
   [ -f "$manifest" ] && [ ! -L "$manifest" ] \
@@ -387,10 +429,11 @@ else
   mv "$temporary" "$manifest"
 fi
 
-if [ "$code_changed" -eq 1 ]; then
-  dc "$release" build sports-data acquisition video-service dashboard \
-    || fail 'image build failed; running services were not changed'
-fi
+docker run --rm --network none --user 10001:10001 \
+  -v "$video_volume:/state" -v "$catalog:/app/data:ro" \
+  --entrypoint python "$video_image" -B -c \
+  "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
+  >/dev/null 2>&1 || fail 'video catalog is invalid or unreadable by UID 10001; existing catalog data was left untouched'
 
 if [ "$mode" = bootstrap ]; then
   if ! (cd "$release" && ENV_FILE="$env_file" COMPOSE_FILE=compose.prod.yaml \
@@ -402,11 +445,6 @@ if [ "$mode" = bootstrap ]; then
       || fail 'bootstrap did not create all expected volumes; no automatic cleanup was attempted'
   done
 fi
-
-sports_image="local/real-jaen-analytics/sports-data:$commit_sha"
-acquisition_image="local/real-jaen-analytics/acquisition:$commit_sha"
-video_image="local/real-jaen-analytics/video-service:$commit_sha"
-dashboard_image="local/real-jaen-analytics/dashboard:$commit_sha"
 
 docker run --rm --network none --user 10001:10001 -v "$sports_volume:/state:ro" \
   --entrypoint python "$sports_image" -B -m persistencia verificar --base /state/real-jaen.sqlite \
@@ -471,12 +509,6 @@ docker run --rm --network none --user node \
   --entrypoint node "$dashboard_image" -e \
   "const fs=require('node:fs'); for (const p of ['/run/secrets/access-password','/run/secrets/update-password','/run/secrets/control-token','/run/secrets/session/session-secret']) { if (!fs.readFileSync(p,'latin1').trim()) process.exit(1); }" \
   >/dev/null 2>&1 || fail 'Dashboard cannot read its required secret files'
-
-docker run --rm --network none --user 10001:10001 \
-  -v "$video_volume:/state" -v "$catalog:/app/data:ro" \
-  --entrypoint python "$video_image" -B -c \
-  "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
-  >/dev/null 2>&1 || fail 'video catalog validation failed; existing catalog data was left untouched'
 
 check_health() {
   compose_dir=$1

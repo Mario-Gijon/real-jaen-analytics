@@ -80,6 +80,55 @@ else:
 def save():
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
+def uid_10001_can_access(path, *, read=False, execute=False):
+    # Evaluate actual host mode bits using the application's numeric UID/GID.
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return False
+    if info.st_uid == 10001:
+        bits = (info.st_mode >> 6) & 7
+    elif info.st_gid == 10001:
+        bits = (info.st_mode >> 3) & 7
+    else:
+        bits = info.st_mode & 7
+    return (not read or bool(bits & 4)) and (not execute or bool(bits & 1))
+
+def check_host_mounts_for_uid_10001():
+    mounts = []
+    for index, argument in enumerate(args[:-1]):
+        if argument == "-v":
+            source, target, *_ = args[index + 1].split(":", 2)
+            if source.startswith("/"):
+                mounts.append((Path(source), target))
+    command_text = " ".join(args)
+    for source, target in mounts:
+        if target == "/imports":
+            if not uid_10001_can_access(source, read=True, execute=True):
+                return False
+            if "initial-backup" in command_text:
+                backup = source / "initial-backup"
+                if not uid_10001_can_access(backup, read=True, execute=True):
+                    return False
+                names = ["real-jaen.sqlite", "actualizaciones.tar", "acquisition-jobs.tar",
+                         "video-service-state.tar", "manifest.json", "SHA256SUMS"]
+                if (backup / "procedencia.tar").is_file():
+                    names.append("procedencia.tar")
+                if any(not uid_10001_can_access(backup / name, read=True) for name in names):
+                    return False
+        elif target == "/app/data":
+            if not uid_10001_can_access(source, read=True, execute=True):
+                return False
+            if "VideoCatalog.load" in command_text:
+                manifest = source / "videos.json"
+                if not uid_10001_can_access(manifest, read=True):
+                    return False
+                try:
+                    json.loads(manifest.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return False
+    return True
+
 if args[:3] == ["compose", "version", "--short"]:
     print("5.6.1")
 elif args[:2] == ["volume", "inspect"]:
@@ -133,6 +182,8 @@ elif args[:2] == ["network", "connect"]:
     save()
 elif args and args[0] in ("info", "run", "image"):
     if args[0] == "run":
+        if not check_host_mounts_for_uid_10001():
+            raise SystemExit(1)
         if os.environ.get("RJA_TEST_FAIL_CATALOG") == "1" and any("VideoCatalog.load" in x for x in args):
             raise SystemExit(1)
         if any("SELECT COUNT(*) FROM job" in x for x in args):
@@ -355,6 +406,49 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
         self.assertFalse(any(self.compose_call(call, "build") for call in calls))
 
+    def test_new_bootstrap_directories_and_backup_are_readable_by_uid_10001(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_VOLUMES"] = ""
+        first = self.invoke("bootstrap", env)
+        self.assertNotEqual(first.returncode, 0)
+        self.assertIn("bootstrap backup is missing", first.stderr)
+
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        imports = root / "shared/imports"
+        catalog = root / "shared/video-catalog"
+        for directory in (imports, catalog):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+            self.assertTrue(directory.stat().st_mode & 0o005 == 0o005)
+
+        backup = self.add_verified_backup()
+        second = self.invoke("bootstrap", self.environment(pipeline_id=102, job_id=502))
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((catalog / "videos.json").stat().st_mode & 0o777, 0o444)
+        for path in backup.iterdir():
+            self.assertTrue(path.stat().st_mode & 0o004, f"UID 10001 cannot read {path.name}")
+        self.assertTrue(any("initial-backup" in argument for call in self.docker_calls() for argument in call))
+
+    def test_existing_shared_directories_without_uid_access_fail_without_chmod_or_up(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        imports = root / "shared/imports"
+        catalog = root / "shared/video-catalog"
+        before_ups = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
+
+        for index, directory in enumerate((imports, catalog)):
+            directory.chmod(0o700)
+            env_file = self.files / "ENV_PROD"
+            env_file.write_text(env_file.read_text(encoding="utf-8") + "# preflight retry\n", encoding="utf-8")
+            failed = self.invoke(pipeline_id=102 + index, job_id=502 + index)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("not readable and traversable by UID 10001", failed.stderr)
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            after_ups = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
+            self.assertEqual(after_ups, before_ups)
+            directory.chmod(0o755)
+
     def test_bootstrap_refuses_existing_volume_before_build(self) -> None:
         env = self.environment()
         self.add_verified_backup()
@@ -501,7 +595,7 @@ class DeploySinbad2Tests(unittest.TestCase):
         catalog.mkdir(parents=True)
         manifest = catalog / "videos.json"
         manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
-        manifest.chmod(0o440)
+        manifest.chmod(0o444)
         catalog.chmod(0o555)
         before_manifest = manifest.stat()
         before_catalog = catalog.stat()
@@ -515,6 +609,49 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.assertEqual(after_catalog.st_mode & 0o777, before_catalog.st_mode & 0o777)
         self.assertEqual((after_catalog.st_uid, after_catalog.st_gid), (before_catalog.st_uid, before_catalog.st_gid))
         catalog.chmod(0o755)
+
+    def test_env_prod_rejects_duplicate_critical_volume_identity(self) -> None:
+        env_file = self.files / "ENV_PROD"
+        env_file.write_text(
+            env_file.read_text(encoding="utf-8") +
+            "RJ_PROD_ACQUISITION_JOBS_VOLUME=other-acquisition-jobs\n",
+            encoding="utf-8",
+        )
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("declares critical key RJ_PROD_ACQUISITION_JOBS_VOLUME more than once", result.stderr)
+        calls = self.docker_calls()
+        self.assertFalse(any(call[:2] == ["volume", "inspect"] for call in calls))
+        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+
+    def test_env_prod_rejects_altered_project_identity(self) -> None:
+        env_file = self.files / "ENV_PROD"
+        content = env_file.read_text(encoding="utf-8")
+        content = content.replace(
+            "COMPOSE_PROJECT_NAME=real-jaen-analytics-sinbad2-prod",
+            "COMPOSE_PROJECT_NAME=attacker-selected-project",
+        )
+        env_file.write_text(content, encoding="utf-8")
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("critical setting COMPOSE_PROJECT_NAME does not match", result.stderr)
+        calls = self.docker_calls()
+        self.assertFalse(any(call[:2] == ["volume", "inspect"] for call in calls))
+        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+
+    def test_env_prod_rejects_altered_volume_identity(self) -> None:
+        env_file = self.files / "ENV_PROD"
+        content = env_file.read_text(encoding="utf-8").replace(
+            "RJ_PROD_ACQUISITION_JOBS_VOLUME=rja-sinbad2-acquisition-jobs",
+            "RJ_PROD_ACQUISITION_JOBS_VOLUME=other-acquisition-jobs",
+        )
+        env_file.write_text(content, encoding="utf-8")
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("critical setting RJ_PROD_ACQUISITION_JOBS_VOLUME does not match", result.stderr)
+        calls = self.docker_calls()
+        self.assertFalse(any(call[:2] == ["volume", "inspect"] for call in calls))
+        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
 
     def test_preflight_failure_leaves_running_stack_and_current_links_untouched(self) -> None:
         first = self.invoke()
@@ -530,7 +667,7 @@ class DeploySinbad2Tests(unittest.TestCase):
 
         failed = self.invoke(env=env)
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("video catalog validation failed", failed.stderr)
+        self.assertIn("video catalog is invalid or unreadable by UID 10001", failed.stderr)
         self.assertEqual((root / "shared/config/current").resolve(), old_config)
         self.assertEqual((root / "shared/secrets/current").resolve(), old_secret)
         state_after = json.loads(self.state.read_text(encoding="utf-8"))
