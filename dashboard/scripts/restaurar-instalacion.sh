@@ -5,7 +5,8 @@
 #   ENV_FILE=.env.prod sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
 #   COMPOSE_FILE=compose.dev.yaml ENV_FILE=.env.dev sh dashboard/scripts/restaurar-instalacion.sh RESPALDO
 #
-# RESPALDO es una carpeta dentro de RJ_IMPORT_DIR, configurado en relación con la raíz del workspace; el backend la lee en /imports, en solo lectura.
+# RESPALDO es una carpeta dentro de RJ_IMPORT_DIR, montado en /imports en solo lectura.
+# En desarrollo, RJ_IMPORT_DIR suele ser relativo al workspace; en producción, vive bajo shared/imports.
 # Comprueba SHA256SUMS; se niega si algún volumen de destino ya existe; restaura la base, sus registros de
 # actualización, los trabajos de Acquisition y el estado/calibraciones de Video Service; inicializa un perfil
 # de navegador nuevo y verifica que el coordinador acepta la generación del respaldo. No arranca servicios.
@@ -25,6 +26,15 @@ test -f "$ENV_FILE" || { echo "No existe $ENV_FILE" >&2; exit 1; }
 test -f "$ROOT_DIR/$COMPOSE_FILE" || { echo "No existe $ROOT_DIR/$COMPOSE_FILE" >&2; exit 1; }
 ENV_FILE=$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")
 var() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+resolve_deploy_root() {
+  case "$1" in
+    '${RJA_DEPLOY_ROOT:?Set by the deployment job}'/*)
+      test -n "${RJA_DEPLOY_ROOT:-}" || { echo "RJA_DEPLOY_ROOT is required to resolve production paths" >&2; exit 1; }
+      printf '%s%s' "$RJA_DEPLOY_ROOT" "${1#'${RJA_DEPLOY_ROOT:?Set by the deployment job}'}"
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 case "$COMPOSE_FILE" in
   compose.dev.yaml)
     STATE_VOLUME=rja-dev-sports-state
@@ -44,8 +54,8 @@ case "$COMPOSE_FILE" in
     JOBS_VOLUME=${JOBS_VOLUME:-rja-prod-acquisition-jobs}
     PROFILE_VOLUME=${PROFILE_VOLUME:-rja-prod-acquisition-profiles}
     VIDEO_VOLUME=${VIDEO_VOLUME:-rja-prod-video-state}
-    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:prod
-    IMPORT_DIR=$(var RJ_IMPORT_DIR)
+    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:${RJ_IMAGE_TAG:-prod}
+    IMPORT_DIR=$(resolve_deploy_root "$(var RJ_IMPORT_DIR)")
     PROJECT=$(var COMPOSE_PROJECT_NAME)
     PROJECT=${PROJECT:-real-jaen-analytics-prod}
     ;;

@@ -1,113 +1,29 @@
 stages:
   - deploy
 
-deploy_to_sinbad2:
+.deploy_sinbad2:
   stage: deploy
+  environment:
+    name: production
   resource_group: sinbad2-production
+  interruptible: false
+  allow_failure: false
+
+deploy_to_sinbad2:
+  extends: .deploy_sinbad2
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       when: on_success
     - when: never
-  before_script:
-    - |
-      set -eu
-      for tool in git ssh ssh-agent ssh-add ssh-keygen tar; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-          echo "Required runner command '$tool' is unavailable; ask the runner administrator to provide it. No packages were installed." >&2
-          exit 127
-        fi
-        printf 'Runner command %s: %s\n' "$tool" "$(command -v "$tool")"
-      done
-      test -n "${SSH_PRIVATE_KEY:-}" || { echo "SSH_PRIVATE_KEY is missing" >&2; exit 1; }
-      test -n "${SSH_KNOWN_HOSTS:-}" || { echo "SSH_KNOWN_HOSTS is missing" >&2; exit 1; }
-      test -n "${SSH_HOST:-}" || { echo "SSH_HOST is missing" >&2; exit 1; }
-      test -n "${REMOTE_USER:-}" || { echo "REMOTE_USER is missing" >&2; exit 1; }
-
-      mkdir -m 700 -p "$HOME/.ssh"
-      write_ssh_material() {
-        value=$1
-        destination=$2
-        if [ -f "$value" ]; then
-          cp "$value" "$destination"
-        else
-          printf '%s\n' "$value" > "$destination"
-        fi
-        chmod 600 "$destination"
-      }
-      write_ssh_material "$SSH_PRIVATE_KEY" "$HOME/.ssh/deploy_key"
-      write_ssh_material "$SSH_KNOWN_HOSTS" "$HOME/.ssh/known_hosts"
-      ssh-keygen -y -f "$HOME/.ssh/deploy_key" >/dev/null
-      ssh-keygen -lf "$HOME/.ssh/known_hosts" >/dev/null
-      eval "$(ssh-agent -s)" >/dev/null
-      ssh-add "$HOME/.ssh/deploy_key" >/dev/null
   script:
-    - |
-      set -eu
-      set -o pipefail
-      target="${REMOTE_USER}@${SSH_HOST}"
-      release_id="${CI_COMMIT_SHA}-${CI_PIPELINE_ID}-${CI_JOB_ID}"
-      ssh_remote() {
-        ssh \
-          -o BatchMode=yes \
-          -o StrictHostKeyChecking=yes \
-          -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-          -o GlobalKnownHostsFile=/dev/null \
-          "$@"
-      }
-      git archive --format=tar "$CI_COMMIT_SHA" |
-        ssh_remote "$target" "set -eu; root=\"\$HOME/deploy_real-jaen-analytics\"; release=\"\$root/releases/${release_id}\"; mkdir -p \"\$release\"; tar -xf - -C \"\$release\""
-      ssh_remote "$target" sh -s -- "$release_id" "$CI_COMMIT_SHA" <<'REMOTE_SCRIPT'
-      set -eu
-      release_id=$1
-      commit_sha=$2
-      root="$HOME/deploy_real-jaen-analytics"
-      release="$root/releases/$release_id"
-      compose_dir="$release"
-      compose_file="$compose_dir/compose.prod.yaml"
-      env_file="$root/.env.prod"
-      test -d "$release"
-      test -f "$compose_file"
-      test -f "$env_file" || { echo "Missing private deployment config: $env_file" >&2; exit 1; }
+    - bash scripts/deploy-sinbad2.sh deploy
 
-      dashboard_bind=$(sed -n 's/^RJ_DASHBOARD_BIND=//p' "$env_file" | tail -n 1)
-      dashboard_port=$(sed -n 's/^RJ_DASHBOARD_PORT=//p' "$env_file" | tail -n 1)
-      test "$dashboard_bind" = "0.0.0.0" || {
-        echo "RJ_DASHBOARD_BIND must be 0.0.0.0 for SINBAD²" >&2
-        exit 1
-      }
-      test "$dashboard_port" = "8120" || {
-        echo "RJ_DASHBOARD_PORT must be 8120 for SINBAD²" >&2
-        exit 1
-      }
-
-      cd "$compose_dir"
-      dc() {
-        docker compose --project-directory "$compose_dir" \
-          --env-file "$env_file" -f compose.prod.yaml "$@"
-      }
-
-      dc config -q
-      for key in RJ_PROD_SPORTS_STATE_VOLUME RJ_PROD_ACQUISITION_PROFILES_VOLUME \
-        RJ_PROD_ACQUISITION_JOBS_VOLUME RJ_PROD_VIDEO_STATE_VOLUME; do
-        volume=$(sed -n "s/^$key=//p" "$env_file" | tail -n 1)
-        case "$volume" in
-          ""|*[!a-zA-Z0-9_.-]*) echo "Missing or invalid $key in $env_file" >&2; exit 1 ;;
-        esac
-        docker volume inspect "$volume" >/dev/null 2>&1 || {
-          echo "Persistent volume $volume is missing; restore the verified backup before deployment" >&2
-          exit 1
-        }
-      done
-      dc up -d --build --wait --wait-timeout 300 dashboard sports-data acquisition video-service
-      for service in dashboard sports-data acquisition video-service; do
-        container_id=$(dc ps -q "$service")
-        test -n "$container_id" || { echo "$service has no container" >&2; exit 1; }
-        state=$(docker inspect --format '{{.State.Status}}' "$container_id")
-        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_id")
-        test "$state" = running && test "$health" = healthy || {
-          echo "$service is not healthy (state=$state, health=$health)" >&2
-          exit 1
-        }
-      done
-      echo "Deployment $commit_sha is healthy in $root"
-      REMOTE_SCRIPT
+bootstrap_sinbad2:
+  extends: .deploy_sinbad2
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: false
+    - when: never
+  script:
+    - bash scripts/deploy-sinbad2.sh bootstrap

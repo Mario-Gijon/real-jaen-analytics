@@ -46,7 +46,7 @@ case "$COMPOSE_FILE" in
     STATE_VOLUME=${STATE_VOLUME:-rja-prod-sports-state}
     JOBS_VOLUME=${JOBS_VOLUME:-rja-prod-acquisition-jobs}
     VIDEO_VOLUME=${VIDEO_VOLUME:-rja-prod-video-state}
-    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:prod
+    SPORTS_DATA_IMAGE=local/real-jaen-analytics/sports-data:${RJ_IMAGE_TAG:-prod}
     ;;
 esac
 test -n "$STATE_VOLUME" && test -n "$JOBS_VOLUME" && test -n "$VIDEO_VOLUME" && test -n "$SPORTS_DATA_IMAGE" || { echo "No se pudieron determinar los volúmenes de datos para $COMPOSE_FILE" >&2; exit 1; }

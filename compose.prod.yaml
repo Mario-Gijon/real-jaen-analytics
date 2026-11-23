@@ -5,7 +5,7 @@ services:
     build:
       context: ./sports-data
       dockerfile: Dockerfile
-    image: local/real-jaen-analytics/sports-data:prod
+    image: local/real-jaen-analytics/sports-data:${RJ_IMAGE_TAG:-prod}
     init: true
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
@@ -58,7 +58,7 @@ services:
         implementation: ./acquisition/src/acquisition
         backend: ./sports-data
         checks: ./acquisition/tests
-    image: local/real-jaen-analytics/acquisition:prod
+    image: local/real-jaen-analytics/acquisition:${RJ_IMAGE_TAG:-prod}
     init: true
     restart: unless-stopped
     user: "10001:10001"
@@ -102,7 +102,7 @@ services:
     build:
       context: ./video-service
       dockerfile: Dockerfile
-    image: local/real-jaen-analytics/video-service:prod
+    image: local/real-jaen-analytics/video-service:${RJ_IMAGE_TAG:-prod}
     init: true
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
@@ -140,7 +140,7 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
-    image: local/real-jaen-analytics/dashboard:prod
+    image: local/real-jaen-analytics/dashboard:${RJ_IMAGE_TAG:-prod}
     init: true
     restart: unless-stopped
     security_opt: [no-new-privileges:true]

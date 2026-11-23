@@ -15,12 +15,8 @@ El archivo incluye `.env.dev`, las contraseñas de desarrollo y los datos inicia
 
 ## Producción
 
-Configura `.env.prod`, los secretos externos y los volúmenes persistentes de la instalación. En SINBAD² el Dashboard utiliza el puerto `8120`.
+La producción de SINBAD² se actualiza mediante GitLab CI/CD con pushes a `main`. El primer arranque requiere el job manual de bootstrap y un respaldo verificado. No ejecutes `docker compose up` desde una release sin seguir el procedimiento documentado. El Dashboard utiliza el puerto `8120`.
 
-```sh
-docker compose --env-file .env.prod -f compose.prod.yaml up -d --build
-```
+El paquete privado, las bases de datos, el catálogo, las calibraciones y los secretos no se publican en Git. Acquisition no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos de vídeo solo comienzan mediante acciones explícitas desde el Dashboard.
 
-El paquete privado, las bases de datos, el catálogo, las calibraciones y los secretos no se publican en Git. Acquisition no ejecuta trabajos al arrancar; las actualizaciones deportivas y los trabajos de vídeo solo comienzan mediante acciones explícitas desde el Dashboard.
-
-Para la preparación inicial, la copia de datos o las operaciones de respaldo, consulta [despliegue](docs/despliegue.md). La arquitectura de los cuatro servicios se describe en [arquitectura](docs/arquitectura.md).
+Para configurar GitLab, completar el bootstrap, revisar fallos o realizar respaldos, consulta [despliegue](docs/despliegue.md). La arquitectura de los cuatro servicios se describe en [arquitectura](docs/arquitectura.md).

@@ -3,6 +3,8 @@
 **Fecha:** 23 de noviembre de 2026
 **Alcance:** auditoría del despliegue actual, cambio de disparador y propuesta. No se implementó un despliegue nuevo, no se contactó con SINBAD² y no se manipularon datos de producción.
 
+> **Nota de vigencia:** este documento registra el estado anterior a la segunda fase. La propuesta se implementó después; el flujo vigente y sus límites están en [`docs/despliegue.md`](despliegue.md), `.gitlab-ci.yml` y `scripts/deploy-sinbad2*.sh`. Las observaciones siguientes describen la auditoría de ese estado anterior.
+
 ## Resumen
 
 El job existente transfiere una copia archivada del commit por SSH a una carpeta de release del servidor y allí construye e inicia los cuatro servicios con Docker Compose. El trabajo ya no debe ejecutarse para `master`: ahora se limita a **pushes de rama a `main`**. La condición también descarta eventos de merge request, tags, schedules, ejecuciones manuales y pipelines downstream.
