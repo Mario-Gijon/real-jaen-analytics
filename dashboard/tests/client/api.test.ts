@@ -5,6 +5,8 @@ import {
   getAllEnrichedComments,
   getEnrichedComments,
   getMatch,
+  getMatchVideo,
+  locateMatchVideoEvent,
   getObservedMatchDetail,
   getObservedPlayers,
   getObservedTeam,
@@ -84,6 +86,30 @@ describe("typed client", () => {
     const fetch = answer([]);
     await getSource();
     expect(urls(fetch)).toEqual(["/real-jaen/api/v1/source"]);
+  });
+
+  it("keeps the player-event and video API calls under the production prefix exactly once", async () => {
+    vi.stubEnv("NEXT_PUBLIC_BASE_PATH", "/real-jaen");
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.endsWith("/video/locate")
+        ? { status: "uncertain" }
+        : url.endsWith("/video")
+          ? { available: false }
+          : { enrichmentVersion: "rules-v1", total: 0, limit: 100, offset: 0, items: [] };
+      return new Response(JSON.stringify(body));
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    await getAllEnrichedComments("16600011");
+    await getMatchVideo("sofascore-match-16600011");
+    await locateMatchVideoEvent("sofascore-match-16600011", "first", "45+2");
+
+    expect(fetch.mock.calls.map(([input]) => input)).toEqual([
+      "/real-jaen/api/v1/enrichment/comments?source_event_id=16600011&limit=100&offset=0",
+      "/real-jaen/api/v1/matches/sofascore-match-16600011/video",
+      "/real-jaen/api/v1/matches/sofascore-match-16600011/video/locate?period=first&event_kind=other&minute=45%2B2",
+    ]);
   });
 
   it("loads every result page internally and returns the full event list", async () => {

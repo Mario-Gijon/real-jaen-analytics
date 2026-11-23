@@ -9,6 +9,7 @@ import type { ProfileOrigin } from "@/lib/navigation";
 import { Button } from "@/ui/Button";
 import { LoadingState } from "@/ui/LoadingState";
 import { failureReason, useApi } from "@/hooks/use-api";
+import { locationParameters, locationUnavailableReason, periodFor, sourceEventId } from "./event-video-location";
 import { YouTubePlayer } from "./YouTubePlayer";
 import type { YouTubePlaybackSnapshot } from "./YouTubePlayer";
 import css from "./MatchCommentsPanel.module.css";
@@ -28,7 +29,6 @@ const MATCH_FLOW_LABELS: Readonly<Record<string, string>> = {
   endSecondHalf: "Final de la segunda parte",
   matchEnded: "Final del partido",
 };
-const matchIdPattern = /^sofascore-match-([1-9]\d*)$/;
 const publicPlayerIdPattern = /^sofascore-player-[1-9]\d*$/;
 const youtubeVideoIdPattern = /^[A-Za-z0-9_-]{11}$/;
 const activeVideoJobStatuses = new Set<VideoJob["status"]>(["pending", "downloading", "calibrating", "saving"]);
@@ -47,10 +47,6 @@ type ManualEventSelection = {
   videoSecond: number | null;
   awaitingPlayback: boolean;
 };
-
-function sourceEventId(matchId: string): string | null {
-  return matchIdPattern.exec(matchId)?.[1] ?? null;
-}
 
 function isYouTubeVideoUrl(value: string): boolean {
   try {
@@ -135,16 +131,6 @@ function eventLabel(item: EnrichedComment): string {
 
 function eventKey(item: EnrichedComment): string {
   return `${item.captureId ?? "capture"}-${typeof item.id}-${item.id}`;
-}
-
-function locationParameters(item: EnrichedComment) {
-  const period = periodFor(item.periodName);
-  const eventKind: "other" | "match_start" | "period_start" = item.originalType === "matchStarted" && period === "first" ? "match_start"
-    : item.originalType === "matchStarted" && period === "second" ? "period_start" : "other";
-  const periodStart = eventKind !== "other";
-  if ((!periodStart && (item.minute === null || item.minute < 1)) || !period) return null;
-  const minute = item.minute !== null && item.minute >= 1 ? minuteForVideo(item.minute, period) : null;
-  return { period, eventKind, minute };
 }
 
 function playerChoices(rows: EventRow[]): PlayerChoice[] {
@@ -909,40 +895,6 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
       </section>
     </div>}
   </section>;
-}
-
-function periodFor(periodName: string | null): "first" | "second" | null {
-  if (periodName === "1ST") return "first";
-  if (periodName === "2ND") return "second";
-  return null;
-}
-
-function locationUnavailableReason(location: LocationState | undefined): string | null {
-  if (location?.status === "ambiguous") {
-    return location.reason === "multiple_first_reference_segments"
-      ? "Hay varias referencias iniciales incompatibles; no se elige una posición única."
-      : "Hay más de una posición posible.";
-  }
-  if (location?.status === "uncertain") {
-    if (location.reason === "following_reference_crosses_discontinuity") {
-      return "La referencia OCR posterior está separada por un posible corte o cambio de desfase.";
-    }
-    if (location.reason === "following_reference_evidence_insufficient") {
-      return "La referencia OCR posterior no reúne suficientes lecturas consistentes.";
-    }
-    return "No se ha identificado con seguridad la parte o continuidad del partido.";
-  }
-  if (location?.status === "out_of_coverage") {
-    return location.reason === "event_outside_verified_ocr_segments_or_safe_extrapolation"
-      ? "No hay una referencia OCR fiable lo bastante cerca de este instante dentro de un tramo continuo."
-      : "El minuto queda fuera de la cobertura OCR verificada.";
-  }
-  return null;
-}
-
-function minuteForVideo(minute: number, period: "first" | "second"): string {
-  // SofaScore stores first-half stoppage time as 46′, 47′, etc.; V5.1 expects 45+N.
-  return period === "first" && minute > 45 ? `45+${minute - 45}` : String(minute);
 }
 
 function footballClockAtMinuteTail(minute: number): string {

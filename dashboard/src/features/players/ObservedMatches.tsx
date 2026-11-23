@@ -10,6 +10,7 @@ import { Select } from "@/ui/Select";
 import { dateLabel, positionLabel, statText } from "@/lib/format";
 import { teamsHref } from "@/lib/navigation";
 import { revealMatch } from "./reveal-match";
+import { PlayerMatchEvents } from "./PlayerMatchEvents";
 import sections from "../teams/TeamPerformance.module.css";
 import output from "../teams/TeamOutput.module.css";
 import shared from "./PlayerDetailView.module.css";
@@ -81,8 +82,8 @@ const MISSING_LABEL: Record<Extract<Stat, { value: null }>["reason"], string> = 
  * confirmed participation has no minutes nor stats and never reads «No
  * participó»; an unused substitute reads «No utilizado». `matchHref` (real matches active) adds «Ver partido completo».
  */
-export function ObservedMatches({ load, usualPosition, initialMatchId = null, matchHref = null, onSelect }: {
-  load: Load; usualPosition: PlayerPosition | null; initialMatchId?: string | null;
+export function ObservedMatches({ load, playerId, usualPosition, initialMatchId = null, matchHref = null, onSelect }: {
+  load: Load; playerId: string; usualPosition: PlayerPosition | null; initialMatchId?: string | null;
   matchHref?: ((matchId: string) => string) | null; onSelect?: (matchId: string) => void;
 }) {
   const { data, error, retry } = load;
@@ -156,7 +157,7 @@ export function ObservedMatches({ load, usualPosition, initialMatchId = null, ma
     <section id="player-match-detail-panel" className={css.selectedDetail} aria-labelledby="player-match-detail">
       <h2 className={sections.zoneTitle} id="player-match-detail">Detalle del partido</h2>
       {selected
-        ? <MatchDetail row={selected} usualPosition={usualPosition} href={matchHref?.(selected.match.id) ?? null} />
+        ? <MatchDetail row={selected} playerId={playerId} usualPosition={usualPosition} href={matchHref?.(selected.match.id) ?? null} />
         : <p className={shared.message}>{rows.length ? "Selecciona un partido del histórico." : "Sin partidos observados."}</p>}
     </section>
   </div>;
@@ -210,8 +211,8 @@ function Venue({ side }: { side: ObservedPlayerMatch["side"] }) {
   </span>;
 }
 
-function MatchDetail({ row, usualPosition, href }: {
-  row: ObservedPlayerMatch; usualPosition: PlayerPosition | null; href: string | null;
+function MatchDetail({ row, playerId, usualPosition, href }: {
+  row: ObservedPlayerMatch; playerId: string; usualPosition: PlayerPosition | null; href: string | null;
 }) {
   const { match } = row;
   const home = match.home.name ?? "Equipo sin identificar";
@@ -244,6 +245,8 @@ function MatchDetail({ row, usualPosition, href }: {
         </div>)}
       </div>
       <NotesLegend stats={row.stats} groups={keeper ? KEEPER_GROUPS : FIELD_GROUPS} />
+      {/* Remounted per player and match: nothing from a previous selection survives. */}
+      <PlayerMatchEvents key={`${playerId}|${match.id}`} matchId={match.id} playerId={playerId} assists={row.stats.assists} />
     </> : <p className={shared.message}>
       {row.participation === "unused"
         ? "Convocado, no utilizado: no entró en el partido."

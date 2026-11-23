@@ -59,7 +59,7 @@ export function PlayerProfileView({ playerId, returnHref, context = { seasonId: 
     {back}
     <Identity data={profile.data} />
     <div className={`${css.season} ${css.matches}`}>
-      <ObservedMatches load={matches} usualPosition={profile.data.player.position} initialMatchId={initialMatchId}
+      <ObservedMatches load={matches} playerId={playerId} usualPosition={profile.data.player.position} initialMatchId={initialMatchId}
         matchHref={matchHref} onSelect={rememberMatch} />
     </div>
   </div>;
