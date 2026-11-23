@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -53,6 +55,36 @@ class ProfileTests(unittest.TestCase):
     def test_busy(self):
         with self.assertRaises(Busy):
             with Profile(self.tmp.name): pass
+
+    def test_second_process_cannot_verify_profile_while_service_owns_it(self):
+        # Acquisition keeps this real Profile open for its process lifetime.
+        # Exercise the same flock path from another interpreter, as the deploy
+        # preflight used to do, rather than simulating Docker's response.
+        source_root = Path(__file__).resolve().parents[1] / 'src'
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(source_root) + os.pathsep + env.get('PYTHONPATH', '')
+        code = (
+            'import sys\n'
+            'from acquisition.profile import Profile, Busy\n'
+            'try:\n'
+            '    with Profile(sys.argv[1]):\n'
+            '        pass\n'
+            'except Busy:\n'
+            '    print("busy")\n'
+            '    raise SystemExit(73)\n'
+            'raise SystemExit(0)\n'
+        )
+        result = subprocess.run(
+            [sys.executable, '-B', '-c', code, str(self.owner.root)],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'busy')
+        self.assertEqual(self.owner.verify()['status'], 'ready')
 
     def test_alias_uses_same_lock(self):
         with self.assertRaises(Busy):

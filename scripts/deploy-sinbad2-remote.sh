@@ -29,6 +29,16 @@ deployment_finalized=0
 has_previous=0
 previous_config_target=
 previous_secret_target=
+previous_release=
+previous_commit=
+links_promoted=0
+containers_mutated=0
+maintenance_active=0
+network_detached=0
+acquisition_drain=0
+preserve_candidate_state=0
+recovery_complete=0
+deployment_ready=0
 config_temp="$config_base/versions/.$release_id.tmp"
 secret_temp="$secrets_base/versions/.$release_id.tmp"
 metadata_tmp="$state_dir/.last-good-$release_id"
@@ -58,6 +68,7 @@ restore_previous_links() {
   if safe_link "$secrets_base" "$previous_secret_target"; then
     set_current_link "$secrets_base" "$previous_secret_target"
   fi
+  links_promoted=0
 }
 
 cleanup() {
@@ -77,7 +88,32 @@ cleanup() {
   if [ ! -L "$root" ] && [ ! -L "$root/shared" ] && [ ! -L "$state_dir" ]; then
     rm -f "$metadata_tmp" || true
   fi
-  if [ "$deployment_finalized" -eq 0 ]; then
+  if [ "$deployment_ready" -eq 1 ] && [ -f "$last_good" ] \
+      && grep -Fqx "release_id=$release_id" "$last_good"; then
+    deployment_finalized=1
+  fi
+  if [ "$deployment_finalized" -eq 0 ] && [ "$recovery_complete" -eq 0 ]; then
+    if [ "$containers_mutated" -eq 1 ] && [ "$has_previous" -eq 1 ]; then
+      rollback_candidate || preserve_candidate_state=1
+    elif [ "$maintenance_active" -eq 1 ] && [ "$preserve_candidate_state" -eq 0 ]; then
+      if clear_maintenance; then
+        resume_previous_sports_data || {
+          preserve_candidate_state=1
+          printf 'SINBAD2 deploy: could not restore the Sports Data network; admission remains closed for inspection\n' >&2
+        }
+      else
+        preserve_candidate_state=1
+        printf 'SINBAD2 deploy: maintenance fence could not be cleared; admission remains closed for inspection\n' >&2
+      fi
+    elif [ "$network_detached" -eq 1 ] && [ "$preserve_candidate_state" -eq 0 ]; then
+      resume_previous_sports_data || {
+        preserve_candidate_state=1
+        printf 'SINBAD2 deploy: could not restore the Sports Data network; admission remains closed for inspection\n' >&2
+      }
+    fi
+  fi
+  if [ "$deployment_finalized" -eq 0 ] && [ "$links_promoted" -eq 1 ] \
+      && [ "$preserve_candidate_state" -eq 0 ]; then
     restore_previous_links || true
   fi
   exit "$status"
@@ -93,7 +129,6 @@ mkdir -p "$root/releases" "$root/shared" "$config_base/versions" "$secrets_base/
   "$imports" "$catalog" "$root/shared/incoming" "$state_dir"
 chmod 700 "$root" "$root/shared" "$config_base" "$secrets_base" \
   "$config_base/versions" "$secrets_base/versions" "$root/shared/incoming" "$state_dir"
-chmod 755 "$imports" "$catalog"
 
 [ -d "$release" ] && [ ! -L "$release" ] || fail 'code release directory is missing'
 [ -f "$release/compose.prod.yaml" ] || fail 'production Compose file is missing from the release'
@@ -162,6 +197,12 @@ config_current="$config_base/current"
 secret_current="$secrets_base/current"
 config_target=
 secret_target=
+config_changed=1
+access_changed=1
+update_changed=1
+session_changed=1
+control_changed=1
+acquisition_changed=1
 if [ -e "$config_current" ] || [ -L "$config_current" ]; then
   [ -L "$config_current" ] || fail 'current config path is not a managed symlink'
   safe_link "$config_base" "$(readlink "$config_current")" || fail 'current config link is invalid'
@@ -170,8 +211,15 @@ if [ -e "$secret_current" ] || [ -L "$secret_current" ]; then
   [ -L "$secret_current" ] || fail 'current secret path is not a managed symlink'
   safe_link "$secrets_base" "$(readlink "$secret_current")" || fail 'current secret link is invalid'
 fi
+if [ "$has_previous" -eq 1 ]; then
+  [ -L "$config_current" ] && [ "$(readlink "$config_current")" = "$previous_config_target" ] \
+    || fail 'current config does not match last-good; inspect service and metadata state before retrying'
+  [ -L "$secret_current" ] && [ "$(readlink "$secret_current")" = "$previous_secret_target" ] \
+    || fail 'current secrets do not match last-good; inspect service and metadata state before retrying'
+fi
 if [ -L "$config_current" ] && cmp -s "$config_current/.env.prod" "$bundle_env"; then
   config_target=$(readlink "$config_current")
+  config_changed=0
 else
   config_target="versions/$release_id"
   [ ! -e "$config_base/$config_target" ] || fail 'config version already exists'
@@ -185,11 +233,13 @@ fi
 same_secrets=0
 if [ -L "$secret_current" ]; then
   same_secrets=1
-  for name in access-password update-password control-token acquisition-token; do
-    cmp -s "$secret_current/$name" "$bundle_secrets/$name" || same_secrets=0
-  done
-  cmp -s "$secret_current/session/session-secret" "$bundle_secrets/session/session-secret" || same_secrets=0
+  cmp -s "$secret_current/access-password" "$bundle_secrets/access-password" && access_changed=0 || same_secrets=0
+  cmp -s "$secret_current/update-password" "$bundle_secrets/update-password" && update_changed=0 || same_secrets=0
+  cmp -s "$secret_current/session/session-secret" "$bundle_secrets/session/session-secret" && session_changed=0 || same_secrets=0
+  cmp -s "$secret_current/control-token" "$bundle_secrets/control-token" && control_changed=0 || same_secrets=0
+  cmp -s "$secret_current/acquisition-token" "$bundle_secrets/acquisition-token" && acquisition_changed=0 || same_secrets=0
 fi
+secrets_changed=$((access_changed + update_changed + session_changed + control_changed + acquisition_changed))
 if [ "$same_secrets" -eq 1 ]; then
   secret_target=$(readlink "$secret_current")
 else
@@ -213,10 +263,55 @@ fi
 
 export RJA_DEPLOY_ROOT="$root"
 export RJ_IMAGE_TAG="$commit_sha"
-set_current_link "$secrets_base" "$secret_target"
-set_current_link "$config_base" "$config_target"
-env_file="$config_current/.env.prod"
-secret_dir="$secret_current"
+env_file="$config_base/$config_target/.env.prod"
+secret_dir="$secrets_base/$secret_target"
+export RJ_PROD_SECRET_DIR="$secret_dir"
+
+service_list=
+force_recreate=0
+code_changed=1
+if [ "$has_previous" -eq 1 ] && [ "$previous_commit" = "$commit_sha" ]; then
+  code_changed=0
+fi
+append_service() {
+  case " $service_list " in
+    *" $1 "*) ;;
+    *) service_list="${service_list}${service_list:+ }$1" ;;
+  esac
+}
+if [ "$code_changed" -eq 1 ] || [ "$config_changed" -eq 1 ]; then
+  service_list='dashboard sports-data acquisition video-service'
+  force_recreate=1
+else
+  if [ "$access_changed" -eq 1 ] || [ "$update_changed" -eq 1 ] || [ "$session_changed" -eq 1 ]; then
+    append_service dashboard
+  fi
+  if [ "$control_changed" -eq 1 ]; then
+    append_service dashboard
+    append_service sports-data
+  fi
+  if [ "$acquisition_changed" -eq 1 ]; then
+    append_service sports-data
+    append_service acquisition
+  fi
+  if [ "$secrets_changed" -gt 0 ]; then
+    force_recreate=1
+  fi
+fi
+needs_update=1
+if [ "$code_changed" -eq 0 ] && [ "$config_changed" -eq 0 ] && [ "$secrets_changed" -eq 0 ]; then
+  needs_update=0
+fi
+if [ -z "$service_list" ]; then
+  service_list='dashboard sports-data acquisition video-service'
+fi
+case " $service_list " in *' acquisition '*) recreate_acquisition=1 ;; *) recreate_acquisition=0 ;; esac
+if [ "$force_recreate" -eq 0 ]; then
+  recreate_acquisition=0
+fi
+network_prefix=$(sed -n 's/^RJ_PROD_NETWORK_PREFIX=//p' "$env_file" | tail -n 1)
+case "$network_prefix" in *[!a-zA-Z0-9_.-]*|'') fail 'production network prefix is invalid' ;; esac
+control_network="$network_prefix-acquisition-control"
 
 compose_version=$(docker compose version --short 2>/dev/null) || fail 'Docker Compose is unavailable on the host'
 version=${compose_version#v}
@@ -279,18 +374,23 @@ else
 fi
 
 manifest="$catalog/videos.json"
-if [ ! -f "$manifest" ]; then
+if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+    || fail 'existing video catalog manifest is not a regular file; existing catalog data was left untouched'
+else
   first_entry=$(find "$catalog" -mindepth 1 -print -quit)
   [ -z "$first_entry" ] || fail 'video catalog has files but no videos.json; existing catalog data was left untouched'
   temporary="$catalog/.videos.json-$release_id"
+  [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || fail 'temporary video manifest path already exists'
   cp "$release/video-service/data/videos.example.json" "$temporary"
   chmod 444 "$temporary"
   mv "$temporary" "$manifest"
 fi
-chmod 444 "$manifest"
 
-dc "$release" build sports-data acquisition video-service dashboard \
-  || fail 'image build failed; running services were not changed'
+if [ "$code_changed" -eq 1 ]; then
+  dc "$release" build sports-data acquisition video-service dashboard \
+    || fail 'image build failed; running services were not changed'
+fi
 
 if [ "$mode" = bootstrap ]; then
   if ! (cd "$release" && ENV_FILE="$env_file" COMPOSE_FILE=compose.prod.yaml \
@@ -316,9 +416,22 @@ docker run --rm --network none --user 10001:10001 -v "$profile_volume:/profiles:
   --entrypoint python "$acquisition_image" -B -c \
   "from pathlib import Path; import sys; p=Path('/profiles/control'); sys.exit(0 if (p/'state.json').is_file() and (p/'owner.lock').is_file() else 1)" \
   >/dev/null 2>&1 || fail 'acquisition profile is not initialized; existing profile data was left untouched'
-docker run --rm --network none --user 10001:10001 -v "$profile_volume:/profiles" \
-  --entrypoint python "$acquisition_image" -B -m acquisition.admin verify-profile \
-  >/dev/null 2>&1 || fail 'acquisition profile verification failed; existing profile data was left untouched'
+acquisition_container=$(dc "$release" ps -q acquisition)
+if [ -n "$acquisition_container" ]; then
+  acquisition_state=$(docker inspect --format '{{.State.Status}}' "$acquisition_container") \
+    || fail 'could not inspect the running Acquisition service'
+  acquisition_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$acquisition_container") \
+    || fail 'could not inspect Acquisition health'
+  [ "$acquisition_state" = running ] && [ "$acquisition_health" = healthy ] \
+    || fail 'Acquisition is present but not healthy; profile verification cannot safely compete with its owner lock'
+  acquisition_was_running=1
+  printf 'Acquisition is healthy and owns its profile; using its startup integrity check while it runs.\n'
+else
+  acquisition_was_running=0
+  docker run --rm --network none --user 10001:10001 -v "$profile_volume:/profiles" \
+    --entrypoint python "$acquisition_image" -B -m acquisition.admin verify-profile \
+    >/dev/null 2>&1 || fail 'stopped Acquisition profile verification failed; existing profile data was left untouched'
+fi
 
 docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-jobs:ro" \
   --entrypoint python "$acquisition_image" -B -c \
@@ -376,8 +489,240 @@ check_health() {
   done
 }
 
-if dc "$release" up -d --wait --wait-timeout 300 dashboard sports-data acquisition video-service \
-    && check_health "$release" \
+up_services() {
+  compose_dir=$1
+  recreate=$2
+  shift 2
+  if [ "$recreate" -eq 1 ]; then
+    dc "$compose_dir" up -d --wait --wait-timeout 300 --force-recreate "$@"
+  else
+    dc "$compose_dir" up -d --wait --wait-timeout 300 "$@"
+  fi
+}
+
+check_service_health() {
+  compose_dir=$1
+  service=$2
+  container_id=$(dc "$compose_dir" ps -q "$service") || return 1
+  [ -n "$container_id" ] || return 1
+  state=$(docker inspect --format '{{.State.Status}}' "$container_id") || return 1
+  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_id") || return 1
+  [ "$state" = running ] && [ "$health" = healthy ]
+}
+
+create_maintenance() {
+  docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-jobs" \
+    --entrypoint python "$acquisition_image" -B -c \
+    "import os; p='/acquisition-jobs/deployment-maintenance'; fd=os.open(p, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600); os.write(fd, b'$release_id\\n'); os.fsync(fd); os.close(fd); d=os.open('/acquisition-jobs', os.O_RDONLY|os.O_DIRECTORY); os.fsync(d); os.close(d)" \
+    >/dev/null 2>&1
+}
+
+clear_maintenance() {
+  [ "$maintenance_active" -eq 1 ] || return 0
+  docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-jobs" \
+    --entrypoint python "$acquisition_image" -B -c \
+    "import os; from pathlib import Path; p=Path('/acquisition-jobs/deployment-maintenance'); present=p.exists() or p.is_symlink(); value=p.read_text(encoding='ascii').strip() if p.is_file() and not p.is_symlink() else ''; (present and value != '$release_id') and (_ for _ in ()).throw(RuntimeError('foreign maintenance marker')); present and p.unlink(); d=os.open('/acquisition-jobs', os.O_RDONLY|os.O_DIRECTORY) if present else None; os.fsync(d) if d is not None else None; os.close(d) if d is not None else None" \
+    >/dev/null 2>&1 || return 1
+  maintenance_active=0
+}
+
+active_jobs() {
+  docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-jobs:ro" \
+    --entrypoint python "$acquisition_image" -B -c \
+    "import sqlite3; c=sqlite3.connect('file:/acquisition-jobs/jobs.sqlite?mode=ro',uri=True,timeout=30); print(c.execute(\"SELECT COUNT(*) FROM job WHERE state IN ('queued','running','cancelling')\").fetchone()[0])" \
+    2>/dev/null
+}
+
+detach_sports_data() {
+  compose_dir=$1
+  sports_id=$(dc "$compose_dir" ps -q sports-data) || return 1
+  [ -n "$sports_id" ] || return 0
+  network_detached=1
+  if docker network disconnect "$control_network" "$sports_id" >/dev/null 2>&1; then
+    return 0
+  fi
+  attached=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$sports_id" 2>/dev/null) || return 1
+  case "$attached" in
+    *"$control_network"*) network_detached=0; return 1 ;;
+  esac
+  return 0
+}
+
+resume_previous_sports_data() {
+  [ "$network_detached" -eq 1 ] || return 0
+  [ "$has_previous" -eq 1 ] || return 1
+  sports_id=$(dc "$root/releases/$previous_release" ps -q sports-data) || return 1
+  [ -n "$sports_id" ] || return 1
+  docker network connect "$control_network" "$sports_id" >/dev/null 2>&1 || {
+    attached=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$sports_id" 2>/dev/null) || return 1
+    case "$attached" in *"$control_network"*) ;; *) return 1 ;; esac
+  }
+  network_detached=0
+}
+
+wait_for_idle_jobs() {
+  elapsed=0
+  idle=0
+  while [ "$elapsed" -lt 1500 ]; do
+    count=$(active_jobs) || return 1
+    case "$count" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$count" -eq 0 ]; then
+      idle=$((idle + 1))
+      [ "$idle" -ge 5 ] && return 0
+    else
+      idle=0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+rollback_candidate() {
+  [ "$has_previous" -eq 1 ] || return 1
+  previous_dir="$root/releases/$previous_release"
+  [ -d "$previous_dir" ] || return 1
+  env_file="$config_base/$previous_config_target/.env.prod"
+  secret_dir="$secrets_base/$previous_secret_target"
+  export RJ_PROD_SECRET_DIR="$secret_dir" RJ_IMAGE_TAG="$previous_commit"
+  acquisition_image="local/real-jaen-analytics/acquisition:$previous_commit"
+
+  if [ "$containers_mutated" -eq 0 ]; then
+    restore_previous_links || return 1
+    recovery_complete=1
+    return 0
+  fi
+
+  if [ "$acquisition_drain" -eq 1 ]; then
+    detach_sports_data "$release" || {
+      preserve_candidate_state=1
+      recovery_complete=1
+      return 1
+    }
+    pre_services=
+    for service in $service_list; do
+      case "$service" in sports-data|dashboard) ;; *) pre_services="${pre_services}${pre_services:+ }$service" ;; esac
+    done
+    if [ -n "$pre_services" ]; then
+      # Intentional word splitting: service names are the fixed list above.
+      up_services "$previous_dir" 1 $pre_services || {
+        set_current_link "$config_base" "$config_target"
+        set_current_link "$secrets_base" "$secret_target"
+        preserve_candidate_state=1
+        recovery_complete=1
+        return 1
+      }
+    fi
+    check_service_health "$previous_dir" acquisition || {
+      set_current_link "$config_base" "$config_target"
+      set_current_link "$secrets_base" "$secret_target"
+      preserve_candidate_state=1
+      recovery_complete=1
+      return 1
+    }
+    clear_maintenance || {
+      set_current_link "$config_base" "$config_target"
+      set_current_link "$secrets_base" "$secret_target"
+      preserve_candidate_state=1
+      recovery_complete=1
+      return 1
+    }
+    post_services=
+    for service in $service_list; do
+      case "$service" in sports-data|dashboard) post_services="${post_services}${post_services:+ }$service" ;; esac
+    done
+    if [ -n "$post_services" ]; then
+      up_services "$previous_dir" 1 $post_services || {
+        set_current_link "$config_base" "$config_target"
+        set_current_link "$secrets_base" "$secret_target"
+        preserve_candidate_state=1
+        recovery_complete=1
+        return 1
+      }
+    fi
+    network_detached=0
+  else
+    up_services "$previous_dir" "$force_recreate" $service_list || {
+      set_current_link "$config_base" "$config_target"
+      set_current_link "$secrets_base" "$secret_target"
+      preserve_candidate_state=1
+      recovery_complete=1
+      return 1
+    }
+  fi
+
+  check_health "$previous_dir" || {
+    set_current_link "$config_base" "$config_target"
+    set_current_link "$secrets_base" "$secret_target"
+    preserve_candidate_state=1
+    recovery_complete=1
+    return 1
+  }
+  restore_previous_links || return 1
+  docker image tag "local/real-jaen-analytics/sports-data:$previous_commit" local/real-jaen-analytics/sports-data:prod >/dev/null 2>&1 || true
+  docker image tag "local/real-jaen-analytics/acquisition:$previous_commit" local/real-jaen-analytics/acquisition:prod >/dev/null 2>&1 || true
+  docker image tag "local/real-jaen-analytics/video-service:$previous_commit" local/real-jaen-analytics/video-service:prod >/dev/null 2>&1 || true
+  docker image tag "local/real-jaen-analytics/dashboard:$previous_commit" local/real-jaen-analytics/dashboard:prod >/dev/null 2>&1 || true
+  maintenance_active=0
+  network_detached=0
+  containers_mutated=0
+  recovery_complete=1
+  return 0
+}
+
+if [ "$recreate_acquisition" -eq 1 ] && [ "$acquisition_was_running" -eq 1 ]; then
+  [ "$has_previous" -eq 1 ] || fail 'Acquisition is running without a last-good recovery target; no service or network was changed'
+  acquisition_drain=1
+  detach_sports_data "$release" || fail 'could not close the Sports Data admission path; active containers were left running'
+  maintenance_active=1
+  create_maintenance || fail 'could not establish the Acquisition deployment maintenance fence'
+  wait_for_idle_jobs || fail 'Acquisition did not become idle; the deployment was cancelled without restarting Acquisition'
+elif [ "$recreate_acquisition" -eq 1 ]; then
+  active_count=$(active_jobs) || fail 'could not inspect active Acquisition jobs'
+  case "$active_count" in ''|*[!0-9]*) fail 'active Acquisition job count was invalid' ;; esac
+  [ "$active_count" -eq 0 ] || fail 'Acquisition is stopped while jobs remain marked active; inspect before deployment'
+fi
+
+# All non-mutating preflights have completed. Promote changed pointers only
+# now; Compose receives these immutable version directories directly.
+if [ ! -L "$secret_current" ] || [ "$(readlink "$secret_current")" != "$secret_target" ]; then
+  set_current_link "$secrets_base" "$secret_target"
+  links_promoted=1
+fi
+if [ ! -L "$config_current" ] || [ "$(readlink "$config_current")" != "$config_target" ]; then
+  set_current_link "$config_base" "$config_target"
+  links_promoted=1
+fi
+
+candidate_ok=0
+if [ "$needs_update" -eq 0 ]; then
+  if check_health "$release"; then candidate_ok=1; fi
+elif [ "$acquisition_drain" -eq 1 ]; then
+  pre_services=
+  post_services=
+  for service in $service_list; do
+    case "$service" in
+      sports-data|dashboard) post_services="${post_services}${post_services:+ }$service" ;;
+      *) pre_services="${pre_services}${pre_services:+ }$service" ;;
+    esac
+  done
+  containers_mutated=1
+  if { [ -z "$pre_services" ] || up_services "$release" "$force_recreate" $pre_services; } \
+      && check_service_health "$release" acquisition \
+      && clear_maintenance \
+      && { [ -z "$post_services" ] || up_services "$release" "$force_recreate" $post_services; } \
+      && check_health "$release"; then
+    network_detached=0
+    candidate_ok=1
+  fi
+else
+  containers_mutated=1
+  if up_services "$release" "$force_recreate" $service_list && check_health "$release"; then
+    candidate_ok=1
+  fi
+fi
+
+if [ "$candidate_ok" -eq 1 ] \
     && docker image tag "$sports_image" local/real-jaen-analytics/sports-data:prod \
     && docker image tag "$acquisition_image" local/real-jaen-analytics/acquisition:prod \
     && docker image tag "$video_image" local/real-jaen-analytics/video-service:prod \
@@ -391,24 +736,31 @@ if dc "$release" up -d --wait --wait-timeout 300 dashboard sports-data acquisiti
     printf 'secret_target=%s\n' "$secret_target"
   } > "$metadata_tmp"
   chmod 600 "$metadata_tmp"
-  mv -f "$metadata_tmp" "$last_good"
-  deployment_finalized=1
-  printf 'Deployment %s is healthy; persistent data volumes were preserved.\n' "$commit_sha"
-  exit 0
+  deployment_ready=1
+  if mv -f "$metadata_tmp" "$last_good"; then
+    deployment_finalized=1
+    maintenance_active=0
+    network_detached=0
+    printf 'Deployment %s is healthy; persistent data volumes were preserved.\n' "$commit_sha"
+    exit 0
+  fi
+  if rollback_candidate; then
+    fail 'last-good metadata could not be committed; the previous code/config and services were restored'
+  fi
+  if [ "$has_previous" -eq 1 ]; then
+    fail 'last-good metadata could not be committed and prior-code recovery failed; candidate paths remain current for inspection'
+  fi
+  fail 'last-good metadata could not be committed and no prior release exists; the healthy candidate remains current for inspection'
+fi
+
+if [ "$containers_mutated" -eq 0 ]; then
+  fail 'deployment health check failed; active services and current configuration were not changed'
 fi
 
 if [ "$has_previous" -eq 1 ]; then
-  restore_previous_links || fail 'deployment failed and previous configuration could not be restored'
-  export RJ_IMAGE_TAG="$previous_commit"
-  previous_dir="$root/releases/$previous_release"
-  if [ -d "$previous_dir" ] && dc "$previous_dir" up -d --wait --wait-timeout 300 dashboard sports-data acquisition video-service \
-      && check_health "$previous_dir"; then
-    docker image tag "local/real-jaen-analytics/sports-data:$previous_commit" local/real-jaen-analytics/sports-data:prod >/dev/null 2>&1 || true
-    docker image tag "local/real-jaen-analytics/acquisition:$previous_commit" local/real-jaen-analytics/acquisition:prod >/dev/null 2>&1 || true
-    docker image tag "local/real-jaen-analytics/video-service:$previous_commit" local/real-jaen-analytics/video-service:prod >/dev/null 2>&1 || true
-    docker image tag "local/real-jaen-analytics/dashboard:$previous_commit" local/real-jaen-analytics/dashboard:prod >/dev/null 2>&1 || true
+  if rollback_candidate; then
     fail 'deployment failed; previous code/config was restarted and no volume was deleted or automatically restored. Data compatibility depends on schema changes'
   fi
-  fail 'deployment and prior-code recovery both failed; inspect service state before retrying. Database volumes were not removed'
+  fail 'deployment and prior-code recovery both failed; candidate paths remain current for inspection. Database volumes were not removed'
 fi
 fail 'deployment failed and no previous healthy release is recorded; inspect services before retrying. No volume was removed'

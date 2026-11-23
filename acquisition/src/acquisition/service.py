@@ -72,6 +72,7 @@ class Jobs:
             raise ValueError('A real job process requires the profile owner')
         self.root = Path(root)
         self.root.mkdir(exist_ok=True)
+        self.maintenance_path = self.root / 'deployment-maintenance'
         self.lockfile = (self.root / 'owner.lock').open('a+b')
         fcntl.flock(self.lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.provider, self.owner, self.runner, self.extra = provider, owner, runner, dict(extra or {})
@@ -120,6 +121,11 @@ class Jobs:
                         or item.get('operation_id', item['request_id']) != operation_id):
                     raise Conflict()
                 return item, False
+            # Deployment creates this durable fence after closing the only job
+            # producer's network path. Keep it in the jobs volume so a
+            # restarted service cannot accept work until deployment ends.
+            if self.maintenance_path.exists() or self.maintenance_path.is_symlink():
+                raise Conflict()
             if recipe == 'sofascore-group2-2627-v1':
                 # Establish the durable manual-operation ledger before any worker can send. If this operation has
                 # prior batches, a missing ledger is ambiguous and must fail closed instead of starting at zero.

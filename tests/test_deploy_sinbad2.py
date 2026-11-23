@@ -50,6 +50,16 @@ fi
 exec /bin/sh -c "$1"
 """
 
+FAKE_MV = r"""#!/bin/sh
+set -eu
+target=
+for argument do target=$argument; done
+case "${RJA_TEST_FAIL_LAST_GOOD:-0}:$target" in
+  1:*/shared/deploy-state/last-good) exit 1 ;;
+esac
+exec "$RJA_REAL_MV" "$@"
+"""
+
 FAKE_DOCKER = r"""#!/usr/bin/env python3
 import json
 import os
@@ -64,7 +74,8 @@ state_path = Path(os.environ["RJA_TEST_DOCKER_STATE"])
 if state_path.exists():
     state = json.loads(state_path.read_text(encoding="utf-8"))
 else:
-    state = {"volumes": os.environ.get("RJA_TEST_VOLUMES", "").split(), "up_count": 0}
+    state = {"volumes": os.environ.get("RJA_TEST_VOLUMES", "").split(), "up_count": 0,
+             "deployed": False, "network_detached": False}
 
 def save():
     state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -87,11 +98,17 @@ elif args and args[0] == "compose":
         raise SystemExit(1 if os.environ.get("RJA_TEST_FAIL_BUILD") == "1" else 0)
     elif command == "up":
         state["up_count"] += 1
-        save()
         fail_at = int(os.environ.get("RJA_TEST_FAIL_UP_AT", "0"))
-        raise SystemExit(1 if state["up_count"] == fail_at else 0)
+        if state["up_count"] == fail_at:
+            save()
+            raise SystemExit(1)
+        state["deployed"] = True
+        if "sports-data" in args:
+            state["network_detached"] = False
+        save()
     elif command == "ps":
-        print("container-" + args[-1])
+        if state["deployed"]:
+            print("container-" + args[-1])
     elif command == "run":
         raise SystemExit(1 if os.environ.get("RJA_TEST_FAIL_RESTORE") == "1" else 0)
     elif command == "config":
@@ -101,9 +118,25 @@ elif args and args[0] == "compose":
         raise SystemExit(93)
 elif args[:2] == ["inspect", "--format"]:
     template = args[2]
-    print("healthy" if ".State.Health.Status" in template else "running")
+    if ".NetworkSettings.Networks" in template:
+        if state["network_detached"]:
+            print("{}")
+        else:
+            print('{"rja-sinbad2-prod-acquisition-control":{}}')
+    else:
+        print("healthy" if ".State.Health.Status" in template else "running")
+elif args[:2] == ["network", "disconnect"]:
+    state["network_detached"] = True
+    save()
+elif args[:2] == ["network", "connect"]:
+    state["network_detached"] = False
+    save()
 elif args and args[0] in ("info", "run", "image"):
-    pass
+    if args[0] == "run":
+        if os.environ.get("RJA_TEST_FAIL_CATALOG") == "1" and any("VideoCatalog.load" in x for x in args):
+            raise SystemExit(1)
+        if any("SELECT COUNT(*) FROM job" in x for x in args):
+            print(os.environ.get("RJA_TEST_ACTIVE_JOBS", "0"))
 else:
     print("unexpected fake docker invocation", file=sys.stderr)
     raise SystemExit(93)
@@ -126,6 +159,7 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.write_file(self.bin_dir / "git", FAKE_GIT, 0o755)
         self.write_file(self.bin_dir / "ssh", FAKE_SSH, 0o755)
         self.write_file(self.bin_dir / "docker", FAKE_DOCKER, 0o755)
+        self.write_file(self.bin_dir / "mv", FAKE_MV, 0o755)
         self.make_file_variables()
         self.key = self.files / "deploy_key"
         subprocess.run(
@@ -156,6 +190,7 @@ class DeploySinbad2Tests(unittest.TestCase):
                 "TMPDIR": str(self.base),
                 "RJA_TEST_SOURCE": str(REPOSITORY),
                 "RJA_REAL_GIT": shutil.which("git") or "/usr/bin/git",
+                "RJA_REAL_MV": shutil.which("mv") or "/bin/mv",
                 "RJA_TEST_REMOTE_HOME": str(self.remote_home),
                 "RJA_TEST_DOCKER_LOG": str(self.logs),
                 "RJA_TEST_DOCKER_STATE": str(self.state),
@@ -380,6 +415,7 @@ class DeploySinbad2Tests(unittest.TestCase):
         marker = self.last_good()
         before = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
         env = self.environment(pipeline_id=102, job_id=502)
+        env["CI_COMMIT_SHA"] = "b" * 40
         env["RJA_TEST_FAIL_BUILD"] = "1"
         second = self.invoke(env=env)
         self.assertNotEqual(second.returncode, 0)
@@ -390,11 +426,142 @@ class DeploySinbad2Tests(unittest.TestCase):
         for secret in SECRETS.values():
             self.assertNotIn(secret, second.stdout + second.stderr)
 
+    def test_same_sha_secret_rotation_force_recreates_consumer(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        old_target = (root / "shared/secrets/current").resolve()
+        new_password = secrets.token_urlsafe(20)
+        self.write_file(self.files / "APP_ACCESS_PASSWORD", new_password + "\n")
+
+        rotated = self.invoke(pipeline_id=102, job_id=502)
+        self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
+        new_target = (root / "shared/secrets/current").resolve()
+        self.assertNotEqual(new_target, old_target)
+        self.assertEqual((new_target / "access-password").read_text(encoding="utf-8").strip(), new_password)
+        calls = [call for call in self.docker_calls() if self.compose_call(call, "up")]
+        update = calls[-1]
+        self.assertIn("--force-recreate", update)
+        self.assertIn("dashboard", update)
+        self.assertNotIn("sports-data", update)
+        self.assertNotIn("acquisition", update)
+
+    def test_same_sha_without_changes_does_not_recreate_running_services(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        calls_before = len(self.docker_calls())
+
+        repeated = self.invoke(pipeline_id=102, job_id=502)
+        self.assertEqual(repeated.returncode, 0, repeated.stderr + repeated.stdout)
+        calls = self.docker_calls()[calls_before:]
+        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
+        self.assertIn("pipeline_id=102\n", self.last_good())
+
+    def test_same_sha_env_rotation_force_recreates_services(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        env_file = self.files / "ENV_PROD"
+        env_file.write_text(env_file.read_text(encoding="utf-8") + "RJ_TRUSTED_CLIENT_IP_HEADER=X-Forwarded-For\n",
+                            encoding="utf-8")
+
+        rotated = self.invoke(pipeline_id=102, job_id=502)
+        self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
+        calls = [call for call in self.docker_calls() if self.compose_call(call, "up")]
+        updates = calls[1:]
+        self.assertTrue(all("--force-recreate" in update for update in updates))
+        updated_services = {service for update in updates for service in update if service in {
+            "dashboard", "sports-data", "acquisition", "video-service"
+        }}
+        for service in ("dashboard", "sports-data", "acquisition", "video-service"):
+            self.assertIn(service, updated_services)
+
+    def test_acquisition_secret_rotation_drains_without_profile_lock_collision(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        calls_before = len(self.docker_calls())
+        new_token = secrets.token_urlsafe(40)
+        self.write_file(self.files / "APP_ACQUISITION_TOKEN", new_token + "\n")
+
+        rotated = self.invoke(pipeline_id=102, job_id=502)
+        self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
+        calls = self.docker_calls()
+        ups = [call for call in calls if self.compose_call(call, "up")]
+        self.assertGreaterEqual(len(ups), 3)  # Acquisition, Sports Data, then health/metadata completion.
+        self.assertTrue(any(call[:2] == ["network", "disconnect"] for call in calls))
+        self.assertTrue(any(call[:2] == ["network", "connect"] for call in calls) is False)
+        self.assertTrue(any("deployment-maintenance" in argument for call in calls for argument in call))
+        second_calls = calls[calls_before:]
+        self.assertFalse(any("verify-profile" in argument for call in second_calls for argument in call))
+        self.assertEqual((self.remote_home / "deploy_real-jaen-analytics/shared/secrets/current/acquisition-token")
+                         .read_text(encoding="utf-8").strip(), new_token)
+
+    def test_readonly_existing_video_catalog_permissions_are_preserved(self) -> None:
+        catalog = self.remote_home / "deploy_real-jaen-analytics/shared/video-catalog"
+        catalog.mkdir(parents=True)
+        manifest = catalog / "videos.json"
+        manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
+        manifest.chmod(0o440)
+        catalog.chmod(0o555)
+        before_manifest = manifest.stat()
+        before_catalog = catalog.stat()
+
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        after_manifest = manifest.stat()
+        after_catalog = catalog.stat()
+        self.assertEqual(after_manifest.st_mode & 0o777, before_manifest.st_mode & 0o777)
+        self.assertEqual((after_manifest.st_uid, after_manifest.st_gid), (before_manifest.st_uid, before_manifest.st_gid))
+        self.assertEqual(after_catalog.st_mode & 0o777, before_catalog.st_mode & 0o777)
+        self.assertEqual((after_catalog.st_uid, after_catalog.st_gid), (before_catalog.st_uid, before_catalog.st_gid))
+        catalog.chmod(0o755)
+
+    def test_preflight_failure_leaves_running_stack_and_current_links_untouched(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        old_config = (root / "shared/config/current").resolve()
+        old_secret = (root / "shared/secrets/current").resolve()
+        state_before = json.loads(self.state.read_text(encoding="utf-8"))
+        env_file = self.files / "ENV_PROD"
+        env_file.write_text(env_file.read_text(encoding="utf-8") + "# rotated config\n", encoding="utf-8")
+        env = self.environment(pipeline_id=102, job_id=502)
+        env["RJA_TEST_FAIL_CATALOG"] = "1"
+
+        failed = self.invoke(env=env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("video catalog validation failed", failed.stderr)
+        self.assertEqual((root / "shared/config/current").resolve(), old_config)
+        self.assertEqual((root / "shared/secrets/current").resolve(), old_secret)
+        state_after = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(state_after["up_count"], state_before["up_count"])
+        self.assertEqual(state_after["deployed"], state_before["deployed"])
+        self.assertFalse(any(call[:2] == ["network", "disconnect"] for call in self.docker_calls()))
+
+    def test_last_good_rename_failure_rolls_back_services_and_links(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        old_good = self.last_good()
+        old_secret = (root / "shared/secrets/current").resolve()
+        self.write_file(self.files / "APP_ACCESS_PASSWORD", secrets.token_urlsafe(20) + "\n")
+        env = self.environment(pipeline_id=102, job_id=502)
+        env["RJA_TEST_FAIL_LAST_GOOD"] = "1"
+
+        failed = self.invoke(env=env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("previous code/config and services were restored", failed.stderr)
+        self.assertEqual(self.last_good(), old_good)
+        self.assertEqual((root / "shared/secrets/current").resolve(), old_secret)
+        self.assertEqual(len([call for call in self.docker_calls() if self.compose_call(call, "up")]), 3)
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["deployed"], True)
+
     def test_up_failure_restarts_previous_release_without_volume_removal(self) -> None:
         first = self.invoke()
         self.assertEqual(first.returncode, 0, first.stderr)
         marker = self.last_good()
         env = self.environment(pipeline_id=102, job_id=502)
+        env["CI_COMMIT_SHA"] = "b" * 40
         env["RJA_TEST_FAIL_UP_AT"] = "2"
         second = self.invoke(env=env)
         self.assertNotEqual(second.returncode, 0)
@@ -402,7 +569,7 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.assertIn("Data compatibility depends on schema changes", second.stderr)
         self.assertEqual(self.last_good(), marker)
         calls = self.docker_calls()
-        self.assertEqual(len([call for call in calls if self.compose_call(call, "up")]), 3)
+        self.assertEqual(len([call for call in calls if self.compose_call(call, "up")]), 4)
         self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
         self.assertFalse(any(call[:2] == ["volume", "rm"] for call in calls))
         self.assertFalse(any("down" in call for call in calls))
