@@ -2,6 +2,7 @@
 
 import { useState, type CSSProperties } from "react";
 import type { TeamRef } from "@/contract";
+import { appPath } from "@/contract/base-path";
 import css from "./TeamCrest.module.css";
 
 /** Short code drawn on the fallback: initials of several words, or 3 letters of one. */
@@ -34,7 +35,7 @@ export function TeamCrest({
       <span className={css.crest} data-crest="image" style={style}>
         {/* Crests are small local assets; next/image adds nothing here. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img alt={label ?? ""} onError={() => setFailed(src)} src={src} />
+        <img alt={label ?? ""} onError={() => setFailed(src)} src={appPath(src)} />
       </span>
     );
   }

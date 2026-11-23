@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { appCookiePath } from "@/contract/base-path";
 
 /**
  * Shared read access (`RJ_ACCESS_PASSWORD_FILE`) and optional update access (`RJ_UPDATE_PASSWORD_FILE`) are
@@ -95,11 +96,11 @@ export function sessionCookie(request: Request, canUpdate: boolean): string {
   if (!key) throw new Error("Access not configured");
   const payload = `${VERSION}.${Math.floor(Date.now() / 1000) + SESSION_SECONDS}.${randomBytes(16).toString("base64url")}.${capability}`;
   const signature = createHmac("sha256", key).update(payload).digest("base64url");
-  return `${SESSION_COOKIE}=${payload}.${signature}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_SECONDS}${secure(request) ? "; Secure" : ""}`;
+  return `${SESSION_COOKIE}=${payload}.${signature}; HttpOnly; SameSite=Strict; Path=${appCookiePath()}; Max-Age=${SESSION_SECONDS}${secure(request) ? "; Secure" : ""}`;
 }
 
 export function clearedCookie(request: Request): string {
-  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure(request) ? "; Secure" : ""}`;
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=${appCookiePath()}; Max-Age=0${secure(request) ? "; Secure" : ""}`;
 }
 
 /** The signed capability, or null when the cookie is absent, invalid, expired or revoked. */

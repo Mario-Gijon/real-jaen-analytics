@@ -47,7 +47,7 @@ El catálogo operativo de vídeos se monta en solo lectura. El estado del servic
 - Sports Data → Acquisition: solicitud de captura, consulta de estado y descarga de paquetes por HTTP autenticado en una red interna.
 - Dashboard → Video Service: referencias, contratos de eventos y peticiones de sincronización por HTTP interno.
 - Acquisition y Video Service tienen salida de red para las operaciones que les corresponden. Sports Data no contiene navegador ni código de adquisición.
-- Solo el Dashboard publica un puerto en el host: `127.0.0.1:33201` por defecto en desarrollo y `0.0.0.0:8120` en el ejemplo de producción. Los otros tres servicios no publican puertos externos.
+- Solo el Dashboard publica un puerto en el host: `127.0.0.1:33201` por defecto en desarrollo y `127.0.0.1:8090` en producción. Apache proporciona TLS y publica el Dashboard bajo `/real-jaen`; los otros tres servicios no publican puertos externos.
 
 El contrato entre Sports Data y Acquisition está descrito en [contrato-adquisicion-interno.md](../sports-data/docs/contrato-adquisicion-interno.md). Las notas de cada componente están en los [README del Dashboard](../dashboard/README.md), [Sports Data](../sports-data/README.md) y [Video Service](../video-service/README.md).
 

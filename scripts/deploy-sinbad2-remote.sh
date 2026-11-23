@@ -51,6 +51,60 @@ safe_link() {
   [ -d "$base/$target" ] && [ ! -L "$base/$target" ]
 }
 
+prune_old_releases() {
+  releases_dir="$root/releases"
+  if [ ! -d "$root" ] || [ -L "$root" ] || [ ! -d "$releases_dir" ] || [ -L "$releases_dir" ] \
+      || [ "$releases_dir" != "$root/releases" ]; then
+    printf 'SINBAD2 deploy: warning: release cleanup skipped because the releases path is unsafe\n' >&2
+    return 0
+  fi
+  if ! command -v sort >/dev/null 2>&1; then
+    printf 'SINBAD2 deploy: warning: release cleanup skipped because sort is unavailable\n' >&2
+    return 0
+  fi
+
+  ordered=$(for candidate_path in "$releases_dir"/*; do
+    [ -d "$candidate_path" ] && [ ! -L "$candidate_path" ] || continue
+    candidate=${candidate_path##*/}
+    case "$candidate" in *[!a-fA-F0-9_-]*|'') continue ;; esac
+    candidate_sha=${candidate%%-*}
+    case "$candidate_sha" in *[!a-fA-F0-9]*|'') continue ;; esac
+    case "${#candidate_sha}" in 40|64) ;; *) continue ;; esac
+    candidate_rest=${candidate#*-}
+    case "$candidate_rest" in *-*) ;; *) continue ;; esac
+    candidate_pipeline=${candidate_rest%%-*}
+    candidate_job=${candidate_rest#*-}
+    case "$candidate_pipeline:$candidate_job" in *[!0-9:]*|:*|*:) continue ;; esac
+    [ -f "$candidate_path/compose.prod.yaml" ] || continue
+    printf '%s %s %s\n' "$candidate_pipeline" "$candidate_job" "$candidate"
+  done | sort -k 1,1nr -k 2,2nr) || {
+    printf 'SINBAD2 deploy: warning: release cleanup could not list old releases\n' >&2
+    return 0
+  }
+
+  [ -n "$ordered" ] || return 0
+  printf '%s\n' "$ordered" | while read -r candidate_pipeline candidate_job candidate; do
+    case "$candidate_pipeline:$candidate_job" in *[!0-9:]*|:*|*:) continue ;; esac
+    case "$candidate" in *[!a-fA-F0-9_-]*|'') continue ;; esac
+    release_number=${release_number:-0}
+    release_number=$((release_number + 1))
+    [ "$release_number" -le 5 ] && continue
+    [ "$candidate" = "$release_id" ] && continue
+    [ -n "$previous_release" ] && [ "$candidate" = "$previous_release" ] && continue
+    candidate_path="$releases_dir/$candidate"
+    case "$candidate_path" in "$releases_dir"/*) ;; *)
+      printf 'SINBAD2 deploy: warning: release cleanup skipped an invalid candidate path\n' >&2
+      continue
+    esac
+    [ -d "$candidate_path" ] && [ ! -L "$candidate_path" ] || continue
+    [ -f "$candidate_path/compose.prod.yaml" ] || continue
+    if ! rm -rf -- "$candidate_path"; then
+      printf 'SINBAD2 deploy: warning: could not remove old code release %s\n' "$candidate" >&2
+    fi
+  done
+  return 0
+}
+
 set_current_link() {
   base=$1
   target=$2
@@ -197,8 +251,8 @@ require_line 'RJ_PROD_SPORTS_STATE_VOLUME=rja-sinbad2-sports-state'
 require_line 'RJ_PROD_ACQUISITION_PROFILES_VOLUME=rja-sinbad2-acquisition-profiles'
 require_line 'RJ_PROD_ACQUISITION_JOBS_VOLUME=rja-sinbad2-acquisition-jobs'
 require_line 'RJ_PROD_VIDEO_STATE_VOLUME=rja-sinbad2-video-state'
-require_line 'RJ_DASHBOARD_BIND=0.0.0.0'
-require_line 'RJ_DASHBOARD_PORT=8120'
+require_line 'RJ_DASHBOARD_BIND=127.0.0.1'
+require_line 'RJ_DASHBOARD_PORT=8090'
 require_line 'RJ_PROD_SECRET_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/secrets/current'
 require_line 'RJ_IMPORT_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/imports'
 require_line 'RJ_VIDEO_CATALOG_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/video-catalog'
@@ -779,6 +833,7 @@ if [ "$candidate_ok" -eq 1 ] \
     deployment_finalized=1
     maintenance_active=0
     network_detached=0
+    prune_old_releases
     printf 'Deployment %s is healthy; persistent data volumes were preserved.\n' "$commit_sha"
     exit 0
   fi

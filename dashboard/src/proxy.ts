@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { returnPath } from "@/contract/return-path";
+import { appPath, routePath } from "@/contract/base-path";
 import { accessConfigured, accessRequired, sameOrigin, sessionCapability } from "@/server/auth/session";
 
 /**
@@ -16,7 +17,8 @@ const problem = (status: number, code: string, message: string) =>
   NextResponse.json({ error: { code, message } }, { status, headers: { "Cache-Control": "no-store" } });
 
 export function proxy(request: NextRequest) {
-  const { pathname, search } = request.nextUrl;
+  const { search } = request.nextUrl;
+  const pathname = routePath(request.nextUrl.pathname);
   const api = pathname.startsWith("/api/");
   const updateApi = UPDATE_API.test(pathname);
 
@@ -37,19 +39,19 @@ export function proxy(request: NextRequest) {
   if (!accessConfigured()) {
     return api
       ? problem(503, "UPSTREAM_UNAVAILABLE", "El acceso no está configurado en esta instalación.")
-      : pathname === ACCESS_PAGE ? NextResponse.next() : NextResponse.redirect(new URL(ACCESS_PAGE, request.url));
+      : pathname === ACCESS_PAGE ? NextResponse.next() : NextResponse.redirect(new URL(appPath(ACCESS_PAGE), request.url));
   }
   const capability = sessionCapability(request);
   const signedIn = capability !== null;
   if (pathname === ACCESS_PAGE) {
-    return signedIn ? NextResponse.redirect(new URL(returnPath(request.nextUrl.searchParams.get("next")), request.url)) : NextResponse.next();
+    return signedIn ? NextResponse.redirect(new URL(appPath(returnPath(request.nextUrl.searchParams.get("next"))), request.url)) : NextResponse.next();
   }
   if ((pathname === "/operador" || pathname.startsWith("/operador/")) && capability === false) {
-    return NextResponse.redirect(new URL("/", request.url));
+    return NextResponse.redirect(new URL(appPath("/"), request.url));
   }
   if (signedIn) return NextResponse.next();
   if (api) return problem(401, "UNAUTHORIZED", "Inicia sesión.");
-  const target = new URL(ACCESS_PAGE, request.url);
+  const target = new URL(appPath(ACCESS_PAGE), request.url);
   if (pathname !== "/") target.searchParams.set("next", `${pathname}${search}`);
   return NextResponse.redirect(target);
 }

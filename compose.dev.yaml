@@ -243,6 +243,7 @@ services:
     environment:
       NODE_ENV: development
       NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_BASE_PATH: ""
       DATA_MODE: real
       LOCAL_DATA_API_URL: http://sports-data:8002
       VIDEO_SERVICE_URL: http://video-service:8010

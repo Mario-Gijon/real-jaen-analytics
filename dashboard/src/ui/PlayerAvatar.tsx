@@ -2,6 +2,7 @@
 
 import { useState, type CSSProperties } from "react";
 import css from "./PlayerAvatar.module.css";
+import { appPath } from "@/contract/base-path";
 
 const initials = (name: string) =>
   name
@@ -37,7 +38,7 @@ export function PlayerAvatar({
     >
       {image ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img alt="" onError={() => setFailed(image)} src={image} />
+        <img alt="" onError={() => setFailed(image)} src={appPath(image)} />
       ) : (
         initials(name)
       )}

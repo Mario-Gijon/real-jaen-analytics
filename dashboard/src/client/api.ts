@@ -27,6 +27,7 @@ import type {
   VideoEventLocation,
   VideoJob,
 } from "@/contract";
+import { appPath, routePath } from "@/contract/base-path";
 
 /** A failed `/api/v1` request, with the contract's error code when present. */
 export class ApiRequestError extends Error {
@@ -47,14 +48,14 @@ export type RequestOptions = { signal?: AbortSignal };
  * The access page itself never redirects to itself.
  */
 function signInAgain(response: Response) {
-  if (response.status !== 401 || typeof window === "undefined" || window.location.pathname === "/acceso") return;
-  const here = `${window.location.pathname}${window.location.search}`;
-  window.location.assign(here === "/" ? "/acceso" : `/acceso?next=${encodeURIComponent(here)}`);
+  if (response.status !== 401 || typeof window === "undefined" || routePath(window.location.pathname) === "/acceso") return;
+  const here = `${routePath(window.location.pathname)}${window.location.search}`;
+  window.location.assign(appPath(here === "/" ? "/acceso" : `/acceso?next=${encodeURIComponent(here)}`));
 }
 
 /** The only way screens read data: a typed GET against `/api/v1`. */
 async function get<T>(path: string, options?: RequestOptions): Promise<T> {
-  const response = await fetch(`/api/v1${path}`, {
+  const response = await fetch(appPath(`/api/v1${path}`), {
     signal: options?.signal,
     headers: { Accept: "application/json" },
   });
@@ -75,7 +76,7 @@ async function get<T>(path: string, options?: RequestOptions): Promise<T> {
  * the server; the browser only ever holds the HttpOnly session.
  */
 async function send<T>(method: "POST" | "DELETE", path: string, init: { body?: unknown; headers?: Record<string, string> } = {}): Promise<T | null> {
-  const response = await fetch(`/api/v1${path}`, {
+  const response = await fetch(appPath(`/api/v1${path}`), {
     method,
     credentials: "same-origin",
     cache: "no-store",

@@ -15,8 +15,8 @@ El archivo incluye `.env.dev`, las contraseñas de desarrollo y los datos inicia
 
 ## Producción
 
-La producción de SINBAD² se actualiza mediante GitLab CI/CD con pushes a `main`. El primer arranque requiere el job manual de bootstrap y un respaldo verificado. No ejecutes `docker compose up` desde una release sin seguir el procedimiento documentado. El Dashboard utiliza el puerto `8120`.
+La producción de SINBAD² se actualiza mediante GitLab CI/CD después de fusionar cambios en `main`. La administración prepara la configuración y los cuatro volúmenes persistentes; la pipeline normal falla de forma segura si la instalación no está lista y nunca ejecuta la restauración inicial. No ejecutes `docker compose up` desde una release sin seguir el procedimiento documentado. Apache sirve el Dashboard bajo `/real-jaen` y reenvía al puerto local `8090`.
 
 El paquete privado, las bases de datos, el catálogo, las calibraciones y los secretos no se publican en Git. Acquisition no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos de vídeo solo comienzan mediante acciones explícitas desde el Dashboard.
 
-Para configurar GitLab, completar el bootstrap, revisar fallos o realizar respaldos, consulta [despliegue](docs/despliegue.md). La arquitectura de los cuatro servicios se describe en [arquitectura](docs/arquitectura.md).
+Para preparar el primer despliegue administrado, revisar fallos o realizar respaldos, consulta [despliegue](docs/despliegue.md). La arquitectura de los cuatro servicios se describe en [arquitectura](docs/arquitectura.md).

@@ -27,7 +27,10 @@ function answer(body: unknown, status = 200) {
 const urls = (fetch: ReturnType<typeof answer>) =>
   fetch.mock.calls.map((call) => (call as unknown[])[0]);
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
 describe("typed client", () => {
   it("builds every /api/v1 URL, so screens never do", async () => {
@@ -74,6 +77,13 @@ describe("typed client", () => {
       "/api/v1/competitions",
       expect.objectContaining({ signal: controller.signal }),
     );
+  });
+
+  it("keeps API and sign-in redirect paths under the production prefix", async () => {
+    vi.stubEnv("NEXT_PUBLIC_BASE_PATH", "/real-jaen");
+    const fetch = answer([]);
+    await getSource();
+    expect(urls(fetch)).toEqual(["/real-jaen/api/v1/source"]);
   });
 
   it("loads every result page internally and returns the full event list", async () => {

@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { HiddenOnAccess } from "./HiddenOnAccess";
+import { appPath } from "@/contract/base-path";
 import { MainNav } from "./MainNav";
 import { SourceBadge } from "./SourceBadge";
 import css from "./AppShell.module.css";
@@ -27,7 +28,7 @@ export function AppShell({ children, actions, session }: { children: ReactNode; 
                 className={css.crest}
                 height={44}
                 priority
-                src="/crests/real-jaen.webp"
+                src={appPath("/crests/real-jaen.webp")}
                 width={44}
               />
               <span className={css.brandText}>

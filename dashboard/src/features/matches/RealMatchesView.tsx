@@ -10,6 +10,7 @@ import { Select } from "@/ui/Select";
 import { LoadingState } from "@/ui/LoadingState";
 import { CLUB_ID } from "@/lib/club";
 import { matchesHref, observedMatchHref, type MatchesState } from "@/lib/navigation";
+import { appPath, routePath } from "@/contract/base-path";
 import { useApi } from "@/hooks/use-api";
 import { ObservedMatchList } from "./ObservedMatchList";
 import { ALL_TEAMS, mergeTeamMatches, teamOptions } from "./real-matches";
@@ -75,8 +76,8 @@ export function RealMatchesView({ initialSeasonId, initialTeamId, initialState =
   // The chosen team and status stay in the URL, replaced without a history entry; an explicit state keeps what was asked for.
   const href = unmatchedSeason || rejected ? null : matchesHref({ teamId: chosen, state });
   useEffect(() => {
-    if (href && `${window.location.pathname}${window.location.search}` !== href) {
-      window.history.replaceState(window.history.state, "", href);
+    if (href && `${routePath(window.location.pathname)}${window.location.search}` !== href) {
+      window.history.replaceState(window.history.state, "", appPath(href));
     }
   }, [href]);
 

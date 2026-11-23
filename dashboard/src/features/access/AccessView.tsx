@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiRequestError, getSession, signIn } from "@/client/api";
+import { appPath } from "@/contract/base-path";
 import { Button } from "@/ui/Button";
 import css from "./Access.module.css";
 
@@ -44,7 +45,7 @@ export function AccessView({ next }: { next: string }) {
     try {
       await signIn(password);
       setPassword("");
-      window.location.assign(new URL(next, window.location.origin).href);  // a full load: no state from before
+      window.location.assign(new URL(appPath(next), window.location.origin).href);  // a full load: no state from before
     } catch (error) {
       setProblem(error instanceof ApiRequestError ? MESSAGES[error.status] ?? "No se pudo iniciar sesión." : "No se pudo iniciar sesión.");
       setBusy(false);

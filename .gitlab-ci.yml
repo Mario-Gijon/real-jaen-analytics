@@ -17,13 +17,3 @@ deploy_to_sinbad2:
     - when: never
   script:
     - bash scripts/deploy-sinbad2.sh deploy
-
-bootstrap_sinbad2:
-  extends: .deploy_sinbad2
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main"'
-      when: manual
-      allow_failure: false
-    - when: never
-  script:
-    - bash scripts/deploy-sinbad2.sh bootstrap

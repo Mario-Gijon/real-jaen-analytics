@@ -177,7 +177,7 @@ services:
         read_only: true
         bind: {create_host_path: false}
     ports:
-      - "${RJ_DASHBOARD_BIND:-127.0.0.1}:${RJ_DASHBOARD_PORT:-8120}:3000"
+      - "${RJ_DASHBOARD_BIND:-127.0.0.1}:${RJ_DASHBOARD_PORT:-8090}:3000"
     networks: [dashboard-edge, sports-data-internal, video-internal]
     depends_on:
       sports-data:

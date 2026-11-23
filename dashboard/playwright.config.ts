@@ -21,10 +21,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run build && npx next start -p 3100",
+    command: "npm run build && npx next start -H 127.0.0.1 -p 3100",
     // Always the demonstration, whatever a local .env.local selects; the real-data specs simulate the API themselves.
     // Access configured with test-only files, so the gate is exercised as in a real installation.
-    env: { DATA_MODE: "demo", RJ_ACCESS_PASSWORD_FILE: join(ACCESS_FIXTURES, "access-password"),
+    env: { NEXT_PUBLIC_BASE_PATH: "", DATA_MODE: "demo", RJ_ACCESS_PASSWORD_FILE: join(ACCESS_FIXTURES, "access-password"),
       RJ_UPDATE_PASSWORD_FILE: join(ACCESS_FIXTURES, "update-password"),
       RJ_SESSION_SECRET_FILE: join(ACCESS_FIXTURES, "session-secret") },
     url: "http://127.0.0.1:3100/api/v1/session",

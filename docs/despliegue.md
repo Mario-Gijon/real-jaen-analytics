@@ -28,116 +28,72 @@ Las carpetas y claves del paquete están excluidas de Git. Los secretos de desar
 
 ## Producción en SINBAD²
 
-### Qué hace el despliegue
+### Publicación y proxy
 
-`.gitlab-ci.yml` contiene dos jobs con `environment: production` y `resource_group: sinbad2-production`:
+La URL pública acordada es `https://sinbad2.ujaen.es/real-jaen`. Apache termina TLS y reenvía al Dashboard por `http://127.0.0.1:8090`; el contenedor no configura TLS y el puerto de producción no escucha en interfaces externas. Solo Dashboard publica un puerto. Sports Data, Acquisition y Video Service permanecen en redes internas.
 
-- `deploy_to_sinbad2` se ejecuta automáticamente solo en pipelines de tipo `push` a la rama `main`.
-- `bootstrap_sinbad2` es manual y solo aparece en pipelines iniciadas desde la interfaz web para la rama `main`. Está separado del despliegue normal.
+El Dashboard de producción se compila con Next.js `basePath=/real-jaen`; el desarrollo conserva la raíz `/` y el puerto `33201`. El prefijo forma parte de las rutas que Apache entrega a Next: el proxy debe preservar `/real-jaen` en la ruta y no quitarlo ni añadirlo una segunda vez. Next.js prefija los enlaces internos; el cliente del Dashboard prefija API, recursos, redirecciones y cookies. La ruta de salud del contenedor es `/real-jaen/api/v1/session`.
 
-No se fijan Runner tags. El Runner que GitLab asigne debe tener `bash`, `git`, `ssh`, `ssh-keygen`, `tar`, `mktemp` e `install`. El job transfiere el código y los archivos privados por SSH; las compilaciones y Docker Compose se ejecutan en el host remoto. Los archivos secretos no se copian al repositorio, a las imágenes Docker ni a artifacts del job. `.env.prod.example` es un ejemplo público sin credenciales.
+Antes del despliegue, administración debe confirmar que Apache reenvía el encabezado `Host` público y envía `X-Forwarded-Proto: https`. Esto permite que la validación de origen compare el mismo host y que la cookie de sesión incluya `Secure`. También debe confirmar cómo conserva o sobrescribe `X-Forwarded-For`. La aplicación no confía en cabeceras de IP por defecto; si se configura `RJ_TRUSTED_CLIENT_IP_HEADER`, Apache debe sobrescribir esa cabecera con un valor confiable. La configuración efectiva del proxy, sus reglas de ruta y su certificado no se han inspeccionado desde este repositorio.
 
-Cada ejecución crea una release de código identificada por commit, pipeline y job bajo `~/deploy_real-jaen-analytics/releases/`. La extracción inicial se prepara en un directorio temporal y se renombra al terminar. Configuración y datos persisten fuera de cada release:
+### Pipeline y rutas del host
+
+La pipeline contiene un único job de producción. `deploy_to_sinbad2` se ejecuta solo por un `push` a `main`, después de la fusión aprobada; no corre al abrir una merge request ni en ramas de desarrollo. Mantiene `resource_group: sinbad2-production`, no es interrumpible y el host omite pipelines obsoletas. No hay job de bootstrap en la pipeline.
+
+El despliegue usa el home de la cuenta SSH sin sudo y conserva estas rutas existentes:
 
 ```text
-~/deploy_real-jaen-analytics/
+$HOME/deploy_real-jaen-analytics/
 ├── releases/<commit>-<pipeline>-<job>/
 └── shared/
     ├── config/versions/<release>/.env.prod
     ├── config/current -> versions/<release>
     ├── secrets/versions/<release>/
     ├── secrets/current -> versions/<release>
-    ├── imports/initial-backup/       # respaldo verificado para el primer arranque
-    ├── video-catalog/                # catálogo operativo, independiente del código
-    ├── incoming/                     # staging privado temporal
-    └── deploy-state/last-good        # última release saludable
+    ├── imports/
+    ├── video-catalog/
+    ├── incoming/                     # staging temporal de archivos privados
+    └── deploy-state/last-good
 ```
 
-El sistema crea estas carpetas bajo el usuario SSH. Las carpetas raíz y `shared` quedan en modo `0700`; los directorios privados de configuración y secretos también quedan restringidos. `.env.prod` queda en `0600` y los archivos de secretos versionados en `0444`, dentro de directorios de acceso restringido. Los directorios nuevos `shared/imports` y `shared/video-catalog` quedan en `0755`, para permitir que UID/GID `10001` lea y recorra los datos que montan Sports Data y Video Service. El despliegue no cambia permisos ni propietario de esas dos rutas si ya existían: las comprueba como UID `10001` y se detiene antes de modificar servicios si el acceso no basta. También comprueba como ese UID que el respaldo de bootstrap y sus archivos requeridos se puedan abrir. Los secretos se montan como solo lectura y cada contenedor recibe únicamente los que necesita: Dashboard usa acceso, actualización, sesión y control; Sports Data usa control y adquisición; Acquisition usa adquisición; Video Service no recibe secretos. Dentro de los contenedores los procesos son `node` o UID/GID `10001`.
+Administración prepara `.env.prod`, los secretos y el estado persistente por el canal acordado. Debe confirmar que sus rutas y permisos corresponden a `$HOME/deploy_real-jaen-analytics/shared/` y que los cuatro volúmenes tienen exactamente los nombres de `.env.prod.example`. No se mueve nada a `/etc` o `/srv`. Las carpetas privadas de configuración y secretos quedan restringidas; `.env.prod` queda en `0600`, y los secretos se montan como solo lectura.
 
-Las redes y los cuatro volúmenes mantienen los nombres del ejemplo `.env.prod.example`. El despliegue normal se detiene antes de compilar si falta algún volumen o si solo existe una parte. También verifica la base deportiva, los trabajos de Acquisition, la base SQLite de Video Service, los permisos de escritura de los procesos y la lectura de secretos/catálogo. Si Acquisition está detenido, el preflight obtiene el bloqueo del perfil y ejecuta `verify-profile`, incluida su comprobación completa. Si está levantado y saludable, no intenta abrir el mismo perfil: usa la salud del servicio y la verificación de integridad que hizo su propietario al arrancar, junto con las comprobaciones estructurales de solo lectura. El bloqueo exclusivo del perfil se conserva.
+El job normal exige que existan los cuatro volúmenes, sean íntegros y compatibles, y que las rutas externas sean accesibles por UID `10001`. Nunca crea, inicializa, reemplaza ni restaura esos volúmenes. Si falta alguno o falla una comprobación, el preflight termina antes de cambiar los contenedores. `dashboard/scripts/restaurar-instalacion.sh` permanece como herramienta independiente para la preparación administrada; la pipeline no la invoca. No restaures sobre volúmenes existentes.
 
-El preflight no modifica los servicios activos ni los enlaces `current`. Valida Compose usando las rutas inmutables de la configuración y secretos candidatos, construye imágenes cuando cambia el SHA y verifica los datos antes de promover esos enlaces. Si cambian `ENV_PROD` o los secretos aunque el SHA sea el mismo, recrea explícitamente los servicios que consumen los valores modificados para que los procesos los vuelvan a leer. Una repetición sin cambios valida la salud y actualiza el registro de pipeline sin volver a levantar servicios. Los archivos de secretos se montan desde la versión validada.
+Los preflights comprueban la base deportiva, los trabajos de Acquisition, la base SQLite de Video Service, los secretos y el catálogo. Si Acquisition está levantado, el job respeta el bloqueo de su perfil y comprueba su healthcheck e integridad estructural sin abrir el perfil por segunda vez. Al recrear Acquisition, cierra temporalmente la admisión de nuevos trabajos y espera a que terminen los aceptados; no cancela trabajos. Una rotación de `ENV_PROD` o de secretos fuerza la recreación de los servicios consumidores aunque el SHA no cambie. Un fallo de build o preflight deja los contenedores activos; un fallo tras promover o iniciar la release intenta restaurar el estado saludable anterior sin tocar volúmenes.
 
-Cuando una actualización vaya a recrear Acquisition, el despliegue desconecta temporalmente Sports Data de la red interna que admite trabajos y crea una barrera de mantenimiento en el volumen de trabajos. Espera a que la cola esté vacía durante cinco comprobaciones consecutivas; cada trabajo ya aceptado puede terminar mientras Acquisition sigue levantado. No cancela trabajos. Si la cola no se vacía en 25 minutos o no puede comprobarse, cancela la actualización, retira su barrera y restablece la conexión de Sports Data. Después recrea y valida Acquisition antes de volver a admitir trabajos. El servicio también rechaza nuevas solicitudes mientras exista la barrera.
+Tras confirmar `last-good`, se conservan al menos las cinco releases de código recientes y además la activa y la release previa de recuperación. La limpieza solo elimina directorios de releases antiguas y valida que sean hijos directos de `releases/`; no toca configuración, secretos, importaciones, catálogo, redes, imágenes ni volúmenes. Si falla, escribe una advertencia y mantiene saludable el despliegue. No se ejecuta `docker system prune` ni `docker volume prune`.
 
-Un catálogo de vídeo ya existente se valida tal como está: el despliegue no cambia sus permisos ni su propietario. Comprueba su lectura y la carga del manifiesto como UID `10001`. Solo si el directorio está vacío crea `videos.json`, con permisos de solo lectura. Si falta el manifiesto en un catálogo que ya contiene datos, se detiene sin modificarlo.
+### Variables y requisitos de GitLab/Runner
 
-El `up` usa imágenes etiquetadas por SHA del commit. La etiqueta local `:prod` y `last-good` solo se actualizan después de superar las comprobaciones de salud. Si no se puede guardar `last-good`, el despliegue restaura los enlaces, las imágenes y los servicios anteriores usando los mismos volúmenes. Si esa recuperación también falla, mantiene `current` apuntando a la versión candidata y conserva cerrada la entrada de trabajos cuando corresponde, para no anunciar una configuración anterior mientras pudiera seguir activa la versión nueva. Una interrupción forzada puede dejar la red o la barrera cerradas; inspecciona servicios y el marcador `deployment-maintenance` antes de reabrirlas. Nunca elimina ni restaura volúmenes en una actualización normal.
+Las variables SSH existentes `SSH_PRIVATE_KEY`, `SSH_HOST` y `REMOTE_USER` pueden reutilizarse sin cambiar sus nombres ni tipos. `SSH_PRIVATE_KEY` acepta texto multilínea o variable File; el job normaliza CRLF, crea una copia temporal `0600` y valida la clave sin imprimirla. La clave pública correspondiente debe estar autorizada para `REMOTE_USER`.
 
-El `resource_group` evita despliegues simultáneos. Como el orden de jobs que esperan por un resource group depende de la configuración de GitLab, el host compara el ID de pipeline con la última release saludable y omite una ejecución antigua antes de cambiar la configuración o los servicios.
+Administración entregará la host key previamente verificada en `SSH_KNOWN_HOSTS` como File o texto. El job conserva `StrictHostKeyChecking=yes`; si falta una entrada confiable para `SSH_HOST`, falla antes de conectar. No usa `ssh-keyscan` para decidir en quién confiar.
 
-### Variables en GitLab
+En el proyecto GitLab `despliegues-autorizados/real-jaen-analytics`, deben configurarse como variables File protegidas, con ámbito `production` y sin expansión de referencias:
 
-Configúralas en el proyecto que recibe esta pipeline, en **Settings → CI/CD → Variables**. La configuración SSH existente de Francisco (`SSH_PRIVATE_KEY`, `SSH_HOST`, `REMOTE_USER`) se puede reutilizar; no es necesario cambiar el tipo de `SSH_PRIVATE_KEY`. Admite una variable normal con la clave privada multilínea o una variable File cuyo valor sea la ruta temporal del archivo. El job copia la clave a un directorio temporal privado, normaliza CRLF, aplica modo `0600` y valida la clave antes de abrir una conexión. No muestra la clave.
+| Variable | Archivo/contenido esperado |
+|---|---|
+| `ENV_PROD` | Archivo completo basado en `.env.prod.example`, con bind `127.0.0.1`, puerto `8090`, nombres fijos de proyecto/red/volumen y rutas bajo `shared/`. No debe contener credenciales. |
+| `APP_ACCESS_PASSWORD` | Contraseña de acceso, al menos 12 caracteres ASCII imprimibles. |
+| `APP_UPDATE_PASSWORD` | Contraseña administrativa distinta, al menos 9 caracteres ASCII imprimibles. |
+| `APP_SESSION_SECRET` | Secreto de sesión con al menos 32 caracteres ASCII imprimibles. |
+| `APP_CONTROL_TOKEN` | Token interno con al menos 32 caracteres ASCII imprimibles. |
+| `APP_ACQUISITION_TOKEN` | Token de Acquisition distinto del token de control, con al menos 32 caracteres ASCII imprimibles. |
 
-La verificación de host requiere una clave pública del servidor que haya sido verificada de forma independiente. Si existe `SSH_KNOWN_HOSTS`, puede ser una variable File o una variable de texto con entradas `known_hosts`. Si no está definida, el job busca una entrada confiable en `$HOME/.ssh/known_hosts` del Runner. Aún no sabemos si esa variable o ese archivo ya están configurados. Si no encuentra una entrada válida para `SSH_HOST`, falla antes de conectar y solicita registrar la clave pública verificada. Mantiene `StrictHostKeyChecking=yes`; no usa `ssh-keyscan` para establecer confianza automáticamente.
+Los cinco secretos aceptan una línea de hasta 256 caracteres y un salto de línea final opcional. No se escriben en Git, artifacts, logs, argumentos o imágenes.
 
-| Clave | Tipo | Contenido esperado |
-|---|---|---|
-| `ENV_PROD` | File | Contenido completo de `.env.prod`, basado en `.env.prod.example`. Mantén exactamente los nombres del proyecto, redes y volúmenes, el puerto y las rutas `${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/...`. Las claves críticas deben aparecer una sola vez y conservar los valores de producción esperados; las declaraciones duplicadas o alteradas se rechazan antes de consultar los volúmenes. No incluyas contraseñas ni tokens. |
-| `SSH_PRIVATE_KEY` | Variable o File | Reutiliza la variable existente. Puede contener la clave privada multilínea directamente o ser la ruta temporal que entrega una variable File. Usa una clave sin frase de paso, autorizada en `REMOTE_USER`. |
-| `SSH_KNOWN_HOSTS` | File o Variable, opcional si el Runner ya tiene el archivo confiable | Entradas `known_hosts` que incluyan `SSH_HOST`, con clave pública verificada fuera de banda. No se presupone que ya exista. |
-| `SSH_HOST` | Variable | Reutiliza la variable existente con el nombre DNS o IPv4 del host SSH; se usa el puerto 22. |
-| `REMOTE_USER` | Variable | Reutiliza la cuenta existente de despliegue. Debe tener escritura en su `$HOME` y acceso directo a Docker. |
-| `APP_ACCESS_PASSWORD` | File | Contraseña de acceso, al menos 12 caracteres imprimibles ASCII. |
-| `APP_UPDATE_PASSWORD` | File | Contraseña administrativa, al menos 9 caracteres imprimibles ASCII y distinta de la anterior. |
-| `APP_SESSION_SECRET` | File | Secreto de sesión de al menos 32 caracteres imprimibles ASCII. |
-| `APP_CONTROL_TOKEN` | File | Token interno de al menos 32 caracteres imprimibles ASCII. |
-| `APP_ACQUISITION_TOKEN` | File | Token de Acquisition de al menos 32 caracteres imprimibles ASCII y distinto del token de control. |
+El Runner necesita `bash`, `git`, `ssh`, `ssh-keygen`, `tar`, `mktemp`, `install` y `tr`, poder recibir variables protegidas de `production` y conectarse al host por SSH. La cuenta remota necesita escritura en `$HOME` y acceso directo a Docker; no se usa sudo. El host requiere Docker Engine, Compose v2.17 o posterior, permiso para builds/redes/volúmenes y salida a registros e índices de dependencias. El job mantiene sin cambios el proyecto, seis redes y cuatro volúmenes persistentes ya definidos.
 
-Para Real Jaén Analytics hay que crear seis variables de aplicación: `ENV_PROD` y los cinco secretos `APP_*` de la tabla. Los tres valores SSH ya definidos pueden reutilizarse. `SSH_KNOWN_HOSTS` solo debe añadirse si el Runner no dispone del archivo confiable indicado arriba.
+### Requisitos que administración debe confirmar
 
-Los cinco archivos `APP_*` deben contener una sola línea de ASCII imprimible, de hasta 256 caracteres, sin espacios ni controles; se permite un salto de línea final. GitLab entrega una variable File al proceso como la ruta de un archivo temporal. El script comprueba que esa ruta sea un archivo File no vacío, valida tamaños y contenido, instala los archivos bajo `shared/secrets/` y cambia el enlace `current` mediante renombrado atómico. Cuando un valor rota, Compose recrea los servicios que lo consumen incluso si el commit no ha cambiado. El job no usa esas credenciales como argumentos, variables de entorno de los contenedores ni contenido de build.
+- Que las variables protegidas llegan al entorno `production` y el Runner asignado dispone de las herramientas y conectividad indicadas.
+- La disponibilidad y autorización de las tres variables SSH existentes y la entrega de `SSH_KNOWN_HOSTS` con la clave verificada.
+- Que `$HOME/deploy_real-jaen-analytics/shared/`, sus permisos y los cuatro volúmenes son las ubicaciones preparadas, con datos íntegros y compatibles.
+- Que Apache conserva `/real-jaen`, envía `Host` y `X-Forwarded-Proto: https` como se indica y publica únicamente el proxy TLS acordado.
+- La creación de `ENV_PROD` y los cinco `APP_*` protegidos como File.
 
-Pasos para añadir cada entrada:
-
-1. Confirma con el administrador que `SSH_PRIVATE_KEY`, `SSH_HOST` y `REMOTE_USER` existentes estén disponibles para esta pipeline y para el entorno `production`; conserva sus valores y tipos actuales y verifica que estén protegidos.
-2. Comprueba si el Runner tiene `$HOME/.ssh/known_hosts` con una entrada para `SSH_HOST` cuya clave se verificó por un canal independiente. Si no, registra la entrada verificada en `SSH_KNOWN_HOSTS` como File o Variable, protegida y con ámbito `production`. No aceptes automáticamente la salida de `ssh-keyscan` como prueba de identidad.
-3. En **Settings → CI/CD → Variables → Add variable**, crea `ENV_PROD` y los cinco `APP_*` como variables File, protegidas, con ámbito `production` y sin expansión de referencias.
-4. Marca `main` como protegida para que el Runner pueda recibir las variables protegidas. Usa visibilidad **Masked** o **Masked and hidden** cuando GitLab acepte el formato; las claves SSH multilínea pueden no cumplir las restricciones de enmascarado.
-5. No subas archivos de secretos ni copies su contenido a `.gitlab-ci.yml`, artifacts o imágenes.
-
-La pantalla y algunas opciones pueden variar según la versión del GitLab autohospedado. La semántica de File, el ámbito de entorno y la protección se describe en la [documentación de variables CI/CD de GitLab](https://docs.gitlab.com/ci/variables/) y la [guía de claves SSH para jobs](https://docs.gitlab.com/ci/jobs/ssh_keys/).
-
-### Primer despliegue: bootstrap manual
-
-El bootstrap crea automáticamente las rutas bajo el home SSH. Si el directorio del respaldo aún no existe, una primera ejecución manual de `bootstrap_sinbad2` crea la estructura y falla con el mensaje de respaldo ausente, antes de compilar o crear volúmenes. Administración puede entonces copiar un respaldo verificado a:
-
-```text
-~/deploy_real-jaen-analytics/shared/imports/initial-backup/
-```
-
-El directorio debe contener `real-jaen.sqlite`, `actualizaciones.tar`, `acquisition-jobs.tar`, `video-service-state.tar`, `manifest.json` y `SHA256SUMS`. `procedencia.tar` es opcional. El respaldo debe proceder de `dashboard/scripts/respaldo-instalacion.sh` y corresponder con los datos y el esquema que se van a desplegar. Antes de restaurar, el job comprueba que UID `10001` pueda recorrer el directorio y abrir cada archivo requerido. El catálogo operativo de vídeo se suministra aparte en `shared/video-catalog/`; no forma parte del respaldo conjunto. Si aún no hay catálogo, el sistema crea un manifiesto vacío de vídeo solo cuando ese directorio está completamente vacío.
-
-Después de proteger `main`, confirmar las tres variables SSH existentes, verificar que haya una host key confiable y configurar las seis variables de aplicación, inicia en GitLab una pipeline **Run pipeline** para la rama `main` y ejecuta el job manual `bootstrap_sinbad2`. Si el respaldo aún no está, el job fallará de forma segura y dejará creadas las carpetas necesarias. Tras copiar el respaldo, inicia otra pipeline web en `main` y ejecuta nuevamente el job. Ese job:
-
-1. Se niega si ya existe cualquiera de los cuatro volúmenes destino.
-2. Comprueba la presencia y `SHA256SUMS` del respaldo antes de crear volúmenes.
-3. Compila las imágenes del commit y ejecuta `restaurar-instalacion.sh` para crear y poblar los cuatro volúmenes nuevos.
-4. Valida las bases, permisos, secretos, catálogo y salud antes de guardar `last-good`.
-
-Si falta el respaldo o la suma no coincide, no crea volúmenes. Si la restauración falla después de crear alguno, no elimina ninguno: queda un estado que administración debe inspeccionar antes de cualquier reintento. No vuelvas a ejecutar el bootstrap. Si los cuatro volúmenes existen y su contenido es válido, una actualización normal puede continuar; si la restauración dejó solo algunos volúmenes o datos incompletos, administración debe reparar esa instalación de forma explícita. Nunca se restaura automáticamente sobre un volumen existente. La restauración usa un contenedor de Docker como UID 0 con `CAP_CHOWN` para asignar propiedad a UID `10001`; no requiere `sudo` en la sesión SSH, pero el daemon Docker debe permitir esa operación.
-
-No hagas un despliegue normal a `main` hasta tener el respaldo en su ubicación. Si la instalación no está inicializada, ese job falla con un mensaje claro y no crea volúmenes vacíos. Una vez bootstrap haya terminado correctamente, los siguientes pushes a `main` usan el job automático `deploy_to_sinbad2`.
-
-### Actualizaciones, errores y datos
-
-Las actualizaciones normales nunca restauran datos ni ejecutan `docker compose down -v`. Antes de cambiar servicios, el job exige los cuatro volúmenes existentes y válidos. Un fallo en cualquiera de los preflights deja los contenedores activos como estaban. Un fallo de compilación también conserva los servicios activos. Si el `up`, la salud o el guardado de `last-good` falla y hay una release saludable previa, el job recupera el código, imágenes, secretos y configuración anteriores y vuelve a iniciar esa release; mantiene los volúmenes y no ejecuta rollback de base de datos.
-
-Iniciar la versión anterior puede seguir siendo incompatible con una migración o cambio de esquema que ya haya ocurrido. Por eso el mensaje de recuperación indica expresamente que la compatibilidad de los datos depende de los cambios de esquema: no se promete una reversión segura de datos. Sin una release saludable previa, el job informa del fallo y no intenta borrar ni restaurar volúmenes; puede haber servicios parcialmente iniciados, que deben inspeccionarse antes de reintentar.
-
-Las releases, versiones de configuración y secretos antiguos no se podan automáticamente. Vigila el almacenamiento del host y acuerda una limpieza manual que conserve al menos la release `last-good` y cualquier versión requerida para diagnóstico. Las copias de seguridad deben gestionarse separadas del flujo de despliegue; la pipeline no las descarga, publica ni genera.
-
-### Requisitos de infraestructura que faltan por confirmar
-
-- **GitLab y Runner:** el proyecto autohospedado debe recibir los commits publicados en GitHub (por ejemplo, mediante un espejo autorizado); `main` debe estar protegida y el Runner seleccionado debe recibir las variables protegidas del entorno `production`. El Runner necesita `bash`, `git`, `ssh`, `ssh-keygen`, `tar`, `mktemp`, `install` y `tr`, salida al host por TCP 22, y un `$HOME/.ssh/known_hosts` confiable o la variable `SSH_KNOWN_HOSTS`. No se declaran tags porque se desconoce la configuración disponible.
-- **SSH:** la clave privada reutilizada debe corresponder con una clave pública autorizada en `REMOTE_USER`; esa cuenta necesita escritura en su `$HOME` y acceso directo al daemon Docker. La entrada de host para `SSH_HOST` debe estar verificada fuera de banda antes del primer despliegue.
-- **Docker:** Docker Engine y Compose v2.17 o posterior en el host, permisos para el daemon y capacidad de ejecutar builds, redes, volúmenes y contenedores UID `0` con `CAP_CHOWN` durante el bootstrap. El acceso a un daemon rootful equivale prácticamente a privilegios root; debe aprobarlo administración. Un daemon rootless solo sirve si su mapeo de UID permite esos cambios de propiedad y los bind mounts requeridos. No se presupone `sudo`.
-- **Red del host:** acceso durante la compilación a registros e índices de dependencias; el Dashboard publica el puerto TCP 8120. Firewall, DNS, proxy inverso y TLS institucional deben configurarse aparte.
-- **Datos:** respaldo con checksum verificado y compatible; catálogo de vídeo operativo y sus permisos de lectura para UID `10001` si ya existe.
-
-No puedo verificar desde este entorno la versión/configuración del GitLab privado, el proyecto efectivo, el espejo desde GitHub, la protección de `main`, las variables, el Runner, la conectividad SSH, los permisos Docker, el espacio disponible, los datos existentes ni la exposición de 8120. No se ha conectado con GitLab privado ni con SINBAD² y no se ha ejecutado ningún despliegue real. La validación final del YAML con la versión del GitLab autohospedado y CI Lint deberá hacerse cuando el cambio se publique allí.
+No se ha conectado con GitLab privado ni con SINBAD², no se ha ejecutado un despliegue y la configuración del Apache, Runner, variables, volúmenes y secretos sigue pendiente de validación por administración. CI Lint debe ejecutarse en el GitLab autohospedado antes de la primera publicación allí.
 
 ## Operaciones de Docker en producción
 

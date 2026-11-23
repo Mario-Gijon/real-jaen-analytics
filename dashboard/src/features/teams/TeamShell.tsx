@@ -8,6 +8,7 @@ import { TeamCrest } from "@/ui/TeamCrest";
 import { tabId, tabPanelId, Tabs } from "@/ui/Tabs";
 import { CLUB_ID } from "@/lib/club";
 import { teamsHref } from "@/lib/navigation";
+import { appPath, routePath } from "@/contract/base-path";
 import { TeamCrestGrid } from "./TeamCrestGrid";
 import css from "./TeamsView.module.css";
 
@@ -40,8 +41,8 @@ const PHONE = "(max-width: 640px)";
 export function useTeamsUrl(view: Parameters<typeof teamsHref>[0] | null) {
   const href = view ? teamsHref(view) : null;
   useEffect(() => {
-    if (href && `${window.location.pathname}${window.location.search}` !== href) {
-      window.history.replaceState(window.history.state, "", href);
+    if (href && `${routePath(window.location.pathname)}${window.location.search}` !== href) {
+      window.history.replaceState(window.history.state, "", appPath(href));
     }
   }, [href]);
 }

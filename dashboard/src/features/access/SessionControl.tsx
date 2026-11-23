@@ -3,6 +3,7 @@
 import { LogOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getSession, signOut } from "@/client/api";
+import { appPath } from "@/contract/base-path";
 import css from "./Access.module.css";
 
 /** «Cerrar sesión» in the top bar, only where the installation asks for the password and this browser has a session. */
@@ -24,7 +25,7 @@ export function SessionControl() {
     try {
       await signOut();
     } finally {
-      window.location.assign(new URL("/acceso", window.location.origin).href);  // a full load: nothing left on screen
+      window.location.assign(new URL(appPath("/acceso"), window.location.origin).href);  // a full load: nothing left on screen
     }
   };
   return (

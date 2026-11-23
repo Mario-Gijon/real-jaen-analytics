@@ -98,6 +98,14 @@ esac
 exec "$RJA_REAL_MV" "$@"
 """
 
+FAKE_RM = r"""#!/bin/sh
+set -eu
+case "${RJA_TEST_FAIL_RELEASE_PRUNE:-0}:$*" in
+  1:*"/releases/"*) exit 1 ;;
+esac
+exec "$RJA_REAL_RM" "$@"
+"""
+
 FAKE_DOCKER = r"""#!/usr/bin/env python3
 import json
 import os
@@ -283,6 +291,7 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.write_file(self.bin_dir / "sh", FAKE_SH, 0o755)
         self.write_file(self.bin_dir / "docker", FAKE_DOCKER, 0o755)
         self.write_file(self.bin_dir / "mv", FAKE_MV, 0o755)
+        self.write_file(self.bin_dir / "rm", FAKE_RM, 0o755)
         self.make_file_variables()
         self.key = self.files / "deploy_key"
         subprocess.run(
@@ -314,6 +323,7 @@ class DeploySinbad2Tests(unittest.TestCase):
                 "RJA_TEST_SOURCE": str(REPOSITORY),
                 "RJA_REAL_GIT": shutil.which("git") or "/usr/bin/git",
                 "RJA_REAL_MV": shutil.which("mv") or "/bin/mv",
+                "RJA_REAL_RM": shutil.which("rm") or "/bin/rm",
                 "RJA_TEST_REMOTE_HOME": str(self.remote_home),
                 "RJA_TEST_DOCKER_LOG": str(self.logs),
                 "RJA_TEST_DOCKER_STATE": str(self.state),
@@ -564,16 +574,127 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertFalse(self.logs.exists())
 
-    def test_pipeline_rules_are_scoped_to_main_push_and_manual_bootstrap(self) -> None:
+    def test_pipeline_rules_are_scoped_to_main_push_without_bootstrap(self) -> None:
         config = (REPOSITORY / ".gitlab-ci.yml").read_text(encoding="utf-8")
         self.assertIn('$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"', config)
-        self.assertIn('$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main"', config)
         self.assertIn("resource_group: sinbad2-production", config)
         self.assertIn("name: production", config)
-        self.assertIn("when: manual", config)
         self.assertIn("when: on_success", config)
+        self.assertIn("interruptible: false", config)
+        self.assertIn("allow_failure: false", config)
+        self.assertNotIn("bootstrap_sinbad2", config)
+        self.assertNotIn("when: manual", config)
         self.assertNotIn("tags:", config)
         self.assertNotIn("master", config)
+
+    def test_production_bind_port_and_dashboard_healthcheck_match_admin_contract(self) -> None:
+        env_example = (REPOSITORY / ".env.prod.example").read_text(encoding="utf-8")
+        dev_env_example = (REPOSITORY / ".env.dev.example").read_text(encoding="utf-8")
+        compose = (REPOSITORY / "compose.prod.yaml").read_text(encoding="utf-8")
+        remote = (REPOSITORY / "scripts/deploy-sinbad2-remote.sh").read_text(encoding="utf-8")
+        dockerfile = (REPOSITORY / "dashboard/Dockerfile").read_text(encoding="utf-8")
+        dev_compose = (REPOSITORY / "compose.dev.yaml").read_text(encoding="utf-8")
+        e2e_config = (REPOSITORY / "dashboard/playwright.config.ts").read_text(encoding="utf-8")
+        self.assertIn("RJ_DASHBOARD_BIND=127.0.0.1", env_example)
+        self.assertIn("RJ_DASHBOARD_PORT=8090", env_example)
+        self.assertIn("RJ_DASHBOARD_BIND=127.0.0.1", remote)
+        self.assertIn("RJ_DASHBOARD_PORT=8090", remote)
+        self.assertIn('${RJ_DASHBOARD_BIND:-127.0.0.1}:${RJ_DASHBOARD_PORT:-8090}:3000', compose)
+        self.assertIn("RJ_DEV_DASHBOARD_PORT=33201", dev_env_example)
+        self.assertEqual(compose.count("    ports:"), 1, "only Dashboard should publish a production host port")
+        self.assertIn("NEXT_PUBLIC_BASE_PATH=/real-jaen", dockerfile)
+        self.assertIn("/api/v1/session", dockerfile)
+        self.assertIn("process.env.NEXT_PUBLIC_BASE_PATH", dockerfile)
+        self.assertIn('NEXT_PUBLIC_BASE_PATH: ""', dev_compose)
+        self.assertIn('NEXT_PUBLIC_BASE_PATH: ""', e2e_config)
+        self.assertNotIn('0.0.0.0:8120', compose)
+
+    def test_successful_deployment_retains_five_releases_and_never_follows_symlinks(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        releases = root / "releases"
+        previous = next(path for path in releases.iterdir() if path.is_dir())
+
+        old_releases = []
+        for index in range(1, 8):
+            candidate = releases / f"{index:040x}-10-{index}"
+            candidate.mkdir()
+            (candidate / "compose.prod.yaml").write_text("release fixture\n", encoding="utf-8")
+            os.utime(candidate, (1_700_000_000 + index, 1_700_000_000 + index))
+            old_releases.append(candidate)
+        unrelated = releases / "not-a-release"
+        unrelated.mkdir()
+        (unrelated / "compose.prod.yaml").write_text("not a managed release\n", encoding="utf-8")
+
+        external = self.base / "external-release-target"
+        external.mkdir()
+        external_marker = external / "preserve.txt"
+        external_marker.write_text("outside releases\n", encoding="utf-8")
+        link = releases / f"{'f' * 40}-999-999"
+        link.symlink_to(external, target_is_directory=True)
+        shared_marker = root / "shared" / "preserve.txt"
+        shared_marker.write_text("persistent state\n", encoding="utf-8")
+
+        env = self.environment(pipeline_id=102, job_id=502)
+        env["CI_COMMIT_SHA"] = "b" * 40
+        second = self.invoke(env=env)
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+
+        current_good = self.last_good()
+        current = current_good.split("release_id=")[1].splitlines()[0]
+        retained = [path for path in releases.iterdir() if path.is_dir() and not path.is_symlink()]
+        retained_names = {path.name for path in retained}
+        self.assertGreaterEqual(len(retained), 5)
+        self.assertIn(current, retained_names)
+        self.assertIn(previous.name, retained_names)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(unrelated.is_dir(), "cleanup removed a directory that was not a release")
+        self.assertTrue(external_marker.is_file())
+        self.assertEqual(shared_marker.read_text(encoding="utf-8"), "persistent state\n")
+        removed_old = [path for path in old_releases if not path.exists()]
+        self.assertGreater(len(removed_old), 0)
+
+    def test_release_cleanup_runs_only_after_last_good_commit(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        old_releases = []
+        for index in range(1, 8):
+            old_release = root / "releases" / f"{index:040x}-10-{index}"
+            old_release.mkdir()
+            (old_release / "compose.prod.yaml").write_text("release fixture\n", encoding="utf-8")
+            os.utime(old_release, (1_700_000_000 + index, 1_700_000_000 + index))
+            old_releases.append(old_release)
+        self.write_file(self.files / "APP_ACCESS_PASSWORD", secrets.token_urlsafe(20) + "\n")
+        env = self.environment(pipeline_id=102, job_id=502)
+        env["RJA_TEST_FAIL_LAST_GOOD"] = "1"
+        failed = self.invoke(env=env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue(all(path.is_dir() for path in old_releases), "release cleanup ran before last-good was committed")
+
+    def test_release_cleanup_failure_warns_without_failing_healthy_deployment(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        root = self.remote_home / "deploy_real-jaen-analytics"
+        releases = root / "releases"
+        old_releases = []
+        for index in range(1, 8):
+            old_release = releases / f"{index:040x}-10-{index}"
+            old_release.mkdir()
+            (old_release / "compose.prod.yaml").write_text("release fixture\n", encoding="utf-8")
+            os.utime(old_release, (1_700_000_000 + index, 1_700_000_000 + index))
+            old_releases.append(old_release)
+
+        env = self.environment(pipeline_id=102, job_id=502)
+        env["CI_COMMIT_SHA"] = "b" * 40
+        env["RJA_TEST_FAIL_RELEASE_PRUNE"] = "1"
+        result = self.invoke(env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("warning: could not remove old code release", result.stderr)
+        self.assertTrue(all(path.is_dir() for path in old_releases))
+        self.assertIn(f"commit_sha={'b' * 40}\n", self.last_good())
+        self.assertTrue(json.loads(self.state.read_text(encoding="utf-8"))["deployed"])
 
     def test_missing_volumes_fail_without_build_or_creation(self) -> None:
         env = self.environment()

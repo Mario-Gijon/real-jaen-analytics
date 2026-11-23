@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { routePath } from "@/contract/base-path";
 import css from "./AppShell.module.css";
 
 /** Players open from matches and teams, outside the main navigation. */
@@ -13,11 +14,12 @@ export const SECTIONS = [
 
 export function MainNav() {
   const pathname = usePathname();
+  const route = routePath(pathname);
   return (
     <nav aria-label="Secciones" className={css.nav}>
       {SECTIONS.map((section) => {
         const current =
-          pathname === section.href || pathname.startsWith(`${section.href}/`);
+          route === section.href || route.startsWith(`${section.href}/`);
         return (
           <Link
             aria-current={current ? "page" : undefined}
