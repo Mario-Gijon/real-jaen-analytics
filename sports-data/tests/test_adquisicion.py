@@ -121,11 +121,10 @@ class Productores(unittest.TestCase):
         repository = Path(__file__).resolve().parents[2]
         sys.path.insert(0, str(repository / 'acquisition/tests'))
         sys.path.insert(0, str(repository / 'sports-data'))
-        from test_producer_fingerprint import current_runtime_hash
+        from test_producer_fingerprint import EXPECTED_PRODUCER_RULES, current_runtime_hash
         from persistencia.adquisicion import productores_aprobados
-        current = 'd00fc9808953b30f550220f254573f93d488d1f427dd6e88766b2df9ae02a1d6'
-        self.assertEqual(current_runtime_hash(), current)
-        self.assertIn(current, productores_aprobados())
+        self.assertEqual(current_runtime_hash(), EXPECTED_PRODUCER_RULES)
+        self.assertIn(EXPECTED_PRODUCER_RULES, productores_aprobados())
         self.assertIn('e18eba33cfbfd11b6ac39c6046ddacfe4436bb8f0b40775ba6b770f8a8c4d65a', productores_aprobados())
 
     def test_productor_no_aprobado_rechazado_antes_de_verificar(self):

@@ -46,6 +46,11 @@
       "rules_sha256": "d00fc9808953b30f550220f254573f93d488d1f427dd6e88766b2df9ae02a1d6",
       "productor": "Productor revisado con la barrera durable de mantenimiento de Acquisition en service.py",
       "uso": "Recetas piloto y Grupo 2; rechaza solicitudes nuevas mientras existe deployment-maintenance, sin cambiar el alcance, las reglas deportivas ni el presupuesto de consultas"
+    },
+    {
+      "rules_sha256": "af79a3ebf2d1e127fef1cf22d09817f58a5725a0e9c95b6e24b8fdf19db0a2ca",
+      "productor": "Acquisition incluye las proyecciones mínimas de api/queries/importar requeridas por bundle.py y la receta",
+      "uso": "Recetas piloto y Grupo 2; conserva PENDIENTES, secciones vacías y normalización de eventos/calendario del contrato Sports Data"
     }
   ]
 }

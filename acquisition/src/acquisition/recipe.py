@@ -22,6 +22,7 @@ REVISION='611e436a1528b0f487aa56a045f023e8ae8ae098'
 
 def producer_rules():
     names=('recipe.py','group_plan.py','transport.py','sdk_adapter.py','operation_budget.py','service.py','app.py','job.py',
+           'bundle_compat/__init__.py','bundle_compat/api.py','bundle_compat/importar.py',
            '../persistencia/bundle.py','../persistencia/comentarios.py')
     sources={n:sha((Path(__file__).parent/n).resolve().read_bytes()) for n in names}
     return fingerprint(dict(sources=sources,scraper=REVISION,
@@ -53,12 +54,12 @@ class RoundListing:
         scoped=[e for e in data['events'] if e.get('tournament',{}).get('id')==94191]
         if PILOT not in {e.get('id') for e in scoped}:raise Stopped('Pilot missing from its verified round')
         if any(e.get('id') not in expected for e in scoped):raise Stopped('New event: another preflight required')
-        import importar
+        from .bundle_compat.importar import rasgos_evento
         prior={(s['record']['event_id'],s['record']['key']):s['record'] for s in self.baseline['records']}
         for event in scoped:
             if event['id']==PILOT:continue
             original=prior.get((event['id'],'event'))
-            if original is None or fingerprint(importar.rasgos_evento(original['payload']))!=fingerprint(importar.rasgos_evento(event)):
+            if original is None or fingerprint(rasgos_evento(original['payload']))!=fingerprint(rasgos_evento(event)):
                 raise Stopped('Round correction outside fixed pilot: another preflight required')
         lister=ScheduleLister(self.store,only_finished=False,concurrency=1)
         await write(lambda:lister.save_page(17073,97382,'round_1',data,meta={'complete':round_is_complete(data)},fetched_at=response.fetched_at))
