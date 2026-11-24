@@ -116,15 +116,33 @@ El `RJ_IMAGE_TAG` usado en operación manual debe ser el `commit_sha` registrado
 
 ## Respaldos y restauración excepcional
 
-Desde la raíz del repositorio, crea cada respaldo en una ubicación nueva. Por defecto, los scripts usan `.env.prod` y `compose.prod.yaml`; para desarrollo indica ambos explícitamente.
+El generador crea cada respaldo en una ubicación nueva y publica la carpeta solo cuando todos los archivos se han copiado, validado y sumado. Por defecto usa `.env.prod` y `compose.prod.yaml`. `COMPOSE_FILE` acepta varios archivos separados por `:` en Linux; Docker Compose aplica los overlays en ese orden y el script toma de la configuración resuelta el proyecto, la imagen y los nombres efectivos de los volúmenes.
+
+Para la instalación local de desarrollo que usa los overlays existentes, ejecuta desde la raíz del repositorio. Exporta también `RJ_PHOTO_COLLECTIONS_DIR` con el mismo directorio externo que utiliza Acquisition al arrancar:
 
 ```sh
-ENV_FILE=.env.prod sh dashboard/scripts/respaldo-instalacion.sh /ruta/nueva/para/respaldo
-COMPOSE_FILE=compose.dev.yaml ENV_FILE=.env.dev \
-  sh dashboard/scripts/respaldo-instalacion.sh /ruta/nueva/para/respaldo-dev
+COMPOSE_FILE="compose.dev.yaml:$HOME/.config/real-jaen-analytics/compose.existing-state.yaml:compose.photos.yaml" \
+ENV_FILE="$HOME/.config/real-jaen-analytics/dev.env" \
+RJ_PHOTO_COLLECTIONS_DIR="$HOME/.config/real-jaen-analytics/photo-collections" \
+RJ_DEV_VIDEO_CATALOG_DIR="$HOME/.config/real-jaen-analytics/video-data" \
+  sh dashboard/scripts/respaldo-instalacion.sh \
+  "$HOME/.config/real-jaen-analytics/backups/$(date +%Y%m%d-%H%M%S)"
 ```
 
-El respaldo comprueba que no haya una actualización activa, detiene temporalmente los cuatro servicios para copiar una base consistente y luego los vuelve a arrancar. Incluye la SQLite deportiva, el diario de coordinación, los trabajos de Acquisition y el estado/calibraciones de Video Service. Genera `SHA256SUMS`; no incluye secretos, cookies, perfil del navegador ni catálogo externo de vídeos.
+En producción, ejecútalo desde la release que corresponde a la instalación activa y usa su `.env.prod` privado:
+
+```sh
+ENV_FILE=.env.prod sh dashboard/scripts/respaldo-instalacion.sh \
+  "$HOME/backups/real-jaen-analytics/$(date +%Y%m%d-%H%M%S)"
+```
+
+El preflight resuelve Compose con esos archivos y variables; exige que los cuatro volúmenes persistentes existan, pertenezcan al proyecto y coincidan con los mounts de los contenedores existentes. Comprueba que no haya una restauración incompleta, una actualización deportiva, un trabajo de Acquisition o un trabajo de vídeo activos. Detiene primero Dashboard, repite las comprobaciones y, si la instalación está inactiva, detiene solo los contenedores que estaban en marcha. Al terminar —también ante fallos— inicia los mismos IDs con `docker start`, primero los servicios de datos y al final Dashboard. No ejecuta `compose up`, no reconstruye ni recrea servicios. Si una comprobación previa falla, no detiene contenedores ni crea una carpeta de respaldo.
+
+El formato actual es la versión `2` del manifiesto e incluye `real-jaen.sqlite`, el diario `actualizaciones.tar`, `procedencia.tar` si existe, `acquisition-jobs.tar`, `video-service-state.tar`, `fotos.tar` si existe, `video-catalog.tar`, `copiar.json`, `manifest.json` y `SHA256SUMS`. El almacén fotográfico completo se copia desde `/state/player-photos/`, incluida `fotos.sqlite`, el historial y los blobs WebP; se excluye solo `tmp/`. `video-catalog.tar` conserva únicamente el manifiesto configurado y las calibraciones que este referencia desde `/app/data`; nunca incluye vídeos. Se comprueban la integridad SQLite, referencias, hash y tamaño de cada blob, y la igualdad de los archivos archivados. Los archivos de estado y los contenedores de origen permanecen sin cambios, salvo la copia de seguridad SQLite adicional que `persistencia copiar` crea en `/state/copias`.
+
+No se incluyen secretos ni archivos de configuración con credenciales, el volumen de perfil de Acquisition y sus cookies, la caché `.next`, el resto de archivos de `VIDEO_SERVICE_DATA_DIR`, las colecciones originales de fotos ni los vídeos originales externos. Para una restauración habrá que aportar por separado la configuración, secretos, directorios externos de importaciones, colección original de fotos y archivos de vídeo. Las calibraciones creadas por trabajos se conservan en `video-service-state.tar`; el manifiesto y las calibraciones registradas se incluyen en `video-catalog.tar`.
+
+La restauración del formato v2 está pendiente de la siguiente iteración. No uses todavía `restaurar-instalacion.sh` con estos respaldos: su versión actual no restaura `/state/player-photos`.
 
 En SINBAD², ejecútalo desde una release para que Compose use el mismo SHA de imágenes que la instalación activa y entrega la ruta privada de configuración explícitamente:
 
