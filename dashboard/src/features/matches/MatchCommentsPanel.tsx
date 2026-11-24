@@ -798,6 +798,7 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
           : item.minute === null ? "Este comentario no tiene minuto."
             : item.minute < 1 ? "Este comentario no tiene un minuto futbolístico válido."
               : !period ? "No se reconoce el periodo de este comentario." : null);
+        const locationNote = reason ?? laterReferenceEstimate(location);
         const actionName = nonlocalizable ? `Vídeo no localizable: ${reason ?? "sin posición única"}`
           : location?.status === "loading" ? "Buscando la posición aproximada en el vídeo"
             : location?.status === "error" ? `Reintentar búsqueda de vídeo para el minuto ${item.minute}`
@@ -834,6 +835,7 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
             </div>
             <div className={css.videoCardContent}>
               {comment}{score}
+              {locationNote ? <p className={css.locateMessage} role="status">{locationNote}</p> : null}
             </div>
           </> : <>
             <div className={css.when}><strong>{minuteLabel}</strong></div>
@@ -898,8 +900,17 @@ export function MatchCommentsPanel({ matchId, seasonId, homeName, awayName, prof
 }
 
 function footballClockAtMinuteTail(minute: number): string {
-  const clockSecond = Math.max(0, (minute - 1) * 60 + 40);
+  return footballClockAtSecond(Math.max(0, (minute - 1) * 60 + 40));
+}
+
+function footballClockAtSecond(value: number): string {
+  const clockSecond = Math.max(0, Math.floor(value));
   const minutes = Math.floor(clockSecond / 60);
   const seconds = clockSecond % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function laterReferenceEstimate(location: LocationState | undefined): string | null {
+  if (location?.status !== "resolved" || location.method !== "later_reference_extrapolation") return null;
+  return `Salto aproximado desde ${footballClockAtSecond(location.eventClockSecondEstimate)} del reloj futbolístico, estimado ${Math.round(location.extrapolatedSeconds)} s antes de la primera referencia OCR fiable.`;
 }

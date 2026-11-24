@@ -67,7 +67,7 @@ const events = () => within(card()).getAllByRole("listitem").map((row) => [
   row.querySelector("[class*=minute]")!.textContent, row.querySelector("strong")!.textContent,
   row.querySelector("[class*=detail]")?.textContent ?? null,
 ]);
-const NOTICE = "Algunas asistencias no se muestran porque no coinciden con las estadísticas del partido.";
+const NOTICE = "La narración menciona posibles asistencias, pero no se pueden confirmar con las estadísticas disponibles y no se atribuyen.";
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -90,10 +90,10 @@ describe("PlayerMatchEvents", () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([keitaGoal]));
     const { rerender } = render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(0)} />);
     expect(getAllEnrichedComments).toHaveBeenCalledWith("16599363", expect.objectContaining({ signal: expect.any(AbortSignal) }));
-    expect(await screen.findByText("Asistencia de David Serrano")).toBeVisible();
+    expect(await screen.findByText("Según la narración, asistencia de David Serrano")).toBeVisible();
     // Re-rendering the same match reuses the answer.
     rerender(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(0)} />);
-    expect(screen.getByText("Asistencia de David Serrano")).toBeVisible();
+    expect(screen.getByText("Según la narración, asistencia de David Serrano")).toBeVisible();
     expect(getAllEnrichedComments).toHaveBeenCalledTimes(1);
   });
 
@@ -112,9 +112,9 @@ describe("PlayerMatchEvents", () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValueOnce(page([keitaGoal]))
       .mockReturnValueOnce(new Promise((done) => { resolve = done; }));
     const { rerender } = render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(0)} />);
-    await screen.findByText("Asistencia de David Serrano");
+    await screen.findByText("Según la narración, asistencia de David Serrano");
     rerender(<PlayerMatchEvents matchId="sofascore-match-16599928" playerId={KEITA} assists={count(0)} />);
-    expect(screen.queryByText("Asistencia de David Serrano")).toBeNull();
+    expect(screen.queryByText("Según la narración, asistencia de David Serrano")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("Cargando eventos…");
     resolve(page([]));
     expect(await screen.findByText("Sin goles ni asistencias registrados en este partido.")).toBeVisible();
@@ -126,7 +126,7 @@ describe("PlayerMatchEvents", () => {
     render(<PlayerMatchEvents matchId={MATCH} playerId={SIVERIO} assists={count(0)} />);
     await screen.findByRole("region", { name: "Eventos del partido" });
     expect(events()).toEqual([
-      ["14′", "Gol de penalti", null], ["63′", "Gol", "Asistencia de Antonio Caballero"], ["69′", "Gol", "Asistencia de Moha Keita"],
+      ["14′", "Gol de penalti", null], ["63′", "Gol", "Según la narración, asistencia de Antonio Caballero"], ["69′", "Gol", "Según la narración, asistencia de Moha Keita"],
     ]);
     expect(screen.queryByText(NOTICE)).toBeNull();
   });
@@ -135,7 +135,7 @@ describe("PlayerMatchEvents", () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([keitaGoal, ownGoal, keitaAssist, cancelled]));
     render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(1)} />);
     await screen.findByRole("region", { name: "Eventos del partido" });
-    expect(events()).toEqual([["69′", "Asistencia", "Gol de Marco Siverio Toro"], ["76′", "Gol", "Asistencia de David Serrano"]]);
+    expect(events()).toEqual([["69′", "Asistencia confirmada", "Gol de Marco Siverio Toro"], ["76′", "Gol", "Según la narración, asistencia de David Serrano"]]);
     expect(screen.queryByText(NOTICE)).toBeNull();
   });
 
@@ -143,14 +143,34 @@ describe("PlayerMatchEvents", () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([keitaGoal, keitaAssist]));
     render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(0)} />);
     expect(await screen.findByText(NOTICE)).toBeVisible();
-    expect(events()).toEqual([["76′", "Gol", "Asistencia de David Serrano"]]);
+    expect(events()).toEqual([["76′", "Gol", "Según la narración, asistencia de David Serrano"]]);
   });
 
   it("shows the empty state, with the notice, when the only assists are unconfirmed", async () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([keitaAssist]));
     render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={{ value: null, reason: "not_available" }} />);
-    expect(await screen.findByText("Sin goles ni asistencias registrados en este partido.")).toBeVisible();
+    expect(await screen.findByText("No hay goles ni asistencias confirmadas que mostrar en este partido.")).toBeVisible();
     expect(screen.getByText(NOTICE)).toBeVisible();
+  });
+
+  it("reports assists in the official stat when no identifiable narrative event matches", async () => {
+    vi.mocked(getAllEnrichedComments).mockResolvedValue(page([]));
+    render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(1)} />);
+    expect(await screen.findByText(
+      "Las estadísticas oficiales indican asistencias, pero no se han podido identificar todos sus eventos; se omiten las atribuciones no confirmadas.",
+    )).toBeVisible();
+    expect(screen.queryByRole("listitem")).toBeNull();
+  });
+
+  it("labels a scorer's narrative mention without presenting it as the assistant's confirmed event", async () => {
+    vi.mocked(getAllEnrichedComments).mockResolvedValue(page([keitaAssist]));
+    const view = render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(0)} />);
+    expect(await screen.findByText(NOTICE)).toBeVisible();
+    expect(screen.queryByText("Asistencia confirmada")).toBeNull();
+
+    view.rerender(<PlayerMatchEvents matchId={MATCH} playerId={SIVERIO} assists={count(0)} />);
+    expect(await screen.findByText("Según la narración, asistencia de Moha Keita")).toBeVisible();
+    expect(screen.queryByText("Asistencia confirmada")).toBeNull();
   });
 
   it("reports an error and retries", async () => {
@@ -162,7 +182,7 @@ describe("PlayerMatchEvents", () => {
     expect(alert).toHaveTextContent("No se pudieron cargar los eventos. No se pudieron cargar todos los eventos del partido.");
     expect(screen.queryByText(/Sin goles ni asistencias/)).toBeNull();
     await userEvent.setup().click(within(alert).getByRole("button", { name: "Reintentar" }));
-    expect(await screen.findByText("Asistencia de David Serrano")).toBeVisible();
+    expect(await screen.findByText("Según la narración, asistencia de David Serrano")).toBeVisible();
     expect(getAllEnrichedComments).toHaveBeenCalledTimes(2);
   });
 
@@ -183,7 +203,7 @@ describe("PlayerMatchEvents", () => {
     await screen.findByRole("region", { name: "Eventos del partido" });
     expect(card().className).toMatch(/statBlock/);
     expect(events()).toEqual([
-      ["14′", "Gol de penalti", null], ["45+2′", "Gol", null], ["50′", "Gol", null], ["90+2′", "Asistencia", "Gol de Moha Keita"],
+      ["14′", "Gol de penalti", null], ["45+2′", "Gol", null], ["50′", "Gol", null], ["90+2′", "Asistencia confirmada", "Gol de Moha Keita"],
     ]);
     // Existing goal and assist icons, decorative here: the text already says the kind.
     const rows = within(card()).getAllByRole("listitem");
@@ -197,7 +217,7 @@ describe("PlayerMatchEvents", () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([keitaGoal]));
     render(<PlayerMatchEvents matchId={MATCH} playerId={KEITA} assists={count(0)} />);
     expect(await screen.findByText("Este partido no tiene vídeo asociado.")).toBeVisible();
-    expect(screen.getByText("Asistencia de David Serrano")).toBeVisible();
+    expect(screen.getByText("Según la narración, asistencia de David Serrano")).toBeVisible();
     expect(getMatchVideo).toHaveBeenCalledWith(MATCH, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.queryByTestId("video-player")).toBeNull();
@@ -241,7 +261,7 @@ describe("Eventos in the player profile", () => {
     const detail = screen.getByRole("region", { name: "Detalle del partido" });
     expect(within(detail).getByRole("heading", { level: 3, name: "Eventos" })).toBeVisible();
     await screen.findByRole("region", { name: "Eventos del partido" });
-    expect(events()).toEqual([["69′", "Asistencia", "Gol de Marco Siverio Toro"], ["76′", "Gol", "Asistencia de David Serrano"]]);
+    expect(events()).toEqual([["69′", "Asistencia confirmada", "Gol de Marco Siverio Toro"], ["76′", "Gol", "Según la narración, asistencia de David Serrano"]]);
     expect(within(detail).getByRole("region", { name: "Eventos" })).toBeVisible();
     // Only the open match: the other call-up's detail is not mounted, so it requests nothing.
     expect(getAllEnrichedComments).toHaveBeenCalledTimes(1);
@@ -253,11 +273,11 @@ describe("Eventos in the player profile", () => {
       eventId === "16599363" ? page([keitaGoal, keitaAssist]) : page([goal(32, 90, [
         participant("player", "scorer", 1010341, "Peque Polo"), participant("assist1", "assistant", 966303, "Moha Keita")])]));
     await profile([base, other]);
-    await screen.findByText("Asistencia de David Serrano");
+    await screen.findByText("Según la narración, asistencia de David Serrano");
     await userEvent.setup().click(screen.getByRole("button", { name: /^Seleccionar J11/ }));
-    expect(screen.queryByText("Asistencia de David Serrano")).toBeNull();
+    expect(screen.queryByText("Según la narración, asistencia de David Serrano")).toBeNull();
     // Moha Keita, 16599928: the assist is not in his official stats.
-    expect(await screen.findByText("Sin goles ni asistencias registrados en este partido.")).toBeVisible();
+    expect(await screen.findByText("No hay goles ni asistencias confirmadas que mostrar en este partido.")).toBeVisible();
     expect(screen.getByText(NOTICE)).toBeVisible();
     expect(getAllEnrichedComments).toHaveBeenLastCalledWith("16599928", expect.anything());
     await waitFor(() => expect(getAllEnrichedComments).toHaveBeenCalledTimes(2));
@@ -318,7 +338,7 @@ describe("Event playback", () => {
     vi.mocked(getAllEnrichedComments).mockResolvedValue(page([penalty, stoppage, assist]));
     render(<PlayerMatchEvents matchId={MATCH} playerId={SIVERIO} assists={count(1)} />);
     expect((await screen.findAllByRole("button")).map((button) => button.getAttribute("aria-label"))).toEqual([
-      "Reproducir gol de penalti del minuto 14", "Reproducir gol del minuto 45+2", "Reproducir asistencia del minuto 90+2",
+      "Reproducir gol de penalti del minuto 14", "Reproducir gol del minuto 45+2", "Reproducir asistencia confirmada del minuto 90+2",
     ]);
   });
 
@@ -329,7 +349,7 @@ describe("Event playback", () => {
     render(<PlayerMatchEvents matchId={MATCH} playerId={SIVERIO} assists={count(0)} />);
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("No se pudo consultar el vídeo del partido. No se pudo consultar el servicio de vídeo.");
-    expect(screen.getByText("Asistencia de Antonio Caballero")).toBeVisible();
+    expect(screen.getByText("Según la narración, asistencia de Antonio Caballero")).toBeVisible();
     await userEvent.setup().click(within(alert).getByRole("button", { name: "Reintentar" }));
     expect(await screen.findByRole("button", { name: "Reproducir gol del minuto 63" })).toBeVisible();
     expect(getMatchVideo).toHaveBeenCalledTimes(2);
@@ -568,7 +588,7 @@ describe("Event playback across matches in the player profile", () => {
       confidence: { ocr: "high", period: "high", location: "high" }, warnings: [] });
     await new Promise((done) => setTimeout(done, 0));
     expect(screen.queryByTestId("video-player")).toBeNull();
-    expect(screen.queryByText("Asistencia de Antonio Caballero")).toBeNull();
+    expect(screen.queryByText("Según la narración, asistencia de Antonio Caballero")).toBeNull();
     expect(youtube.mounts).toBe(0);
   });
 

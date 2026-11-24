@@ -12,8 +12,12 @@ import { periodFor } from "@/features/matches/event-video-location";
 
 export type PlayerMatchEventKind = "goal" | "penalty_goal" | "assist";
 
-/** The other participant of the event: the assistant of a goal, the scorer of an assist. */
-export type RelatedPlayer = { id: string; name: string | null };
+/** The other participant, with the evidence level made explicit in the UI. */
+export type RelatedPlayer = {
+  id: string;
+  name: string | null;
+  attribution: "narrative" | "confirmed";
+};
 
 export type PlayerMatchEvent = {
   /** Stable: the source event (capture + comment id) and the kind. */
@@ -31,6 +35,8 @@ export type PlayerMatchEventsResult = {
   events: PlayerMatchEvent[];
   /** Candidate assists hidden because the official assist count does not confirm them. */
   omittedAssists: number;
+  /** Officially reported assists for which the narrative has no matching identified event. */
+  unidentifiedOfficialAssists: number;
 };
 
 const PLAYER_ID = /^sofascore-player-[1-9]\d*$/;
@@ -44,8 +50,10 @@ function identified(participant: EnrichedParticipant): participant is EnrichedPa
   return participant.player !== null && PLAYER_ID.test(participant.player.id);
 }
 
-function related(participant: EnrichedParticipant | null): RelatedPlayer | null {
-  return participant && identified(participant) ? { id: participant.player.id, name: participant.name } : null;
+function related(participant: EnrichedParticipant | null, attribution: RelatedPlayer["attribution"]): RelatedPlayer | null {
+  return participant && identified(participant)
+    ? { id: participant.player.id, name: participant.name, attribution }
+    : null;
 }
 
 type ValidGoal = {
@@ -93,6 +101,8 @@ function officialCount(stat: Stat | null | undefined): number | null {
  * - Assists: the candidates (assistant of a valid ordinary goal, not ambiguous)
  *   are shown only when their number equals the official `assists` stat; otherwise
  *   all are omitted (none is picked to fit) and counted in `omittedAssists`.
+ *   An official count higher than the identified narrative candidates is reported
+ *   separately as `unidentifiedOfficialAssists`.
  *   Goals never depend on that check.
  */
 export function playerMatchEvents(items: readonly EnrichedComment[], playerId: string, officialAssists: Stat | null | undefined): PlayerMatchEventsResult {
@@ -108,7 +118,7 @@ export function playerMatchEvents(items: readonly EnrichedComment[], playerId: s
     if (!goal) continue;
     const base = { minute: item.minute, period: periodFor(item.periodName), item };
     if (goal.scorer.player.id === playerId) {
-      goals.push({ ...base, key: `${eventKey}:${goal.kind}`, kind: goal.kind, related: related(goal.assistant) });
+      goals.push({ ...base, key: `${eventKey}:${goal.kind}`, kind: goal.kind, related: related(goal.assistant, "narrative") });
       continue;
     }
     if (goal.kind !== "goal") continue;
@@ -116,14 +126,15 @@ export function playerMatchEvents(items: readonly EnrichedComment[], playerId: s
       participant.sourceRole === "assist1" && participant.role === "assistant" && identified(participant) && participant.player.id === playerId);
     if (!assistedBy.length) continue;
     if (goal.ambiguousAssist) unconfirmable = true;
-    assists.push({ ...base, key: `${eventKey}:assist`, kind: "assist", related: related(goal.scorer) });
+    assists.push({ ...base, key: `${eventKey}:assist`, kind: "assist", related: related(goal.scorer, "confirmed") });
   }
   const official = officialCount(officialAssists);
   const confirmed = !unconfirmable && official !== null && official === assists.length;
   const events = confirmed ? [...goals, ...assists] : goals;
+  const unidentifiedOfficialAssists = confirmed || official === null ? 0 : Math.max(0, official - assists.length);
   // Higher source position = earlier in the match (the match timeline's order).
   events.sort((left, right) => right.item.position - left.item.position || kindOrder(left.kind) - kindOrder(right.kind));
-  return { events, omittedAssists: confirmed ? 0 : assists.length };
+  return { events, omittedAssists: confirmed ? 0 : assists.length, unidentifiedOfficialAssists };
 }
 
 function kindOrder(kind: PlayerMatchEventKind): number {

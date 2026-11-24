@@ -62,13 +62,18 @@ function Content({ matchId, eventId, comments, video, playerId, assists }: {
     <Button size="sm" onClick={comments.retry}>Reintentar</Button>
   </div>;
   if (!comments.data) return <LoadingState variant="inline" label="Cargando eventos…" />;
-  const { events, omittedAssists } = playerMatchEvents(comments.data.items, playerId, assists);
+  const { events, omittedAssists, unidentifiedOfficialAssists } = playerMatchEvents(comments.data.items, playerId, assists);
+  const assistNotice = omittedAssists > 0 || unidentifiedOfficialAssists > 0;
   return <>
     {events.length
       ? <EventsWithVideo matchId={matchId} events={events} video={video} />
-      : <p className={shared.message} role="status">Sin goles ni asistencias registrados en este partido.</p>}
-    {omittedAssists > 0
-      ? <p className={css.notice}>Algunas asistencias no se muestran porque no coinciden con las estadísticas del partido.</p>
+      : <p className={shared.message} role="status">{assistNotice
+        ? "No hay goles ni asistencias confirmadas que mostrar en este partido."
+        : "Sin goles ni asistencias registrados en este partido."}</p>}
+    {assistNotice
+      ? <p className={css.notice} role="status">{unidentifiedOfficialAssists > 0
+        ? "Las estadísticas oficiales indican asistencias, pero no se han podido identificar todos sus eventos; se omiten las atribuciones no confirmadas."
+        : "La narración menciona posibles asistencias, pero no se pueden confirmar con las estadísticas disponibles y no se atribuyen."}</p>
       : null}
   </>;
 }
@@ -197,8 +202,8 @@ function EventsWithVideo({ matchId, events, video }: {
   </>;
 }
 
-const KIND_LABEL: Record<PlayerMatchEvent["kind"], string> = { goal: "Gol", penalty_goal: "Gol de penalti", assist: "Asistencia" };
-const KIND_SPOKEN: Record<PlayerMatchEvent["kind"], string> = { goal: "gol", penalty_goal: "gol de penalti", assist: "asistencia" };
+const KIND_LABEL: Record<PlayerMatchEvent["kind"], string> = { goal: "Gol", penalty_goal: "Gol de penalti", assist: "Asistencia confirmada" };
+const KIND_SPOKEN: Record<PlayerMatchEvent["kind"], string> = { goal: "gol", penalty_goal: "gol de penalti", assist: "asistencia confirmada" };
 
 /** Match-clock reading: stoppage time as 45+N (first half) and 90+N (second half). */
 function minuteLabel({ minute, period }: PlayerMatchEvent): string {
@@ -211,6 +216,8 @@ function minuteLabel({ minute, period }: PlayerMatchEvent): string {
 /** The other participant, only when the event names one: never invented. */
 function related(event: PlayerMatchEvent): string | null {
   const name = event.related?.name ?? null;
-  if (!name || event.kind === "penalty_goal") return null;
-  return event.kind === "goal" ? `Asistencia de ${name}` : `Gol de ${name}`;
+  if (!name || !event.related || event.kind === "penalty_goal") return null;
+  return event.related.attribution === "narrative"
+    ? `Según la narración, asistencia de ${name}`
+    : `Gol de ${name}`;
 }

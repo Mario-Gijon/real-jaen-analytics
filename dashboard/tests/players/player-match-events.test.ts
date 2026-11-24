@@ -50,9 +50,10 @@ describe("playerMatchEvents", () => {
     ]);
   });
 
-  it("3. gives a goal with an assistant the assistant as related player", () => {
+  it("3. labels the scorer's assistant as narrative evidence, not as a confirmed assist", () => {
     const item = goal([scorer(KEITA, "Moha Keita"), assistant(SERRANO, "David Serrano")]);
-    expect(playerMatchEvents([item], id(KEITA), count(0)).events[0].related).toEqual({ id: id(SERRANO), name: "David Serrano" });
+    expect(playerMatchEvents([item], id(KEITA), count(0)).events[0].related)
+      .toEqual({ id: id(SERRANO), name: "David Serrano", attribution: "narrative" });
   });
 
   it("4. gives a goal without an assistant no related player", () => {
@@ -64,29 +65,39 @@ describe("playerMatchEvents", () => {
     const item = goal([scorer(SIVERIO, "Marco Siverio Toro"), assistant(KEITA, "Moha Keita")]);
     const { events, omittedAssists } = playerMatchEvents([item], id(KEITA), count(1));
     expect(events).toEqual([expect.objectContaining({ kind: "assist", key: `7-string-${item.id}:assist`,
-      related: { id: id(SIVERIO), name: "Marco Siverio Toro" } })]);
+      related: { id: id(SIVERIO), name: "Marco Siverio Toro", attribution: "confirmed" } })]);
     expect(omittedAssists).toBe(0);
   });
 
   it("6. omits an assist the official count does not confirm (Moha Keita, 16599928)", () => {
     const item = goal([scorer(POLO, "Peque Polo"), assistant(KEITA, "Moha Keita")], { minute: 32 });
-    expect(playerMatchEvents([item], id(KEITA), count(0))).toEqual({ events: [], omittedAssists: 1 });
+    expect(playerMatchEvents([item], id(KEITA), count(0))).toEqual({ events: [], omittedAssists: 1, unidentifiedOfficialAssists: 0 });
   });
 
   it("7. never picks some candidates to fit a different official count", () => {
     const items = [goal([scorer(SIVERIO), assistant(KEITA)]), goal([scorer(POLO), assistant(KEITA)])];
-    expect(playerMatchEvents(items, id(KEITA), count(1))).toEqual({ events: [], omittedAssists: 2 });
-    expect(playerMatchEvents(items, id(KEITA), count(3))).toEqual({ events: [], omittedAssists: 2 });
+    expect(playerMatchEvents(items, id(KEITA), count(1))).toEqual({ events: [], omittedAssists: 2, unidentifiedOfficialAssists: 0 });
+    expect(playerMatchEvents(items, id(KEITA), count(3))).toEqual({ events: [], omittedAssists: 2, unidentifiedOfficialAssists: 1 });
     expect(playerMatchEvents(items, id(KEITA), count(2)).events).toHaveLength(2);
   });
 
   it("8. cannot confirm assists without a usable official count, never reading it as 0", () => {
     const items = [goal([scorer(SIVERIO), assistant(KEITA)])];
     for (const stat of [missing, { value: null, reason: "inconsistent" } as Stat, null, undefined, count(-1), count(0.5), count(Number.NaN)]) {
-      expect(playerMatchEvents(items, id(KEITA), stat), JSON.stringify(stat)).toEqual({ events: [], omittedAssists: 1 });
+      expect(playerMatchEvents(items, id(KEITA), stat), JSON.stringify(stat)).toEqual({ events: [], omittedAssists: 1, unidentifiedOfficialAssists: 0 });
     }
     // No candidate: nothing is hidden, whatever the count.
-    expect(playerMatchEvents([], id(KEITA), missing)).toEqual({ events: [], omittedAssists: 0 });
+    expect(playerMatchEvents([], id(KEITA), missing)).toEqual({ events: [], omittedAssists: 0, unidentifiedOfficialAssists: 0 });
+  });
+
+  it("reports official assists when the narrative has no identifiable matching events", () => {
+    expect(playerMatchEvents([], id(KEITA), count(2))).toEqual({
+      events: [], omittedAssists: 0, unidentifiedOfficialAssists: 2,
+    });
+    const noId = goal([scorer(SIVERIO), assistant(null, "Moha Keita")]);
+    expect(playerMatchEvents([noId], id(KEITA), count(1))).toEqual({
+      events: [], omittedAssists: 0, unidentifiedOfficialAssists: 1,
+    });
   });
 
   it("9. never credits an own goal (own_goal_author) as a goal", () => {
@@ -98,7 +109,7 @@ describe("playerMatchEvents", () => {
   it("10. never credits the assistant of an own goal", () => {
     const ownGoal = event({ goal: { goal_kind: "own_goal" },
       participants: [{ ...scorer(1163260), role: "own_goal_author", normalizerRole: "scorer" }, assistant(904135)] });
-    expect(playerMatchEvents([ownGoal], id(904135), count(1))).toEqual({ events: [], omittedAssists: 0 });
+    expect(playerMatchEvents([ownGoal], id(904135), count(1))).toEqual({ events: [], omittedAssists: 0, unidentifiedOfficialAssists: 1 });
     // Even if its kind were missing, the own-goal role alone excludes it.
     const unlabelled = { ...ownGoal, attributes: { goal_status: "valid", goal_kind: "ordinary" } };
     expect(playerMatchEvents([unlabelled], id(904135), count(1)).events).toEqual([]);
@@ -109,7 +120,7 @@ describe("playerMatchEvents", () => {
       goal: { goal_status: "disallowed", goal_kind: null },
       participants: [participant("player", "disallowed_scorer", 1634376), participant("assist1", "disallowed_goal_assistant", 1596558)] });
     expect(kinds([cancelled], 1634376)).toEqual([]);
-    expect(playerMatchEvents([cancelled], id(1596558), count(1))).toEqual({ events: [], omittedAssists: 0 });
+    expect(playerMatchEvents([cancelled], id(1596558), count(1))).toEqual({ events: [], omittedAssists: 0, unidentifiedOfficialAssists: 1 });
     // A goal whose status or kind is not exactly valid/ordinary is excluded too.
     const incomplete: EnrichedComment["attributes"][] = [{ goal_status: null, goal_kind: "ordinary" }, { goal_status: "valid", goal_kind: null }, {}];
     for (const attributes of incomplete) {
@@ -133,7 +144,7 @@ describe("playerMatchEvents", () => {
 
   it("14. attributes nothing to another player, and never by name", () => {
     const items = [goal([scorer(SIVERIO, "Moha Keita"), assistant(SERRANO, "Moha Keita")])];
-    expect(playerMatchEvents(items, id(KEITA), count(1))).toEqual({ events: [], omittedAssists: 0 });
+    expect(playerMatchEvents(items, id(KEITA), count(1))).toEqual({ events: [], omittedAssists: 0, unidentifiedOfficialAssists: 1 });
   });
 
   it("15. reads each role of a multi-participant event, and gives one row when the player has two roles", () => {
@@ -143,11 +154,11 @@ describe("playerMatchEvents", () => {
     expect(kinds([item], POLO, count(1))).toEqual([]);
     // Scorer and assistant at once: the goal wins; no assist candidate is counted.
     const both = goal([scorer(KEITA), assistant(KEITA)]);
-    expect(playerMatchEvents([both], id(KEITA), count(0))).toEqual({ events: [expect.objectContaining({ kind: "goal" })], omittedAssists: 0 });
+    expect(playerMatchEvents([both], id(KEITA), count(0))).toEqual({ events: [expect.objectContaining({ kind: "goal" })], omittedAssists: 0, unidentifiedOfficialAssists: 0 });
     // Two scorer slots, or two assistants: not attributable.
     expect(kinds([goal([scorer(KEITA), scorer(SIVERIO)])], KEITA)).toEqual([]);
     expect(playerMatchEvents([goal([scorer(SIVERIO), assistant(KEITA), assistant(SERRANO)])], id(KEITA), count(1)))
-      .toEqual({ events: [], omittedAssists: 1 });
+      .toEqual({ events: [], omittedAssists: 1, unidentifiedOfficialAssists: 0 });
   });
 
   it("16. keeps one row per source event: a repeated event id is a duplicate, the same minute is not", () => {
@@ -196,6 +207,6 @@ describe("playerMatchEvents", () => {
     const card = event({ originalType: "yellowCard", category: "discipline", attributes: {}, participants: [participant("player", "booked_player", SIVERIO)] });
     const awarded = event({ originalType: "penaltyAwarded", category: "penalty", attributes: {}, participants: [participant("player", "penalty_foul_recipient", SIVERIO)] });
     const scored = penalty(ADRI, { participants: [participant("player", "penalty_scorer", ADRI), participant("assist1", null, SIVERIO)] });
-    expect(playerMatchEvents([shot, card, awarded, scored], id(SIVERIO), count(1))).toEqual({ events: [], omittedAssists: 0 });
+    expect(playerMatchEvents([shot, card, awarded, scored], id(SIVERIO), count(1))).toEqual({ events: [], omittedAssists: 0, unidentifiedOfficialAssists: 1 });
   });
 });

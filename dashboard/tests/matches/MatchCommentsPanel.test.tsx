@@ -142,8 +142,8 @@ describe("MatchCommentsPanel unified events", () => {
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
     expect(await screen.findByTestId("video-player")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getAllByTitle("Salto aproximado desde 06:40 del reloj futbolístico")).toHaveLength(2));
-    await waitFor(() => expect(screen.getByTitle("Salto aproximado desde 07:40 del reloj futbolístico")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /reproducción desde el reloj 06:40/i })).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: /reproducción desde el reloj 07:40/i })).toBeInTheDocument());
     expect(locateMatchVideoEvent).toHaveBeenCalledTimes(3);
 
     const earlierCard = screen.getByText("Evento anterior.").closest("li");
@@ -177,7 +177,7 @@ describe("MatchCommentsPanel unified events", () => {
       resolvedLocation(minute === "5" ? 100 : 200));
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
-    await waitFor(() => expect(screen.getAllByTitle("Salto aproximado desde 04:40 del reloj futbolístico")).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: /reproducción desde el reloj 04:40/i })).toHaveLength(3));
     const list = screen.getByRole("list", { name: "Eventos en orden cronológico" });
     const secondCard = screen.getByText("Segundo remate.").closest("li")!;
     const thirdCard = screen.getByText("Tercer remate.").closest("li")!;
@@ -229,7 +229,7 @@ describe("MatchCommentsPanel unified events", () => {
       resolvedLocation(minute === "7" ? 100 : 200));
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
-    await waitFor(() => expect(screen.getByTitle("Salto aproximado desde 07:40 del reloj futbolístico")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /reproducción desde el reloj 07:40/i })).toBeInTheDocument());
 
     const list = screen.getByRole("list", { name: "Eventos en orden cronológico" });
     const beforeCard = screen.getByText("Evento del minuto 7.").closest("li")!;
@@ -285,7 +285,7 @@ describe("MatchCommentsPanel unified events", () => {
       resolvedLocation(minute === "7" ? 100 : 200));
 
     render(<MatchCommentsPanel matchId="sofascore-match-16599928" />);
-    await waitFor(() => expect(screen.getByTitle("Salto aproximado desde 07:40 del reloj futbolístico")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /reproducción desde el reloj 07:40/i })).toBeInTheDocument());
 
     const list = screen.getByRole("list", { name: "Eventos en orden cronológico" });
     const beforeCard = screen.getByText("Evento del minuto 7.").closest("li")!;
