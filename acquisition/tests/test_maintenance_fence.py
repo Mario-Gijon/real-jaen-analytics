@@ -4,7 +4,7 @@ import unittest
 import uuid
 
 from acquisition.service import Conflict, Jobs
-from persistencia.bundle import fingerprint
+from acquisition.protocol import fingerprint
 
 
 def inventory():

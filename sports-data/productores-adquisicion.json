@@ -56,6 +56,11 @@
       "rules_sha256": "73c9765c7c5058fbf330f7549b4969153a6bfab12dc4bea95b855e9fb8c49847",
       "productor": "Acquisition incorpora su propia copia funcional del planificador Grupo 2 y usa las proyecciones mínimas locales del bundle",
       "uso": "Mismas reglas deportivas, alcance y límites que la versión previa; único cambio en la frontera de imports del planificador"
+    },
+    {
+      "rules_sha256": "8a657cc296bb8338979b595ffa7dc6ab05297dcbe956757f0f6374e68de5298f",
+      "productor": "Acquisition valida sus propios paquetes y comentarios con módulos locales de protocolo, sin persistencia de Sports Data",
+      "uso": "Mismos contratos históricos, alcance, límites y reglas deportivas; verificación independiente de paquetes y respuestas narrativas"
     }
   ]
 }

@@ -86,7 +86,7 @@ def create_app(*, jobs=None, token=None):
                 return _response(401, {'error': 'unauthorized'})
 
             if post and target == PREFIX:
-                from persistencia.bundle import parse
+                from .protocol import parse
                 length = int(request.headers.get('content-length', '0'))
                 data = parse(await _body(request, length))
                 if (not isinstance(data, dict) or set(data) != {'request_id', 'operation_id', 'recipe_id', 'inventory'}

@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from .profile import atomic_json
-from persistencia.bundle import PATHS, encode, fingerprint, parse
+from .protocol import PATHS, encode, fingerprint, parse
 
 
 def iso(at):return datetime.fromtimestamp(at,timezone.utc).isoformat()

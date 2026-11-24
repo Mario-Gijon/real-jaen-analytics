@@ -31,11 +31,10 @@ RUN rm -rf /opt/probe \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/analyst --shell /usr/sbin/nologin analyst \
     && mkdir -p /profiles /acquisition-jobs \
     && chown -R 10001:10001 /home/analyst /profiles /acquisition-jobs
-COPY --from=implementation / /opt/app/acquisition/
-COPY --from=backend persistencia/bundle.py persistencia/comentarios.py persistencia/bloqueo.py /opt/app/persistencia/
+COPY src/acquisition/ /opt/app/acquisition/
 COPY requirements-acquisition.txt /opt/requirements-acquisition.txt
 WORKDIR /opt/app
-ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/app/acquisition/bundle_compat HOME=/home/analyst
+ENV PYTHONPATH=/opt/app:/opt/scraper HOME=/home/analyst
 RUN python -m pip check \
     && python -c "from importlib.metadata import version; required = dict(line.strip().split('==', 1) for line in open('/opt/requirements-acquisition.txt') if line.strip() and not line.lstrip().startswith('#')); assert all(version(package) == expected for package, expected in required.items())"
 USER 10001:10001
@@ -45,7 +44,5 @@ CMD ["acquisition.app:app", "--host", "0.0.0.0", "--port", "8002", "--workers", 
 
 # Test-only source files are added only when an explicit test target is requested.
 FROM runtime AS test
-COPY --from=checks / /opt/checks/
-COPY --from=backend persistencia/adquisicion.py /opt/checks/persistencia/
-COPY --from=backend productores-adquisicion.json /opt/checks/
-ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/app/acquisition/bundle_compat:/opt/checks
+COPY tests/ /opt/checks/
+ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/checks

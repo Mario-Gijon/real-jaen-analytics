@@ -130,7 +130,7 @@ def run(folder):
     from acquisition import group_plan
     from acquisition.recipe import GroupScope, collect, collect_group, seed_cache
     from acquisition.transport import SdkTransport
-    from persistencia.bundle import GROUP_RECIPE, PATHS, encode, parse
+    from .protocol import GROUP_RECIPE, PATHS, encode, parse
     from sofascore_scraper.store import Store
 
     baseline = parse((folder / 'inventory.json').read_bytes())

@@ -104,7 +104,7 @@ class Jobs:
             c.execute('UPDATE job SET state=?,data=? WHERE id=?', (item['state'], json.dumps(item), item['id']))
 
     def submit(self, request, recipe, inventory, operation_id):
-        from persistencia.bundle import check_inventory, encode
+        from .protocol import check_inventory, encode
         try:
             if str(uuid.UUID(operation_id)) != operation_id:
                 raise ValueError()

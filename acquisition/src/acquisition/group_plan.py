@@ -27,7 +27,7 @@ from datetime import datetime
 
 from .bundle_compat.api import vacia
 from .bundle_compat.importar import evento_de, rasgos_evento
-from persistencia.bundle import (GROUP_RECIPE as RECIPE, ROUND_NUMBERS as ROUNDS, SECTIONS, SEASON, TOURNAMENT,
+from .protocol import (GROUP_RECIPE as RECIPE, ROUND_NUMBERS as ROUNDS, SECTIONS, SEASON, TOURNAMENT,
                                  UNIQUE_TOURNAMENT, event_path, round_path)
 
 # The SDK's RefreshSettings defaults (window_hours=72, min_interval_hours=6); parity checked against refresh_due.
@@ -157,7 +157,7 @@ def round_listings(transport_root):
     (one JSON per job with its attempts). Operational memory for the rotation only, never published data."""
     import json
     from pathlib import Path
-    from persistencia.bundle import ROUND_PATHS
+    from .protocol import ROUND_PATHS
     seen = {}
     for path in Path(transport_root).glob('*.json'):
         if path.name == 'retry.json':

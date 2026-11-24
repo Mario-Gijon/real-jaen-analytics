@@ -15,15 +15,14 @@ import shutil
 
 from .transport import Stopped, iso
 from .profile import sync_dir
-from persistencia.bundle import (MAX_COMMENTS_FILE, MAX_LINE, PATHS, PILOT, SECTIONS, check_inventory, encode,
+from .protocol import (MAX_COMMENTS_FILE, MAX_LINE, PATHS, PILOT, SECTIONS, check_inventory, encode,
                                  fingerprint, record, sha, verify)
 
 REVISION='611e436a1528b0f487aa56a045f023e8ae8ae098'
 
 def producer_rules():
     names=('recipe.py','group_plan.py','transport.py','sdk_adapter.py','operation_budget.py','service.py','app.py','job.py',
-           'bundle_compat/__init__.py','bundle_compat/api.py','bundle_compat/importar.py',
-           '../persistencia/bundle.py','../persistencia/comentarios.py')
+           'bundle_compat/__init__.py','bundle_compat/api.py','bundle_compat/importar.py','protocol.py','narrative.py')
     sources={n:sha((Path(__file__).parent/n).resolve().read_bytes()) for n in names}
     return fingerprint(dict(sources=sources,scraper=REVISION,
                             policy=dict(window_s=259200,interval_s=21600,recent_rounds_max=3,
@@ -188,17 +187,17 @@ def assemble(store,baseline,transport,workspace):
 
 # --- Group 2 recipe (sofascore-group2-2627-v1) -----------------------------------------------------------------
 # Same collection as the pilot (seeded cache, backups, sealing, re-verification without network); the plan decides
-# what to ask (acquisition/group_plan.py) and the bundle carries partial coverage (persistencia/bundle.py,
+# what to ask (acquisition/group_plan.py) and the bundle carries partial coverage (acquisition/protocol.py,
 # _verify_group). Design: docs/diseno-receta-grupo2.md.
 
 class GroupScope:
     """Allowlist of one group job: the rounds of its plan, then the event paths of the matches it decided to consult
     (inventory matches or matches of the scope seen in one of its listed rounds). Nothing else is ever sent."""
     def __init__(self,rounds):
-        from persistencia.bundle import round_path
+        from .protocol import round_path
         self.paths={round_path(n) for n in rounds}
     def admit(self,ident,keys):
-        from persistencia.bundle import event_path
+        from .protocol import event_path
         self.paths.update(event_path(ident,k) for k in ('event',*keys))
     def admit_comments(self, ident, known_ids):
         if type(ident) is not int or ident not in known_ids:
@@ -216,7 +215,7 @@ class GroupListing:
     async def run(self,item,get,write):
         from sofascore_scraper.services.pipeline import ItemResult
         from sofascore_scraper.services.listing import ScheduleLister, round_is_complete
-        from persistencia.bundle import round_path
+        from .protocol import round_path
         from .group_plan import in_scope
         lister=ScheduleLister(self.store,only_finished=False,concurrency=1)
         for number in self.rounds:
@@ -268,7 +267,7 @@ def _group_cached_events(store, ids, workspace):
 async def _collect_group_comments(store,transport,scope,baseline,output,*,listing,planned,attempt_limit,
                                  detail_rounds):
     """Backfill one request at a time inside the existing Group 2 job and its remaining shared budget."""
-    from persistencia.bundle import sha
+    from .protocol import sha
     from sofascore_scraper.status import classify_status
     from sofascore_scraper.services.planning import phase_of
     from .group_plan import SEND_RESERVE, matches as planned_matches, round_of
@@ -342,7 +341,7 @@ async def _collect_group_comments(store,transport,scope,baseline,output,*,listin
         valid=False;reason=None
         if latest['status']==200 and raw is not None:
             try:
-                from persistencia.comentarios import validar_respuesta
+                from .narrative import validar_respuesta
                 validar_respuesta(raw)
                 valid=True
             except (ValueError,UnicodeError):
@@ -387,7 +386,7 @@ def collect_group(store,transport,scope,baseline,output,*,now,cancelled=lambda:F
     from sofascore_scraper.services.pipeline import FetchPipeline
     from sofascore_scraper.services.planning import WorkItem
     from sofascore_scraper.store import Ref
-    from persistencia.bundle import verify as verify_bundle
+    from .protocol import verify as verify_bundle
     from .group_plan import (DEFAULT_RECENT_ROUNDS, MAX_ATTEMPTS, MAX_SENDS, MAX_HISTORICAL_RECOVERIES,
                              PLANNED_ATTEMPTS, SEND_RESERVE, plan_matches, reference_round, recent_rounds as window,
                              rounds_to_list)
@@ -520,7 +519,7 @@ def assemble_group(store,baseline,transport,workspace,*,now,listing,planned,defe
     from sofascore_scraper.status import classify_status
     from sofascore_scraper.services.planning import phase_of
     from sofascore_scraper.store import EventQuery,Scope
-    from persistencia.bundle import event_path, pending_reason, round_path
+    from .protocol import event_path, pending_reason, round_path
     from .group_plan import new_matches
     import tempfile
     expected=check_inventory(baseline)

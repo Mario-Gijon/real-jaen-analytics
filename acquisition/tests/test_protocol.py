@@ -1,6 +1,6 @@
-"""Contract of the acquisition FastAPI and its backend client: loopback HTTP, fake runner, no SDK or network.
+"""Contract of the acquisition FastAPI: loopback HTTP, fake runner, no SDK or network.
 
-Runs in the acquisition test image (the service needs fcntl and persistencia.bundle)."""
+Runs in the acquisition test image."""
 import hashlib
 import json
 from pathlib import Path
@@ -21,11 +21,65 @@ except ImportError as exc:
 
 from acquisition.app import create_app
 from acquisition.service import Jobs, PREFIX, configuration
-from persistencia.adquisicion import AdquisicionRechazada, Cliente
-from persistencia.bundle import fingerprint
+from acquisition.protocol import encode, fingerprint
 
 RECIPE = 'sofascore-pilot-16599363-v1'
 GROUP_RECIPE = 'sofascore-group2-2627-v1'
+
+
+class ClientRejected(RuntimeError):
+    """An HTTP request was rejected by the Acquisition service."""
+
+
+class HttpFixtureClient:
+    """Small test-only HTTP helper; production clients remain owned by Sports Data."""
+    def __init__(self, url, token):
+        self.url = url + PREFIX
+        self.token = token
+
+    def _request(self, method, suffix='', data=None):
+        body = encode(data) if data is not None else (b'' if method == 'POST' else None)
+        request = urllib.request.Request(self.url + suffix, data=body, method=method, headers={
+            'Authorization': 'Bearer ' + self.token.decode('ascii'), 'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.read(), response.headers.get('ETag', '')
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise ClientRejected(f'HTTP {error.code}') from None
+
+    def _json(self, method, suffix='', data=None):
+        return json.loads(self._request(method, suffix, data)[0])
+
+    def solicitar(self, request_id, recipe_id, inventory, operation_id=None):
+        return self._json('POST', data=dict(request_id=request_id, operation_id=operation_id or request_id,
+                                            recipe_id=recipe_id, inventory=inventory))
+
+    def estado(self, ident):
+        return self._json('GET', '/' + ident)
+
+    def informe(self, ident):
+        return self._json('GET', '/' + ident + '/report')
+
+    def cancelar(self, ident):
+        return self._json('POST', '/' + ident + '/cancel')
+
+    def esperar(self, ident, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.estado(ident)
+            if state['state'] not in ('queued', 'running', 'cancelling'):
+                return state
+            time.sleep(.02)
+        raise ClientRejected('Job remains active')
+
+    def descargar(self, ident, descriptor):
+        body, etag = self._request('GET', '/' + ident + '/bundle')
+        if (set(descriptor) != {'bytes', 'sha256'} or len(body) != descriptor['bytes']
+                or hashlib.sha256(body).hexdigest() != descriptor['sha256']
+                or etag != '"' + descriptor['sha256'] + '"'):
+            raise ClientRejected('Bundle descriptor mismatch')
+        return body
 
 
 def baseline(generation=None):
@@ -69,8 +123,6 @@ class Protocol(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.token = b'a' * 64
-        self.file = self.root / 'secret'
-        self.file.write_bytes(self.token)
         self.servers = []
         self.addCleanup(self.stop_all)
         self.runner = Runner()
@@ -93,7 +145,7 @@ class Protocol(unittest.TestCase):
             time.sleep(.01)
         self.assertTrue(self.server.started, 'Uvicorn did not start')
         self.url = f'http://127.0.0.1:{port}'
-        self.client = Cliente(self.url, self.file, modo='prueba')
+        self.client = HttpFixtureClient(self.url, self.token)
 
     def stop_all(self):
         for server, thread, runner in self.servers:
@@ -157,7 +209,7 @@ class Protocol(unittest.TestCase):
         self.assertEqual(raw_bundle, (self.jobs.root / 'work' / state['id'] / 'bundle.json').read_bytes())
         body = self.client.descargar(state['id'], state['bundle'])
         self.assertEqual(json.loads(body)['request'], request)
-        with self.assertRaises(AdquisicionRechazada):
+        with self.assertRaises(ClientRejected):
             self.client.descargar(state['id'], dict(state['bundle'], sha256='1' * 64))
         report = self.client.informe(state['id'])
         self.assertEqual(set(report), {'provider', 'started_at', 'finished_at', 'error', 'cancelled', 'stopped', 'limits',
@@ -182,9 +234,9 @@ class Protocol(unittest.TestCase):
         request, state = self.completed(inventory)
         again = self.client.solicitar(request, RECIPE, inventory)
         self.assertEqual((again['id'], again['bundle']), (state['id'], state['bundle']))
-        with self.assertRaises(AdquisicionRechazada):
+        with self.assertRaises(ClientRejected):
             self.client.solicitar(request, RECIPE, baseline())  # same key, other inventory
-        with self.assertRaises(AdquisicionRechazada):
+        with self.assertRaises(ClientRejected):
             self.client.solicitar(request, RECIPE, inventory, operation_id=str(uuid.uuid4()))
         self.assertEqual(self.runner.calls, 1)
 
@@ -234,13 +286,13 @@ class Protocol(unittest.TestCase):
     def test_one_active_job_and_cancellation(self):
         self.runner.mode = 'wait'
         job = self.client.solicitar(str(uuid.uuid4()), RECIPE, baseline())
-        with self.assertRaises(AdquisicionRechazada):
+        with self.assertRaises(ClientRejected):
             self.client.solicitar(str(uuid.uuid4()), RECIPE, baseline())
         self.client.cancelar(job['id'])
         state = self.client.esperar(job['id'], timeout=10)
         self.assertEqual(state['state'], 'cancelled')
         self.assertEqual(self.client.cancelar(job['id'])['state'], 'cancelled')
-        with self.assertRaises(AdquisicionRechazada):
+        with self.assertRaises(ClientRejected):
             self.client.descargar(job['id'], dict(bytes=1, sha256='0' * 64))
 
     def test_failed_or_unsealed_jobs_never_provide_a_bundle(self):
@@ -249,14 +301,14 @@ class Protocol(unittest.TestCase):
                 self.runner.mode = mode
                 _, state = self.completed()
                 self.assertEqual((state['state'], state['error']), ('failed', error))
-                with self.assertRaises(AdquisicionRechazada):
+                with self.assertRaises(ClientRejected):
                     self.client.descargar(state['id'], dict(bytes=1, sha256='0' * 64))
 
     def test_sealed_file_corruption_not_served(self):
         _, state = self.completed()
         path = self.jobs.root / 'work' / state['id'] / 'bundle.json'
         path.chmod(0o600); path.write_bytes(path.read_bytes() + b'x')
-        with self.assertRaises(AdquisicionRechazada):
+        with self.assertRaises(ClientRejected):
             self.client.descargar(state['id'], state['bundle'])
 
     def test_restart_marks_interrupted_without_resume(self):
@@ -275,13 +327,6 @@ class Protocol(unittest.TestCase):
         self.assertEqual(self.client.solicitar(request, RECIPE, inventory)['state'], 'interrupted')
         self.assertEqual(self.runner.calls, 0)
 
-    def test_client_configuration(self):
-        for url, modo in (('http://example.org:8002', 'real'), ('http://127.0.0.1:1', 'real'), ('https://acquisition', 'real'),
-                          ('http://acquisition:8002', 'simulada'), ('http://user:p@acquisition:8002', 'real')):
-            with self.subTest(url=url, modo=modo), self.assertRaises(AdquisicionRechazada):
-                Cliente(url, self.file, modo=modo)
-        Cliente('http://acquisition:8002', self.file)
-
     def test_service_requires_an_explicit_provider(self):
         for env in ({}, {'ACQ_PROVIDER': 'sofascore'}, {'ACQ_PROVIDER': 'sofascore', 'ACQ_ENABLE_REAL': '1', 'ACQ_TEST_MODE': '1'},
                     {'ACQ_PROVIDER': 'fixture-site', 'ACQ_TEST_MODE': '1'}, {'ACQ_PROVIDER': 'simulated-local-v1', 'ACQ_TEST_MODE': '1'}):
@@ -291,15 +336,6 @@ class Protocol(unittest.TestCase):
                          ('sofascore', dict(recent_round_count=3, max_total_sends=50)))
         with self.assertRaises(ValueError):
             Jobs(self.root / 'other', provider='sofascore')  # a real job process needs the profile owner
-
-
-class Producers(unittest.TestCase):
-    def test_current_producer_is_approved(self):
-        from persistencia.adquisicion import productores_aprobados
-        from test_producer_fingerprint import EXPECTED_PRODUCER_RULES, current_runtime_hash
-        self.assertEqual(current_runtime_hash(), EXPECTED_PRODUCER_RULES)
-        self.assertIn(EXPECTED_PRODUCER_RULES, productores_aprobados())
-
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

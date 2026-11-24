@@ -12,7 +12,7 @@ import unittest
 import uuid
 
 from acquisition.transport import Transport, Stopped
-from persistencia.bundle import PATHS, encode, parse
+from acquisition.protocol import PATHS, encode, parse
 
 class Clock:
     def __init__(self):self.value=datetime(2026,10,28,12,tzinfo=timezone.utc).timestamp()
@@ -172,7 +172,7 @@ class ArtifactFailures(unittest.TestCase):
         self.root=Path(self.tmp.name);self.clock=Clock()
         from sofascore_scraper.store import Store
         self.store=Store(self.root/'cache');self.addCleanup(self.store.close)
-        from persistencia.bundle import fingerprint
+        from acquisition.protocol import fingerprint
         self.event=dict(id=16599363,tournament=dict(id=94191,uniqueTournament=dict(id=17073),category=dict(sport=dict(slug='football',id=1))),
                         season=dict(id=97382),homeTeam=dict(id=2841,name='Fixture home'),awayTeam=dict(id=135672,name='Fixture away'),
                         status=dict(type='finished',code=100),startTimestamp=int(self.clock()-86400),roundInfo=dict(round=1))
@@ -189,7 +189,7 @@ class ArtifactFailures(unittest.TestCase):
             self.assertEqual(hits,[]);self.assertFalse((self.root/'bundle.json').exists())
     def test_correction_outside_fixed_pilot_stops_before_more_queries(self):
         from acquisition.recipe import collect
-        from persistencia.bundle import fingerprint
+        from acquisition.protocol import fingerprint
         import copy
         old=copy.deepcopy(self.event);old['id']=16599359
         self.baseline['events'].append(dict(self.baseline['events'][0],id=old['id']))

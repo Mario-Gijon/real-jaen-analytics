@@ -54,10 +54,6 @@ services:
       context: ./acquisition
       dockerfile: Dockerfile
       target: runtime
-      additional_contexts:
-        implementation: ./acquisition/src/acquisition
-        backend: ./sports-data
-        checks: ./acquisition/tests
     image: local/real-jaen-analytics/acquisition:${RJ_IMAGE_TAG:-prod}
     init: true
     restart: unless-stopped

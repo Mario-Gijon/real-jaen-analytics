@@ -1,1 +1,1 @@
-"""Narrow imports for the Sports Data bundle code retained by Acquisition."""
+"""Narrow helpers matching the sealed-bundle contract used by Acquisition."""

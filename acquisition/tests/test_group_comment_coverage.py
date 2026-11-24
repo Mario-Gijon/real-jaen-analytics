@@ -2,7 +2,7 @@
 import base64
 import unittest
 
-from persistencia.bundle import (
+from acquisition.protocol import (
     Rejected,
     _group_comment_finished,
     _verify_group_comments,
