@@ -1,0 +1,19 @@
+{
+  "descripcion": "Huellas de photo_producer_rules() (acquisition/photo_recipe.py) aprobadas por revisión para paquetes photos-v1. Sports Data rechaza cualquier paquete fotográfico con otra huella, o aprobado para otro contrato o receta. Es independiente de productores-adquisicion.json: una aprobación deportiva nunca autoriza un paquete fotográfico ni al revés. Está fuera de persistencia/: aprobar un productor no cambia la huella del coordinador.",
+  "aprobados": [
+    {
+      "rules_sha256": "10d16991288f57fb794007cbc2dd68e4224eaca404827706488a6283ca5a0302",
+      "contract": "photos-v1",
+      "recipe_id": "player-photos-local-v1",
+      "productor": "acquisition/{photo_recipe,photo_job,service}.py y fotos/{bundle,images}.py: colección preparada de solo lectura en /collections, sin navegador, perfil, red ni FFmpeg",
+      "uso": "Receta player-photos-local-v1 de la fase 4B; política collections_root=/collections, max_photo=4 MiB, max_total=64 MiB"
+    },
+    {
+      "rules_sha256": "a6ea114a5905a2ce14f5a4f4950aed57bdec2d598f788fc54a2605f174b495bc",
+      "contract": "photos-v1",
+      "recipe_id": "player-photos-local-v1",
+      "productor": "acquisition/{photo_recipe,photo_job,service}.py y fotos/{bundle,images}.py: como 10d16991…, con service.py que también arranca sin proveedor deportivo (proveedor 'none')",
+      "uso": "Receta player-photos-local-v1 de las fases 6D y 6E; colecciones de solo lectura en /collections (repo/… del repositorio y local/… externas), política collections_root=/collections, max_photo=4 MiB, max_total=64 MiB"
+    }
+  ]
+}

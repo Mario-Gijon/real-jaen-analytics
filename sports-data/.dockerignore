@@ -8,6 +8,9 @@
 !ambito.json
 !Dockerfile.dev
 !productores-adquisicion.json
+!productores-fotos.json
+!fotos/
+!fotos/*.py
 !alembic.ini
 !requirements-sql.txt
 !requirements-fastapi.txt

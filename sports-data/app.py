@@ -22,11 +22,15 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import api as data_loader
+from fotos import router as player_photos
+from fotos import serving as photo_serving
+from fotos.store import default_root as photo_root
 from queries import consultar
 
 
 ROOT = Path(__file__).resolve().parent
 UPDATE_PREFIX = '/internal/v1/updates'
+router = APIRouter()
 
 
 class APIJSONResponse(JSONResponse):
@@ -142,11 +146,24 @@ def _data_response(request: Request):
     else:
         status, body = consultar(request.app.state.data, path)
 
+    body = photo_serving.with_photo_urls(path, status, body, _photo_lookup(request))
+
     return APIJSONResponse(
         content=body,
         status_code=status,
         headers={'Cache-Control': 'no-store'},
     )
+
+
+def _photo_lookup(request: Request):
+    """Keep sporting responses usable if the separate photo catalog is unavailable."""
+    def lookup(player_ids):
+        try:
+            return request.app.state.photo_reader.urls(player_ids)
+        except photo_serving.PhotoStoreFault as error:
+            print(f'[fotos] {error}', file=sys.stderr, flush=True)
+            return {}
+    return lookup
 
 
 def _comments_response(request: Request, public_match_id: str):
@@ -228,9 +245,6 @@ def internal_updates(request: Request):
 @updates_router.post('/{path:path}', include_in_schema=False)
 def unsupported_control_post(request: Request):
     return _updates_response(request)
-
-
-router = APIRouter()
 
 
 @router.get('/', include_in_schema=False)
@@ -315,6 +329,9 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
     async def lifespan(application: FastAPI):
         with ExitStack() as resources:
             application.state.control_mode = control_mode
+            application.state.photo_root = photo_root()
+            application.state.photo_reader = photo_serving.PhotoReader(
+                application.state.photo_root, photo_serving.source_priority())
             if control_mode:
                 (application.state.coordinator,
                  application.state.updates,
@@ -323,9 +340,11 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                 application.state.data = data if data is not None else _load_data(resources)
                 database = os.environ.get('SPORTS_DATA_DB') if os.environ.get('SPORTS_DATA_STORAGE', 'json') == 'sql' else None
                 application.state.comments = _load_comments(Path(database)) if database and data is None else {}
+            application.state.photo_import_token = player_photos.import_secret(control_mode)
             yield
 
     application = FastAPI(title='Sports Data API', lifespan=lifespan)
+    application.include_router(player_photos.router)
     if control_mode:
         application.include_router(updates_router)
     if enrichment_enabled:
