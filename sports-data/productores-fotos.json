@@ -14,6 +14,13 @@
       "recipe_id": "player-photos-local-v1",
       "productor": "acquisition/{photo_recipe,photo_job,service}.py y fotos/{bundle,images}.py: como 10d16991…, con service.py que también arranca sin proveedor deportivo (proveedor 'none')",
       "uso": "Receta player-photos-local-v1 de las fases 6D y 6E; colecciones de solo lectura en /collections (repo/… del repositorio y local/… externas), política collections_root=/collections, max_photo=4 MiB, max_total=64 MiB"
+    },
+    {
+      "rules_sha256": "6b35e47c70e6f9afc567e6cbe39948373b5c9550b01f42ae1f3f544ecc9434cd",
+      "contract": "photos-v1",
+      "recipe_id": "player-photos-local-v1",
+      "productor": "Acquisition independiente: admin.py (confirmación manual), photo_recipe.py, photo_job.py, photo_import.py y photo_protocol/{bundle,images}.py; colección externa de solo lectura y entrega por HTTP autenticado",
+      "uso": "Aprobación técnica específica del productor local; exige selector explícito y confirmación de permisos de uso; límites photos-v1, no constituye autorización legal de las fotografías"
     }
   ]
 }

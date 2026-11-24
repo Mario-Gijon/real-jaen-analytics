@@ -1,10 +1,9 @@
-"""Explicit administrative profile commands. No daemon, downloads or automatic recovery."""
+"""Explicit administrative profile commands and a separate manual photo import."""
 import argparse
 import asyncio
 import json
+import os
 import sys
-from .profile import Profile, ProfileError
-from .browser import require_offline, validate_candidate
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
@@ -16,10 +15,43 @@ def parser():
     recover = commands.add_parser('recover-profile')
     recover.add_argument('--confirm-service-stopped', action='store_true')
     recover.add_argument('--confirm-no-external-users', action='store_true')
+    photos = commands.add_parser('import-photos')
+    photos.add_argument('--collection', required=True, help='Selector seguro, por ejemplo df11/1')
+    photos.add_argument('--confirm-usage-rights', action='store_true',
+                        help='Confirma que tienes permisos para usar y redistribuir todas las imágenes de la colección')
     return result
+
+
+def _import_photos(args):
+    if not args.confirm_usage_rights:
+        print(json.dumps({'status': 'photos_import_rejected',
+                          'message': 'Confirma los permisos de uso con --confirm-usage-rights antes de importar.'},
+                         ensure_ascii=False), file=sys.stderr)
+        return 2
+    from .photo_import import PhotoImportError, import_collection
+    try:
+        result = import_collection(args.collection, confirm_usage_rights=True,
+                                   collections_root=os.environ.get('ACQ_COLLECTIONS_ROOT', '/collections'),
+                                   secret_file=os.environ.get('ACQ_SECRET_FILE', '/run/secrets/acquisition-token'))
+    except PhotoImportError as error:
+        print(json.dumps({'status': 'photos_import_failed', 'message': str(error)}, ensure_ascii=False),
+              file=sys.stderr)
+        return 1
+    except OSError:
+        print(json.dumps({'status': 'photos_import_failed',
+                          'message': 'No se pudo leer la colección o el secreto de Acquisition.'},
+                         ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.command == 'import-photos':
+        return _import_photos(args)
+    from .profile import Profile, ProfileError
+    from .browser import require_offline, validate_candidate
     try:
         require_offline()  # Deployment must also set Docker network_mode:none.
         if args.command == 'recover-profile' and not (args.confirm_service_stopped and args.confirm_no_external_users):

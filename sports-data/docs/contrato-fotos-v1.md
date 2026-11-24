@@ -53,8 +53,30 @@ La imagen acepta únicamente WebP de hasta 4 MiB por archivo y dimensiones máxi
 por SHA-256; la API nunca deriva una ruta de archivo de un parámetro de petición. `SPORTS_DATA_PHOTO_SOURCES` determina
 el orden de fuentes servidas (por defecto, solo `df11`).
 
-## Alcance de esta fase
+## Importación manual desde Acquisition
 
-El almacén, la verificación y los endpoints pertenecen a Sports Data y solo usan su volumen. Acquisition aún no contiene
-el productor/importador de fotografías y Dashboard todavía no convierte `photo_url` en una ruta de navegador accesible
-desde su BFF. No se importan automáticamente imágenes al arrancar ni al actualizar datos deportivos.
+Acquisition incluye un productor propio y no importa código de Sports Data. La colección se prepara fuera del
+repositorio con `manifest.json` y `photos/`, y se monta en modo de solo lectura en `/collections`. Para desarrollo, el
+montaje es opcional y se activa con `compose.photos.yaml`:
+
+```sh
+export RJ_PHOTO_COLLECTIONS_DIR=/ruta/externa/a/colecciones-autorizadas
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.photos.yaml \
+  run --rm --no-deps --entrypoint python acquisition -B -m acquisition.admin import-photos \
+  --collection df11/1 --confirm-usage-rights
+```
+
+La misma operación en una release de producción requiere añadir `compose.photos.yaml` a la configuración de Compose,
+definir `RJ_PHOTO_COLLECTIONS_DIR` y usar el `.env.prod` de esa release. El comando `run --rm --no-deps` crea un
+contenedor temporal y no reinicia Acquisition ni inicia una actualización deportiva. No ejecutes `up` para habilitar
+la colección durante esta operación.
+
+`--collection` selecciona un subdirectorio relativo bajo `/collections`; solo admite segmentos seguros. La confirmación
+`--confirm-usage-rights` es obligatoria y significa que quien ejecuta el comando ha comprobado los permisos de uso y
+redistribución de todas las imágenes. No se inicia ninguna importación al arrancar Acquisition ni al pulsar Actualizar.
+El importador consulta el inventario actual, prepara y verifica un paquete photos-v1 y lo entrega a Sports Data con el
+secreto interno de Acquisition. Los hashes iguales se omiten; Sports Data vuelve a validar el paquete y clasifica cada
+identificador exacto como nuevo, cambiado, sin cambios, inválido o desconocido.
+
+El montaje y el productor no son necesarios para iniciar servicios ni para actualizar datos deportivos. Dashboard
+todavía no adapta `photo_url` para mostrar estas fotografías en su BFF.

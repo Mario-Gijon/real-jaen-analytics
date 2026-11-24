@@ -77,14 +77,29 @@ assert recipe.producer_rules() == {EXPECTED_PRODUCER_RULES!r}
             self.skipTest('monorepo Compose files are not included in the Acquisition test image')
         dockerfile = (repository / 'acquisition/Dockerfile').read_text(encoding='utf-8')
         self.assertIn('COPY src/acquisition/ /opt/app/acquisition/', dockerfile)
+        self.assertIn('COPY tests/ /opt/checks/', dockerfile)
         self.assertNotIn('--from=backend', dockerfile)
         self.assertNotIn('--from=implementation', dockerfile)
         self.assertNotIn('--from=checks', dockerfile)
+        dockerignore = (repository / 'acquisition/.dockerignore').read_text(encoding='utf-8').splitlines()
+        for required in ('!src/acquisition/*.py', '!src/acquisition/photo_protocol/',
+                         '!src/acquisition/photo_protocol/*.py', '!tests/*.py'):
+            self.assertIn(required, dockerignore, f'{required} must be available in the Acquisition build context')
+        for required in ('src/acquisition/photo_recipe.py', 'src/acquisition/photo_job.py',
+                         'src/acquisition/photo_import.py', 'src/acquisition/photo_protocol/bundle.py',
+                         'src/acquisition/photo_protocol/images.py', 'tests/test_photo_recipe.py',
+                         'tests/test_photo_import.py'):
+            self.assertTrue((repository / 'acquisition' / required).is_file(), required)
         for name in ('compose.dev.yaml', 'compose.prod.yaml'):
             compose = (repository / name).read_text(encoding='utf-8')
             self.assertIn('context: ./acquisition', compose)
             self.assertNotIn('additional_contexts:', compose)
             self.assertNotIn('backend: ./sports-data', compose)
+            self.assertNotIn('ACQ_COLLECTIONS_ROOT', compose)
+            self.assertNotIn('/collections', compose)
+        overlay = (repository / 'compose.photos.yaml').read_text(encoding='utf-8')
+        self.assertIn('RJ_PHOTO_COLLECTIONS_DIR', overlay)
+        self.assertIn('read_only: true', overlay)
 
 
 if __name__ == '__main__':

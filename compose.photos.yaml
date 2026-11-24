@@ -1,0 +1,11 @@
+# Opt-in overlay. Base development and production stacks remain usable without a photo collection.
+services:
+  acquisition:
+    environment:
+      ACQ_COLLECTIONS_ROOT: /collections
+    volumes:
+      - type: bind
+        source: ${RJ_PHOTO_COLLECTIONS_DIR:?Set RJ_PHOTO_COLLECTIONS_DIR to an authorized external collection directory}
+        target: /collections
+        read_only: true
+        bind: {create_host_path: false}

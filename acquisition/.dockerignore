@@ -8,5 +8,7 @@
 !src/acquisition/*.py
 !src/acquisition/bundle_compat/
 !src/acquisition/bundle_compat/*.py
+!src/acquisition/photo_protocol/
+!src/acquisition/photo_protocol/*.py
 !tests/
 !tests/*.py
