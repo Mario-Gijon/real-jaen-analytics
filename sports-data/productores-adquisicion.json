@@ -51,6 +51,11 @@
       "rules_sha256": "af79a3ebf2d1e127fef1cf22d09817f58a5725a0e9c95b6e24b8fdf19db0a2ca",
       "productor": "Acquisition incluye las proyecciones mínimas de api/queries/importar requeridas por bundle.py y la receta",
       "uso": "Recetas piloto y Grupo 2; conserva PENDIENTES, secciones vacías y normalización de eventos/calendario del contrato Sports Data"
+    },
+    {
+      "rules_sha256": "73c9765c7c5058fbf330f7549b4969153a6bfab12dc4bea95b855e9fb8c49847",
+      "productor": "Acquisition incorpora su propia copia funcional del planificador Grupo 2 y usa las proyecciones mínimas locales del bundle",
+      "uso": "Mismas reglas deportivas, alcance y límites que la versión previa; único cambio en la frontera de imports del planificador"
     }
   ]
 }

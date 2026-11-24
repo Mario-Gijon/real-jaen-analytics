@@ -29,14 +29,13 @@ USER root
 RUN rm -rf /opt/probe \
     && groupadd --gid 10001 analyst \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/analyst --shell /usr/sbin/nologin analyst \
-    && mkdir -p /profiles /acquisition-jobs /opt/shared-backend/acquisition \
+    && mkdir -p /profiles /acquisition-jobs \
     && chown -R 10001:10001 /home/analyst /profiles /acquisition-jobs
 COPY --from=implementation / /opt/app/acquisition/
-COPY --from=backend acquisition/group_plan.py /opt/app/acquisition/group_plan.py
 COPY --from=backend persistencia/bundle.py persistencia/comentarios.py persistencia/bloqueo.py /opt/app/persistencia/
 COPY requirements-acquisition.txt /opt/requirements-acquisition.txt
 WORKDIR /opt/app
-ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/shared-backend:/opt/app/acquisition/bundle_compat HOME=/home/analyst
+ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/app/acquisition/bundle_compat HOME=/home/analyst
 RUN python -m pip check \
     && python -c "from importlib.metadata import version; required = dict(line.strip().split('==', 1) for line in open('/opt/requirements-acquisition.txt') if line.strip() and not line.lstrip().startswith('#')); assert all(version(package) == expected for package, expected in required.items())"
 USER 10001:10001
@@ -49,4 +48,4 @@ FROM runtime AS test
 COPY --from=checks / /opt/checks/
 COPY --from=backend persistencia/adquisicion.py /opt/checks/persistencia/
 COPY --from=backend productores-adquisicion.json /opt/checks/
-ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/shared-backend:/opt/app/acquisition/bundle_compat:/opt/checks
+ENV PYTHONPATH=/opt/app:/opt/scraper:/opt/app/acquisition/bundle_compat:/opt/checks

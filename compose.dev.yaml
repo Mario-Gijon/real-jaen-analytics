@@ -136,16 +136,6 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: ./sports-data/acquisition
-        target: /sports-data/acquisition
-        read_only: true
-        bind: {create_host_path: false}
-      - type: bind
-        source: ./sports-data/acquisition
-        target: /opt/shared-backend/acquisition
-        read_only: true
-        bind: {create_host_path: false}
-      - type: bind
         source: ${RJ_DEV_SECRET_DIR:?Set RJ_DEV_SECRET_DIR outside this repository}/acquisition-token
         target: /run/secrets/acquisition-token
         read_only: true

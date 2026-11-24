@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,7 +12,7 @@ from unittest import mock
 import acquisition.recipe as recipe
 
 
-EXPECTED_PRODUCER_RULES = 'af79a3ebf2d1e127fef1cf22d09817f58a5725a0e9c95b6e24b8fdf19db0a2ca'
+EXPECTED_PRODUCER_RULES = '73c9765c7c5058fbf330f7549b4969153a6bfab12dc4bea95b855e9fb8c49847'
 PRODUCER_FILES = (
     'recipe.py', 'group_plan.py', 'transport.py', 'sdk_adapter.py', 'operation_budget.py',
     'service.py', 'app.py', 'job.py', 'bundle_compat/__init__.py', 'bundle_compat/api.py',
@@ -62,31 +63,35 @@ class ProducerFingerprintTests(unittest.TestCase):
         self.assertEqual(actual, EXPECTED_PRODUCER_RULES)
         self.assertIn(actual, approved_hashes)
 
-    def test_runtime_bundle_imports_using_only_acquisition_compatibility_helpers(self):
-        runtime_acquisition = Path(recipe.__file__).resolve().parent
-        runtime_root = runtime_acquisition.parent
+    def test_isolated_runtime_imports_planner_and_bundle_without_sports_data_helpers(self):
+        repository = Path(__file__).resolve().parents[2]
+        sources = repository / 'acquisition/src/acquisition'
+        backend = repository / 'sports-data/persistencia'
+        temporary = tempfile.TemporaryDirectory(prefix='rja-acquisition-runtime-')
+        self.addCleanup(temporary.cleanup)
+        runtime_root = Path(temporary.name)
+        shutil.copytree(sources, runtime_root / 'acquisition')
         runtime_persistencia = runtime_root / 'persistencia'
-        if not (runtime_persistencia / 'bundle.py').is_file():
-            repository = Path(__file__).resolve().parents[2]
-            sources = repository / 'acquisition/src/acquisition'
-            backend = repository / 'sports-data/persistencia'
-            temporary = tempfile.TemporaryDirectory(prefix='rja-bundle-runtime-')
-            self.addCleanup(temporary.cleanup)
-            runtime_root = Path(temporary.name)
-            runtime_persistencia = runtime_root / 'persistencia'
-            runtime_persistencia.mkdir()
-            runtime_compat = runtime_root / 'acquisition/bundle_compat'
-            runtime_compat.mkdir(parents=True)
-            (runtime_compat / '__init__.py').symlink_to((sources / 'bundle_compat/__init__.py').resolve())
-            (runtime_compat / 'api.py').symlink_to((sources / 'bundle_compat/api.py').resolve())
-            (runtime_compat / 'importar.py').symlink_to((sources / 'bundle_compat/importar.py').resolve())
-            for name in ('bundle.py', 'comentarios.py', 'bloqueo.py'):
-                (runtime_persistencia / name).symlink_to((backend / name).resolve())
+        runtime_persistencia.mkdir()
+        for name in ('bundle.py', 'comentarios.py', 'bloqueo.py'):
+            (runtime_persistencia / name).symlink_to((backend / name).resolve())
+        # The isolated image layout deliberately contains no Sports Data api.py, queries.py or importar.py.
+        self.assertFalse(any((runtime_root / name).exists() for name in ('api.py', 'queries.py', 'importar.py')))
 
         probe = """
+from pathlib import Path
 import api, importar
+from acquisition import group_plan
+from acquisition.service import configuration
 from persistencia.bundle import check_inventory
 from persistencia.comentarios import validar_respuesta
+root = Path.cwd()
+assert Path(group_plan.__file__).resolve() == root / 'acquisition/group_plan.py'
+assert Path(api.__file__).resolve() == root / 'acquisition/bundle_compat/api.py'
+assert Path(importar.__file__).resolve() == root / 'acquisition/bundle_compat/importar.py'
+assert group_plan.recent_rounds(3) == [1, 2, 3]
+assert configuration({'ACQ_PROVIDER': 'sofascore', 'ACQ_ENABLE_REAL': '1'}) == (
+    'sofascore', {'recent_round_count': 3, 'max_total_sends': 50})
 assert api.PENDIENTES == ('notstarted', 'postponed')
 assert api.vacia('lineups', {'home': {'players': []}, 'away': {'players': []}})
 assert not api.vacia('lineups', {'home': {'players': [{'id': 1}]}, 'away': {'players': []}})
@@ -111,6 +116,24 @@ assert callable(check_inventory)
         env['PYTHONPATH'] = os.pathsep.join((str(runtime_root), str(runtime_root / 'acquisition/bundle_compat')))
         subprocess.run([sys.executable, '-B', '-c', probe], cwd=runtime_root, env=env, check=True,
                        capture_output=True, text=True)
+
+    def test_dev_and_prod_use_the_same_acquisition_planner_source(self):
+        repository = Path(__file__).resolve().parents[2]
+        planner = repository / 'acquisition/src/acquisition/group_plan.py'
+        dockerfile = (repository / 'acquisition/Dockerfile').read_text(encoding='utf-8')
+        sports_data_dockerfile = (repository / 'sports-data/Dockerfile').read_text(encoding='utf-8')
+        development = (repository / 'compose.dev.yaml').read_text(encoding='utf-8')
+        production = (repository / 'compose.prod.yaml').read_text(encoding='utf-8')
+        self.assertFalse(planner.is_symlink())
+        self.assertIn('source: ./acquisition/src/acquisition', development)
+        self.assertIn('implementation: ./acquisition/src/acquisition', development)
+        self.assertIn('implementation: ./acquisition/src/acquisition', production)
+        self.assertNotIn('source: ./sports-data/acquisition', development)
+        self.assertNotIn('/opt/shared-backend/acquisition', development)
+        self.assertNotIn('COPY --from=backend acquisition/group_plan.py', dockerfile)
+        self.assertIn('COPY --chown=10001:10001 acquisition/group_plan.py ./acquisition/group_plan.py',
+                      sports_data_dockerfile)
+        self.assertEqual(current_runtime_hash(), EXPECTED_PRODUCER_RULES)
 
 
 if __name__ == '__main__':
