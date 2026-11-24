@@ -41,6 +41,11 @@
       "rules_sha256": "e2c2d1f37f50cd5158e92ded5a91dc5aebae60a7fbb260532d8d7e955e56e9ab",
       "productor": "Grupo 2 group-v3 revisado: el verificador despacha group-v3 al contrato de grupo y el informe solo permite continuar con un paquete sellado",
       "uso": "Recetas piloto y Grupo 2; misma ventana de tres jornadas, máximo de 50 envíos físicos, hasta tres recuperaciones históricas e idempotencia"
+    },
+    {
+      "rules_sha256": "d00fc9808953b30f550220f254573f93d488d1f427dd6e88766b2df9ae02a1d6",
+      "productor": "Productor revisado con la barrera durable de mantenimiento de Acquisition en service.py",
+      "uso": "Recetas piloto y Grupo 2; rechaza solicitudes nuevas mientras existe deployment-maintenance, sin cambiar el alcance, las reglas deportivas ni el presupuesto de consultas"
     }
   ]
 }

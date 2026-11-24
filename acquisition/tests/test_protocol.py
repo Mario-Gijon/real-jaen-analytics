@@ -295,9 +295,11 @@ class Protocol(unittest.TestCase):
 
 class Producers(unittest.TestCase):
     def test_current_producer_is_approved(self):
-        from acquisition.recipe import producer_rules
         from persistencia.adquisicion import productores_aprobados
-        self.assertIn(producer_rules(), productores_aprobados())
+        from test_producer_fingerprint import current_runtime_hash
+        current = 'd00fc9808953b30f550220f254573f93d488d1f427dd6e88766b2df9ae02a1d6'
+        self.assertEqual(current_runtime_hash(), current)
+        self.assertIn(current, productores_aprobados())
 
 
 if __name__ == '__main__':
