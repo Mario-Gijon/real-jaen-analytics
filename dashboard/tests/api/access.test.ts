@@ -192,7 +192,8 @@ describe("access gate (proxy)", () => {
     expect(location(proxy(request("/operador")))).toBe(`${ORIGIN}/acceso?next=%2Foperador`);
     expect(location(proxy(request("/matches/sofascore-match-1?view=observed")))).toBe(
       `${ORIGIN}/acceso?next=%2Fmatches%2Fsofascore-match-1%3Fview%3Dobserved`);
-    for (const path of ["/api/v1/source", "/api/v1/teams/team-real-jaen/observed-performance", "/api/v1/teams/sofascore-team-135672", "/api/v1/updates/current"]) {
+    for (const path of ["/api/v1/source", "/api/v1/teams/team-real-jaen/observed-performance", "/api/v1/teams/sofascore-team-135672",
+      "/api/v1/players/sofascore-player-1/photo/" + "a".repeat(64), "/api/v1/updates/current"]) {
       const refused = proxy(request(path));
       expect(refused.status, path).toBe(401);
       expect(((await refused.json()) as ApiError).error.code).toBe("UNAUTHORIZED");
@@ -236,7 +237,15 @@ describe("access gate (proxy)", () => {
   it("covers every route but static build files and public images", () => {
     expect(config.matcher).toEqual(["/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|crests/).*)"]);
     const pattern = /^\/(?!_next\/static|_next\/image|favicon\.ico|icon\.svg|crests\/).*$/;  // the same, as a RegExp
-    for (const path of ["/", "/acceso", "/matches", "/api/v1/source", "/api/v1/updates", "/operador"]) expect(pattern.test(path), path).toBe(true);
+    for (const path of ["/", "/acceso", "/matches", "/api/v1/source", "/api/v1/players/sofascore-player-1/photo/" + "a".repeat(64), "/api/v1/updates", "/operador"])
+      expect(pattern.test(path), path).toBe(true);
     for (const path of ["/_next/static/chunk.js", "/crests/real-jaen.webp", "/icon.svg"]) expect(pattern.test(path), path).toBe(false);
+  });
+
+  it("protects photo requests under the production basePath too", async () => {
+    vi.stubEnv("NEXT_PUBLIC_BASE_PATH", "/real-jaen");
+    const path = `/real-jaen/api/v1/players/sofascore-player-1/photo/${"a".repeat(64)}`;
+    expect(proxy(request(path)).status).toBe(401);
+    expect(proxy(request(path, { cookie: await cookie() })).headers.get("x-middleware-next")).toBe("1");
   });
 });

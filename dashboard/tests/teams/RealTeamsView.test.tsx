@@ -74,7 +74,8 @@ const PLAYERS = [
   squadPlayer(1086428, "Salvi", "goalkeeper", 8, { appearances: stat(0, 8, 8), starts: stat(0, 8, 8), minutes: stat(0, 8, 8),
     goals: stat(0, 8, 8), assists: stat(0, 8, 8) }, { heightCm: 190, lastShirtNumber: 13 }),
   squadPlayer(966303, "Moha Keita", "midfielder", 6, { appearances: stat(6, 6, 6), starts: stat(4, 6, 6), minutes: stat(365, 6, 6),
-    goals: stat(0, 6, 6), assists: stat(1, 6, 6) }),
+    goals: stat(0, 6, 6), assists: stat(1, 6, 6) }, { player: { id: "sofascore-player-966303", name: "Moha Keita", position: "midfielder",
+      photoUrl: "/api/v1/players/sofascore-player-966303/photo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }),
   squadPlayer(5, "Jugador Sin Resolver", "defender", 1, { appearances: stat(null, 0, 1), starts: stat(0, 1, 1), minutes: stat(null, 0, 1),
     goals: stat(null, 0, 1), assists: stat(null, 0, 1) }),
 ];
@@ -369,6 +370,8 @@ describe("Equipos con la fuente real", () => {
     const { unmount } = render(<TeamsView initialTab="players" />);
     const link = await screen.findByRole("link", { name: "Ver ficha de Moha Keita" });
     expect(link).toHaveAttribute("href", `/players/sofascore-player-966303?view=profile&season=${GROUP_2}&from=team&origin=team-real-jaen`);
+      expect(link.closest("tr")?.querySelector("img")).toHaveAttribute("src",
+        "/api/v1/players/sofascore-player-966303/photo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     expect(getObservedPlayers).not.toHaveBeenCalled();
     expect(getTeamSeason).not.toHaveBeenCalled();
     unmount();

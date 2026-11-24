@@ -27,11 +27,13 @@ import {
   createLocalApiTeamPerformance,
   createLocalApiTeamIdentity,
   createLocalApiPlayerProfile,
+  createLocalApiPlayerPhoto,
   createLocalApiMatchDetail,
   createLocalApiTeamMatches,
   createLocalApiMatchComments,
   createLocalApiEnrichedComments,
 } from "./local-api/local-api-source";
+import type { LocalPlayerPhoto } from "./local-api/local-api-source";
 import { syntheticSource } from "./synthetic/synthetic-source";
 
 /**
@@ -68,6 +70,8 @@ export interface DataSource {
    * that source does not know the id. Throws like `observedPlayers`.
    */
   playerProfile(playerId: string): Promise<PlayerProfile | null>;
+  /** Current WebP from the real source, by a player's public id and its content hash. */
+  playerPhoto(playerId: string, sha256: string, ifNoneMatch?: string | null): Promise<LocalPlayerPhoto | null>;
   /**
    * Matches in which a real source lists the player, newest first; `null` if
    * that source does not know the id. Throws like `observedPlayers`.
@@ -144,6 +148,7 @@ export function createRealSource(baseUrl: string): DataSource {
     teamIdentity: createLocalApiTeamIdentity(local),
     observedSquad: createLocalApiObservedSquad(local),
     playerProfile: createLocalApiPlayerProfile(local),
+    playerPhoto: createLocalApiPlayerPhoto(local),
     playerObservedMatches: createLocalApiObservedMatches(local),
     teamObservedMatches: createLocalApiTeamMatches(local),
     teamObservedPerformance: createLocalApiTeamPerformance(local),

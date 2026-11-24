@@ -52,7 +52,7 @@ describe("GET /api/v1/teams/{teamId}/players", () => {
     const body = (await (await call("team-real-jaen")).json()) as ObservedPlayers;
     expect(body).toEqual({
       teamId: "team-real-jaen",
-      players: [{ id: "sofascore-player-966303", name: "Moha Keita", position: "midfielder" }],
+      players: [{ id: "sofascore-player-966303", name: "Moha Keita", position: "midfielder", photoUrl: null }],
       scope: "Jugadores observados en convocatorias.",
       source: { synthetic: false, label: "Datos reales" },
     });

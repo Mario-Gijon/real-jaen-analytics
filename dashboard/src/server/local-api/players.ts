@@ -6,6 +6,17 @@ import { playerIdFromSource, SOURCE_TEAM_IDS, sourcePlayerId } from "./identifie
 import { analysableSourceTeam, PROVENANCE, type SourceCompetition, sourceDeclaration } from "./scope";
 
 const PROFILE_SCOPE = "Datos personales según la fuente. No indican equipo actual.";
+const PLAYER_PHOTO = /^\/api\/v1\/players\/([1-9]\d*)\/photo\/([0-9a-f]{64})$/;
+
+/** Only accept this player's canonical Sports Data photo path; expose it through our same-origin BFF route. */
+function parsePhotoUrl(value: unknown, sourceId: number): string | null {
+  if (typeof value !== "string") return null;
+  const match = PLAYER_PHOTO.exec(value);
+  if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) !== sourceId) return null;
+  const playerId = playerIdFromSource(sourceId);
+  if (sourcePlayerId(playerId) !== sourceId) return null;
+  return `/api/v1/players/${playerId}/photo/${match[2]}`;
+}
 
 /** Checks the whole body before using any of it: a malformed row fails the request. */
 function parsePlayers(body: unknown): { players: PlayerRef[]; scope: string } {
@@ -29,6 +40,7 @@ function parsePlayers(body: unknown): { players: PlayerRef[]; scope: string } {
       id: playerIdFromSource(id),
       name: name.trim(),
       position: position(row.usual_position, `data[${index}].usual_position`),
+      photoUrl: parsePhotoUrl(row.photo_url, id),
     };
   });
   if (count !== undefined && count !== players.length) {
@@ -59,6 +71,7 @@ function parseProfile(body: unknown, sourceId: number): PlayerProfile["player"] 
     id: playerIdFromSource(sourceId),
     name: row.name.trim(),
     position: position(row.usual_position, "usual_position"),
+    photoUrl: parsePhotoUrl(row.photo_url, sourceId),
     birthDate,
     heightCm: typeof height === "number" ? height : null,
     preferredFoot: (foot && FEET[foot.toLowerCase()]) || null,
@@ -142,7 +155,10 @@ function parseSquadPlayer(row: unknown, field: string, withCallUps: number): Obs
     stats[stat] = parseSquadStat(row[SQUAD_STAT_FIELDS[stat]], stat, callUps, `${field}.${SQUAD_STAT_FIELDS[stat]}`);
   }
   return {
-    player: { id: playerIdFromSource(id), name, position: position(row.usual_position, `${field}.usual_position`) },
+    player: {
+      id: playerIdFromSource(id), name, position: position(row.usual_position, `${field}.usual_position`),
+      photoUrl: parsePhotoUrl(row.photo_url, id),
+    },
     heightCm: height,
     preferredFoot: (foot && FEET[foot.toLowerCase()]) || null,
     lastShirtNumber: shirt === null ? null : count(shirt, `${field}.last_shirt_number`),

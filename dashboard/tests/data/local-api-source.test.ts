@@ -34,6 +34,7 @@ function answer(body: unknown, status = 200) {
 }
 
 const SCOPE = "Jugadores observados en convocatorias; no es una plantilla completa ni necesariamente actual.";
+const PHOTO_SHA = "a".repeat(64);
 const payload = (data: unknown[], count: unknown = data.length) => ({
   data,
   meta: { count, scope: SCOPE },
@@ -65,19 +66,19 @@ describe("local API adapter: observed players", () => {
   it("asks for the source id of our team and returns contract players with derived ids", async () => {
     const fetch = answer(
       payload([
-        { player_id: 966303, name: "Moha Keita", usual_position: "M" },
-        { player_id: 1, name: " Portero Uno ", usual_position: "G" },
-        { player_id: 2, name: "Defensa", usual_position: "D" },
+        { player_id: 966303, name: "Moha Keita", usual_position: "M", photo_url: `/api/v1/players/966303/photo/${PHOTO_SHA}` },
+        { player_id: 1, name: " Portero Uno ", usual_position: "G", photo_url: `/api/v1/players/2/photo/${PHOTO_SHA}` },
+        { player_id: 2, name: "Defensa", usual_position: "D", photo_url: "https://example.test/photo.webp" },
         { player_id: 3, name: "Delantero", usual_position: "F" },
       ]),
     );
     expect(await source(fetch)("team-real-jaen")).toEqual({
       teamId: "team-real-jaen",
       players: [
-        { id: "sofascore-player-966303", name: "Moha Keita", position: "midfielder" },
-        { id: "sofascore-player-1", name: "Portero Uno", position: "goalkeeper" },
-        { id: "sofascore-player-2", name: "Defensa", position: "defender" },
-        { id: "sofascore-player-3", name: "Delantero", position: "forward" },
+        { id: "sofascore-player-966303", name: "Moha Keita", position: "midfielder", photoUrl: `/api/v1/players/sofascore-player-966303/photo/${PHOTO_SHA}` },
+        { id: "sofascore-player-1", name: "Portero Uno", position: "goalkeeper", photoUrl: null },
+        { id: "sofascore-player-2", name: "Defensa", position: "defender", photoUrl: null },
+        { id: "sofascore-player-3", name: "Delantero", position: "forward", photoUrl: null },
       ],
       scope: SCOPE,
       source: { synthetic: false, label: "Datos reales" },
@@ -91,7 +92,7 @@ describe("local API adapter: observed players", () => {
   it("keeps an unknown or missing position as unknown, never guessed", async () => {
     const fetch = answer(
       payload([
-        { player_id: 1, name: "A", usual_position: "X" },
+        { player_id: 1, name: "A", usual_position: "X", photo_url: "not-a-canonical-path" },
         { player_id: 2, name: "B", usual_position: null },
         { player_id: 3, name: "C" },
       ]),
@@ -168,6 +169,7 @@ const moha = {
   birth_date: "1999-09-18",
   height_cm: 165,
   preferred_foot: null,
+  photo_url: "/api/v1/players/966303/photo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   fetched_at: "2026-10-21T12:07:39+00:00",
 };
 const profileSource = (fetch: typeof globalThis.fetch) =>
@@ -188,6 +190,7 @@ describe("local API adapter: player profile", () => {
         id: "sofascore-player-966303",
         name: "Moha Keita",
         position: "midfielder",
+        photoUrl: "/api/v1/players/sofascore-player-966303/photo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         birthDate: "1999-09-18",
         heightCm: 165,
         preferredFoot: null,
@@ -208,9 +211,16 @@ describe("local API adapter: player profile", () => {
     });
     const result = await profileSource(fetch)("sofascore-player-1");
     expect(result!.player).toEqual({
-      id: "sofascore-player-1", name: "Sin Datos", position: null,
+      id: "sofascore-player-1", name: "Sin Datos", position: null, photoUrl: null,
       birthDate: null, heightCm: null, preferredFoot: null, country: null,
     });
+  });
+
+  it("ignores a profile photo reference belonging to another player without dropping the profile", async () => {
+    const result = await profileSource(answer({ data: { ...moha, photo_url: `/api/v1/players/1/photo/${PHOTO_SHA}` } }))(
+      "sofascore-player-966303",
+    );
+    expect(result!.player).toMatchObject({ id: "sofascore-player-966303", name: "Moha Keita", photoUrl: null });
   });
 
   it("maps the foot whatever its case", async () => {
@@ -1195,7 +1205,7 @@ const squadRow = (overrides: Record<string, unknown> = {}) => ({
   assists: figure(0, 3, 3), ...overrides,
 });
 const SQUAD_ROWS = [
-  squadRow(),
+  squadRow({ photo_url: `/api/v1/players/942663/photo/${PHOTO_SHA}` }),
   squadRow({ player_id: 1982588, name: "Francisco Gallego", usual_position: "M", height_cm: null, preferred_foot: null, last_shirt_number: 7,
     call_ups: 2, starts: figure(0, 2, 2), appearances: figure(1, 1, 2), minutes: figure(13, 1, 2), goals: figure(null, 0, 2), assists: figure(0, 1, 2) }),
   squadRow({ player_id: 1086428, name: "Salvi", usual_position: "G", height_cm: 190, preferred_foot: null, last_shirt_number: 13,
@@ -1226,7 +1236,8 @@ describe("local API adapter: observed squad", () => {
       duplicateRecords: 0, discardedRecords: 0 });
     const [starter, substitute, unused] = competition.players;
     expect(starter).toEqual({
-      player: { id: "sofascore-player-942663", name: "Marco Siverio Toro", position: "forward" }, heightCm: 184, preferredFoot: "right",
+      player: { id: "sofascore-player-942663", name: "Marco Siverio Toro", position: "forward",
+        photoUrl: `/api/v1/players/sofascore-player-942663/photo/${PHOTO_SHA}` }, heightCm: 184, preferredFoot: "right",
       lastShirtNumber: 9, callUps: 3, stats: {
         appearances: { value: 3, coverage: "complete", matches: 3, of: 3 }, starts: { value: 3, coverage: "complete", matches: 3, of: 3 },
         minutes: { value: 250, coverage: "complete", matches: 3, of: 3 }, goals: { value: 2, coverage: "partial", matches: 2, of: 3 },

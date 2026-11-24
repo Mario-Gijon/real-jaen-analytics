@@ -68,7 +68,7 @@ export function PlayerProfileView({ playerId, returnHref, context = { seasonId: 
 function Identity({ data: { player } }: { data: PlayerProfile }) {
   return <header className={css.header}>
     <div className={css.identity}>
-      <PlayerAvatar name={player.name} size={48} />
+      <PlayerAvatar name={player.name} src={player.photoUrl} size={48} />
       <div className={css.identityText}>
         <div className={css.name}><h1>{player.name}</h1></div>
         <p className={css.context}>{positionLabel(player.position)}</p>

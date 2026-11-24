@@ -226,8 +226,7 @@ export function TeamPlayersTable({
                     >
                       {row.shirtNumber ?? "—"}
                     </span>
-                    {/* The contract has no player picture yet: always the neutral fallback. */}
-                    <PlayerAvatar name={row.player.name} />
+                    <PlayerAvatar name={row.player.name} src={row.player.photoUrl} />
                     <Link
                       aria-label={`Ver ficha de ${row.player.name}`}
                       className={css.open}

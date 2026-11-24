@@ -6,6 +6,7 @@ export { DEFAULT_TIMEOUT_MS, UpstreamUnavailableError } from "./http";
 export { publicMatchId, sourceMatchId, playerIdFromSource, sourcePlayerId, sourceTeamId } from "./identifiers";
 export { clearTeamNameCache } from "./cache";
 export { createLocalApiObservedPlayers, createLocalApiPlayerProfile, createLocalApiObservedSquad } from "./players";
+export { createLocalApiPlayerPhoto, type LocalPlayerPhoto } from "./player-photo";
 export { createLocalApiObservedMatches, createLocalApiTeamMatches } from "./matches";
 export { createLocalApiTeamIdentity, createLocalApiTeamPerformance } from "./teams";
 export { createLocalApiMatchDetail } from "./match-detail";

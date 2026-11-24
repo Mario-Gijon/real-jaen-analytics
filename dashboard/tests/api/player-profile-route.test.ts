@@ -47,6 +47,7 @@ describe("GET /api/v1/players/{playerId}/profile", () => {
     const body = (await response.json()) as PlayerProfile;
     expect(body.player).toEqual({
       id: "sofascore-player-966303", name: "Moha Keita", position: "midfielder",
+      photoUrl: null,
       birthDate: "1999-09-18", heightCm: 165, preferredFoot: null, country: "Senegal",
     });
     expect(body.source).toEqual({ synthetic: false, label: "Datos reales" });

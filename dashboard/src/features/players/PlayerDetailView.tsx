@@ -85,7 +85,7 @@ function Identity({ data }: { data: PlayerSeason }) {
   const { player, team, shirtNumber, season } = data;
   return <header className={css.header}>
     <div className={css.identity}>
-      <PlayerAvatar name={player.name} size={48} />
+      <PlayerAvatar name={player.name} src={player.photoUrl} size={48} />
       <div className={css.identityText}>
         <div className={css.name}>
           {shirtNumber !== null ? <span className={css.shirt} aria-label={`Dorsal ${shirtNumber}`}>{shirtNumber}</span> : null}

@@ -88,6 +88,7 @@ export function createSyntheticSource(data: RawDataset): DataSource {
     teamIdentity: async () => null,
     // Synthetic players are reached through their season (`player`), never as a real profile.
     playerProfile: async () => null,
+    playerPhoto: async () => null,
     playerObservedMatches: async () => null,
     teamObservedMatches: async () => null,
     teamObservedPerformance: async () => null,
@@ -113,6 +114,7 @@ export const syntheticSource: DataSource = {
   teamIdentity: async () => null,
   observedSquad: async () => null,
   playerProfile: async () => null,
+  playerPhoto: async () => null,
   playerObservedMatches: async () => null,
   teamObservedMatches: async () => null,
   teamObservedPerformance: async () => null,

@@ -66,6 +66,8 @@ export type PlayerRef = {
   name: string;
   /** General position, `null` when unknown. */
   position: PlayerPosition | null;
+  /** Same-origin Dashboard route for the current photo, or `null` when unavailable. */
+  photoUrl?: string | null;
 };
 
 /** Who supplied one response, when a section may not use the app's main source. */
