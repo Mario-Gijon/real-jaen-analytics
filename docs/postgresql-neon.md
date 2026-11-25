@@ -138,3 +138,22 @@ lectura y cada blob, exige vacías las tablas de destino, preserva IDs e histori
 intacto el origen. Los blobs no indexados se informan aparte y no se borran. Los backups generales no cambian en este
 hito; un `pg_dump` de `sports_data` contendrá fotos, y el procedimiento operativo se integrará en el Hito 09.
 Las validaciones de pg0004 y pg0005 se realizan en PostgreSQL 18 local con fixtures sintéticos; Neon no se modifica.
+
+## Video Service independiente (Hito 07A)
+
+Video Service usa la base lógica `video_service`, con `VIDEO_SERVICE_DATABASE_URL` para la lectura habitual y `VIDEO_SERVICE_MIGRATION_DATABASE_URL` para Alembic y la importación administrativa. Las dos variables deben contener credenciales separadas. El lector exige el rol `video_service_app`; `vg0001` restringe `CONNECT` a ese rol y concede solo `USAGE` en el esquema y `SELECT` en las tablas cuando ya existe. También retira `CREATE` del esquema público. El aprovisionamiento del rol pertenece a la infraestructura, no a la migración. El importador y la revisión no contienen hostname, propietario o proveedor específico de Neon.
+
+Su Alembic está aislado en `video-service/alembic.ini` y mantiene `video_service_alembic_version`, separado de `alembic_version` y de las revisiones `pg0001`–`pg0005` de Sports Data. El esquema incluye `video_service_job`, `video_service_association`, `video_service_catalog_video`, `video_service_calibration` y `video_service_match_video_override`. No hay claves foráneas entre las dos bases; `match_ref` es una referencia externa opaca. Los trabajos preparan campos de propietario, vencimiento de lease y fencing token, pero la coordinación distribuida aún no está implementada.
+
+Para una conexión remota se fuerza TLS `verify-full`, CA del sistema y channel binding requerido. Los ensayos locales requieren declarar `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL=1`, y esa excepción se admite solo con loopback. El pool de Video Service es de dos conexiones como máximo. En esta fase, FastAPI continúa usando SQLite; el rol PostgreSQL habitual es de solo lectura y no se admiten todavía escrituras de trabajos ni procesamiento OCR PostgreSQL.
+
+Tras preparar una base vacía `video_service` y sus roles con permisos mínimos, desde `video-service` aplica y ejecuta manualmente:
+
+```bash
+alembic -c alembic.ini upgrade head
+python scripts/migrate_to_postgresql.py --state-dir /ruta/estado-antiguo --catalog-dir /ruta/catalogo-estatico
+```
+
+El importador usa `VIDEO_SERVICE_MIGRATION_DATABASE_URL`, abre SQLite en solo lectura y toma el manifiesto indicado (por defecto `videos.json`) y sus calibraciones JSON. Preserva IDs, fechas textuales, eventos, metadatos, asociaciones históricas y tombstones; las calibraciones estáticas y las generadas permanecen identificadas por separado en JSONB. Valida integridad, claves foráneas, rutas y documentos; rechaza trabajos activos y destinos no vacíos; realiza una sola transacción y no altera el origen. No inventa trabajos para las entradas estáticas.
+
+`PostgreSQLVideoCatalogReader` implementa el núcleo de lectura que se integrará en el Hito 07B. Carga calibraciones solo al solicitar registros con ese detalle y agrupa la carga para listados; sus `VideoRecord.calibration` se consumen directamente por `synchronization_summary` y `locate_video`. Esta revisión se valida únicamente en PostgreSQL 18 local con fixtures sintéticos. Neon y SINBAD² permanecen sin cambios.

@@ -22,6 +22,8 @@ video-service/
 ├── src/
 │   ├── video_service/              # FastAPI, trabajos, estado, adaptadores
 │   └── video_sync/                 # motor y contratos copiados de V5.1
+├── migrations/                      # Alembic PostgreSQL independiente
+├── scripts/migrate_to_postgresql.py # importación explícita desde SQLite/JSON
 ├── tests/
 ├── V5.1_PROVENANCE.json            # hashes y artefactos de origen relativos
 ├── Dockerfile                     # OCR, descarga y servicio para Compose
@@ -167,6 +169,25 @@ Este ejemplo y las calibraciones de prueba son sintéticos; no representan retra
 `data/videos.json` es la asociación explícita entre vídeo, partido y calibración. Para registrar otro vídeo se añade una entrada y se apunta a un JSON relativo dentro del directorio de datos. No se buscan archivos por el nombre del vídeo ni se asocia automáticamente un partido. El manifiesto y las calibraciones concretas de la instalación se conservan fuera de Git y deben incluirse en su almacenamiento privado al desplegar el servicio.
 
 `V5.1_PROVENANCE.json` registra hashes de las fuentes del motor V5.1 copiadas a este servicio. No incluye hashes, nombres de vídeos, IDs de partidos ni resultados de calibraciones operativas.
+
+## PostgreSQL preparado (Hito 07A)
+
+El Hito 07A añade un esquema PostgreSQL independiente para la futura base `video_service`, una revisión Alembic `vg0001`, un importador explícito del estado SQLite/JSON y `PostgreSQLVideoCatalogReader`. El catálogo estático se guarda por separado de las asociaciones creadas por trabajos; los documentos de calibración, metadatos y eventos deportivos se guardan como JSONB. Las referencias `match_ref` siguen siendo opacas y no hay claves foráneas hacia Sports Data. Las desactivaciones con `active_video_id = null` y las asociaciones históricas se conservan.
+
+La aplicación FastAPI de este hito sigue usando SQLite. No actives el lector PostgreSQL en el arranque ni inicies trabajos sobre PostgreSQL hasta completar el Hito 07B. El rol habitual `video_service_app` tiene permisos de solo lectura; las migraciones y la importación usan `VIDEO_SERVICE_MIGRATION_DATABASE_URL` con credenciales administrativas separadas.
+
+Configura `VIDEO_SERVICE_DATABASE_URL` y `VIDEO_SERVICE_MIGRATION_DATABASE_URL` en el entorno del proceso. Las conexiones remotas exigen TLS con validación completa del certificado y hostname. Para un PostgreSQL de ensayo en loopback, la opción local debe declararse explícitamente con `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL=1`; solo afecta a hosts loopback.
+
+Desde `video-service`, aplica el esquema antes de importar datos:
+
+```bash
+alembic -c alembic.ini upgrade head
+python scripts/migrate_to_postgresql.py \
+  --state-dir /ruta/al/estado-antiguo \
+  --catalog-dir /ruta/al/catalogo-estatico
+```
+
+El importador abre `video-service.sqlite` en modo de solo lectura, valida las calibraciones y el manifiesto, exige tablas PostgreSQL vacías y una fuente sin trabajos activos, y confirma todo en una sola transacción. No elimina ni modifica los archivos de origen y no se ejecuta al iniciar el servicio. La guía de variables y migraciones está en [`docs/postgresql-neon.md`](../docs/postgresql-neon.md).
 
 ## Pruebas
 

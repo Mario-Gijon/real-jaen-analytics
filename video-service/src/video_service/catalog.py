@@ -62,8 +62,25 @@ def _load_calibration(data_dir: Path, relative_name: str, index: int) -> dict[st
         document = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise CatalogError(f"No se pudo cargar una calibración registrada (entrada {index}).") from exc
+    return validate_calibration_document(document, index=index)
+
+
+def validate_calibration_document(document: Any, *, index: int = 0) -> dict[str, Any]:
+    """Validate a calibration document regardless of whether it came from JSON or JSONB."""
     if not isinstance(document, dict):
         raise CatalogError(f"La calibración registrada en videos[{index}] no es un objeto JSON.")
+
+    def reject_non_finite(value: Any) -> None:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise CatalogError(f"La calibración registrada en videos[{index}] contiene un número no finito.")
+        if isinstance(value, dict):
+            for nested in value.values():
+                reject_non_finite(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                reject_non_finite(nested)
+
+    reject_non_finite(document)
     if not isinstance(document.get("segments"), list):
         raise CatalogError(f"La calibración registrada en videos[{index}] no contiene segments.")
     for segment_index, segment in enumerate(document["segments"]):
