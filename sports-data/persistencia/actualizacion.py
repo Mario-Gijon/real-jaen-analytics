@@ -338,7 +338,7 @@ class Coordinador:
         return anterior
 
     def solicitar(self, *, exportaciones=(), calendarios=(), fichas=(), comentarios=(), identificador=None,
-                  generacion_esperada=None):
+                  generacion_esperada=None, trabajo_compartido=None):
         entradas = dict(exportaciones=[(str(Path(p).resolve()), e) for p, e in exportaciones],
                         calendarios=[str(Path(p).resolve()) for p in calendarios],
                         fichas=[str(Path(p).resolve()) for p in fichas],
@@ -364,7 +364,8 @@ class Coordinador:
                         raise CoordinacionRechazada('Otro trabajo activo')
                     return activo[0]
                 ident = identificador or str(uuid.uuid4())
-                trabajo = dict(id=ident, estado='queued', fase='queued', entradas=entradas, generacion_base=generacion_esperada)
+                trabajo = dict(id=ident, estado='queued', fase='queued', entradas=entradas,
+                               generacion_base=generacion_esperada, trabajo_compartido=trabajo_compartido)
                 c.execute('INSERT INTO trabajo VALUES(?,?,?)', (ident, 'queued', json.dumps(trabajo)))
             self._cola.put(ident)
             return ident
@@ -898,6 +899,20 @@ class CoordinadorPostgreSQL(Coordinador):
             try:
                 # First database operation in the publication transaction: serialize all sports writers.
                 sincronizacion.bloquear_escritura_postgresql(connection)
+                shared = trabajo.get('trabajo_compartido')
+                if shared is not None:
+                    owner = uuid.UUID(shared['owner_id'])
+                    shared_id = uuid.UUID(shared['job_id'])
+                    shared_job = connection.execute(text("""
+                        SELECT owner_id, fencing_token, status, cancel_requested,
+                               lease_expires_at > clock_timestamp() AS lease_valid
+                        FROM sports_data_update_job WHERE job_id=:job_id FOR UPDATE
+                    """), {'job_id': shared_id}).mappings().first()
+                    if (shared_job is None or shared_job['status'] not in ('queued', 'running')
+                            or shared_job['owner_id'] != owner
+                            or int(shared_job['fencing_token']) != int(shared['fencing_token'])
+                            or not shared_job['lease_valid'] or shared_job['cancel_requested']):
+                        raise CoordinacionRechazada('La propiedad compartida del trabajo expiró o fue revocada')
                 existing = connection.execute(text("""
                     SELECT publication_id, source_generation, result_generation, input_sha256,
                            published_at, run_status, result_json
@@ -987,6 +1002,19 @@ class CoordinadorPostgreSQL(Coordinador):
                     WHERE singleton_id = 1
                 """), {'generation_id': result_generation, 'code_sha256': rules['codigo'],
                        'scope_sha256': rules['ambito'], 'publication_id': ident, 'published_at': published_at})
+                if shared is not None:
+                    confirmed = connection.execute(text("""
+                        UPDATE sports_data_update_job SET publication_id=:publication_id,
+                            last_publication_id=:publication_id, published=true,
+                            published_at=:published_at, updated_at=clock_timestamp()
+                        WHERE job_id=:job_id AND owner_id=:owner_id AND fencing_token=:fencing_token
+                          AND status IN ('queued','running')
+                        RETURNING job_id
+                    """), {'publication_id': uuid.UUID(ident), 'published_at': published_at,
+                           'job_id': shared_id, 'owner_id': owner,
+                           'fencing_token': int(shared['fencing_token'])}).first()
+                    if confirmed is None:
+                        raise CoordinacionRechazada('La propiedad compartida cambió durante la publicación')
                 trabajo.update(generacion=result_generation, resultado=result, esperada=source_generation)
                 self._guardar(trabajo)
                 self._frontera('before_commit')

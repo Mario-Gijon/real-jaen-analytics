@@ -200,7 +200,8 @@ class Cliente:
         elif marker.exists() or marker.is_symlink():
             raise AdquisicionRechazada('Instalacion de prueba: proveedor real deshabilitado')
 
-    def publicar(self, coordinador, request_id, recipe_id, *, timeout=600, avance=None, operation_id=None):
+    def publicar(self, coordinador, request_id, recipe_id, *, timeout=600, avance=None, operation_id=None,
+                 trabajo_compartido=None):
         """`avance(fase, **datos)`, if given, is told each phase (acquiring, verifying, publishing) before it starts;
         an exception it raises stops the request there, before any import if raised before 'publishing'."""
         avance = avance or (lambda fase, **datos: None)
@@ -210,6 +211,7 @@ class Cliente:
         operation_id=self._id(operation_id or request_id)
         if recipe_id not in RECIPES:
             raise AdquisicionRechazada('Receta invalida')
+        avance('acquiring', acquisition_state='preparing')
         with self.guard:
             folder = coordinador.directorio / 'adquisiciones' / request_id
             folder.mkdir(parents=True, exist_ok=True)
@@ -231,6 +233,9 @@ class Cliente:
                               acquisition_id=None, bundle=None, intentos=[])
                 _record(path, record)
             if record['bundle'] is None:
+                # Persist the acquiring phase before the external POST. A restart can then distinguish
+                # an untouched queued job from a request whose outcome may be unknown.
+                avance('acquiring', acquisition_state='submitting')
                 job = self.solicitar(request_id, recipe_id, baseline, operation_id)
                 record['acquisition_id'] = job['id']
                 _record(path, record)
@@ -245,7 +250,8 @@ class Cliente:
                 _record(path, record)
             else:
                 avance('verifying')
-            published = self.recibir(coordinador, folder, record, baseline, avance)
+            published = self.recibir(coordinador, folder, record, baseline, avance,
+                                     trabajo_compartido=trabajo_compartido)
             if recipe_id == 'sofascore-group2-2627-v1' and published.get('coverage') is not None:
                 # A stopped transport (403/429, repeated challenge, browser or transport refusal) must not
                 # trigger another batch. If the internal report cannot be read, fail closed and leave coverage
@@ -261,7 +267,8 @@ class Cliente:
                     published['_continuation_allowed'] = False
             return published
 
-    def reconciliar_publicacion(self, coordinador, request_id, recipe_id, coordinator_id):
+    def reconciliar_publicacion(self, coordinador, request_id, recipe_id, coordinator_id, *,
+                                trabajo_compartido=None):
         """Reconcile one stored bundle and publication ID without asking Acquisition or the provider for work."""
         request_id, coordinator_id = self._id(request_id), self._id(coordinator_id)
         if recipe_id not in RECIPES:
@@ -289,19 +296,24 @@ class Cliente:
             # generation is still current; the coordinator deduplicates an already accepted ID.
             if current.id != baseline.get('generation_id'):
                 raise Rejected('Missing publication ID after the base generation changed')
-            return self.recibir(coordinador, folder, record, baseline)
+            return self.recibir(coordinador, folder, record, baseline,
+                                trabajo_compartido=trabajo_compartido)
         if state['estado'] in ('queued', 'running'):
             return dict(state='pending', job_id=coordinator_id, request_id=request_id,
                         acquisition_id=record['acquisition_id'], bundle=record['bundle'])
         if state['estado'] != 'completed':
             return dict(state='failed', job_id=coordinator_id, request_id=request_id,
                         acquisition_id=record['acquisition_id'])
-        return self.recibir(coordinador, folder, record, baseline, estado_confirmado=state)
+        return self.recibir(coordinador, folder, record, baseline, estado_confirmado=state,
+                            trabajo_compartido=trabajo_compartido)
 
-    def recibir(self, coordinador, folder, record, baseline, avance=None, *, estado_confirmado=None):
+    def recibir(self, coordinador, folder, record, baseline, avance=None, *, estado_confirmado=None,
+                trabajo_compartido=None):
         """Verify the private copy and hand it to the coordinator. Records each coordinator attempt before it starts."""
         from .actualizacion import CoordinacionRechazada
         self._refrescar_generacion(coordinador)
+        if avance is not None:
+            avance('verifying')
         descriptor, job = record['bundle'], record['acquisition_id']
         body = (folder / 'bundle.json').read_bytes()
         manifest, files = verificar_sellado(body, descriptor, baseline, (job, record['request_id']),
@@ -329,7 +341,7 @@ class Cliente:
             if inventory(coordinador.capturar())['sha256'] != baseline['sha256']:
                 raise Rejected('La generacion cambio durante la adquisicion')
             if avance is not None:
-                avance('publishing')
+                avance('publishing', publication_id=last)
             exports = []
             comments = []
             for name, raw in files.items():
@@ -339,14 +351,17 @@ class Cliente:
                 elif name == 'comments.jsonl':
                     comments.append(folder / name)
             try:
+                shared = ({'trabajo_compartido': trabajo_compartido}
+                          if trabajo_compartido is not None else {})
                 coordinador.solicitar(exportaciones=exports, calendarios=[folder / 'calendar.jsonl'], identificador=last,
-                                      generacion_esperada=baseline['generation_id'],comentarios=comments)
+                                      generacion_esperada=baseline['generation_id'], comentarios=comments,
+                                      **shared)
             except CoordinacionRechazada as e:
                 raise Rejected(f'Coordinador: {e}') from None
         if state is not None and state['estado'] == 'completed':
             # A durable publication may be historical relative to the latest shared generation.
             # Return that job's result without reinstalling it or trying to publish it again.
-            result = state
+            result = _esperar_publicacion(coordinador, last)
         else:
             result = _esperar_publicacion(coordinador, last)
         if result['estado'] == 'pending':

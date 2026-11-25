@@ -88,6 +88,7 @@ def restriccion(environ):
 class Unavailable(Exception): pass
 class NotCancellable(Exception): pass
 class Cancelled(Exception): pass
+class PropiedadPerdida(Exception): pass
 
 
 class Actualizaciones:
@@ -98,15 +99,32 @@ class Actualizaciones:
             raise ValueError('Receta no aprobada')
         self.c, self.cliente, self.recipe = coordinador, cliente, recipe
         self.root = coordinador.directorio / 'control'
-        self.root.mkdir(exist_ok=True)
+        self.postgresql = bool(getattr(coordinador, 'es_postgresql', False))
+        self.instance_id = str(uuid.uuid4())
+        self.jobs = None
+        self.lease_seconds = self.heartbeat_seconds = None
+        self._heartbeats = {}
+        self._lost_ownership = {}
+        self._cancel_sent = set()
+        self._reconcile_signal = threading.Event()
+        self._pending_publications = set()
+        self._closing = False
+        if self.postgresql:
+            from persistencia.trabajos_postgresql import SharedUpdateJobs, lease_configuration
+            self.lease_seconds, self.heartbeat_seconds = lease_configuration()
+            self.jobs = SharedUpdateJobs(coordinador.motor, self.instance_id, self.lease_seconds)
+            self.jobs.check_schema()
+        else:
+            self.root.mkdir(exist_ok=True)
         self.guard = threading.RLock()
         self._scope_cache = None
         self.threads = []
         self.live_jobs = set()
         self.stop_reconciler = threading.Event()
-        with closing(self.db()) as c, c:
-            c.execute('CREATE TABLE IF NOT EXISTS job(id TEXT PRIMARY KEY, idem TEXT UNIQUE, state TEXT, data TEXT)')
-            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active ON job((1)) WHERE state IN ('queued','running')")
+        if not self.postgresql:
+            with closing(self.db()) as c, c:
+                c.execute('CREATE TABLE IF NOT EXISTS job(id TEXT PRIMARY KEY, idem TEXT UNIQUE, state TEXT, data TEXT)')
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active ON job((1)) WHERE state IN ('queued','running')")
         self._reconcile()
         self.reconciler_thread = threading.Thread(target=self._reconcile_loop, daemon=True,
                                                   name='publication-reconciler')
@@ -118,18 +136,115 @@ class Actualizaciones:
         return c
 
     def _rows(self, where='', args=()):
+        if self.postgresql:
+            raise RuntimeError('El historial PostgreSQL se consulta mediante índices compartidos')
         with closing(self.db()) as c:
             return [json.loads(r[0]) for r in c.execute('SELECT data FROM job ' + where, args).fetchall()]
 
     def get(self, ident):
+        if self.postgresql:
+            self._recover_shared()
+            return self.jobs.get(ident)
         rows = self._rows('WHERE id=?', (ident,))
         if not rows:
             raise KeyError(ident)
         return rows[0]
 
     def save(self, item):
+        if self.postgresql:
+            try:
+                self.jobs.save(item)
+            except Exception:
+                raise PropiedadPerdida() from None
+            return
         with closing(self.db()) as c, c:
             c.execute('UPDATE job SET state=?, data=? WHERE id=?', (item['status'], json.dumps(item), item['id']))
+
+    def _shared_owner(self, item):
+        return dict(job_id=item['id'], owner_id=item['owner_id'],
+                    fencing_token=item['fencing_token'])
+
+    def _touch_owner(self, item):
+        if not self.postgresql:
+            return
+        lost = self._lost_ownership.get(item['id'])
+        if self._closing or (lost is not None and lost.is_set()):
+            raise PropiedadPerdida()
+        try:
+            renewed = (item.get('owner_id') == self.instance_id
+                       and self.jobs.heartbeat(item['id'], item['fencing_token']))
+        except Exception:
+            renewed = False
+        if not renewed:
+            if lost is not None:
+                lost.set()
+            raise PropiedadPerdida()
+
+    def _cancel_owner_acquisition(self, ident):
+        if not ident:
+            return
+        with self.guard:
+            if ident in self._cancel_sent:
+                return
+            self._cancel_sent.add(ident)
+        self._cancel_acquisition(ident)
+
+    def _start_worker(self, item):
+        ident = item['id']
+        with self.guard:
+            if ident in self.live_jobs:
+                return
+            self.live_jobs.add(ident)
+            if self.postgresql and (ident not in self._heartbeats or self._heartbeats[ident].is_set()):
+                stop = threading.Event()
+                lost = threading.Event()
+                self._heartbeats[ident] = stop
+                self._lost_ownership[ident] = lost
+                heartbeat = threading.Thread(target=self._heartbeat_loop,
+                                             args=(ident, item['fencing_token'], stop, lost),
+                                             daemon=True, name='update-job-heartbeat')
+                heartbeat.start()
+            args = (ident, item['fencing_token']) if self.postgresql else (ident,)
+            worker = threading.Thread(target=self.run, args=args, daemon=True)
+            self.threads.append(worker)
+            worker.start()
+
+    def _heartbeat_loop(self, ident, token, stop, lost):
+        while not stop.wait(self.heartbeat_seconds):
+            try:
+                item = self.jobs.get(ident)
+            except KeyError:
+                return
+            except Exception:
+                continue
+            if item['status'] not in ACTIVE or item.get('owner_id') != self.instance_id \
+                    or item.get('fencing_token') != token:
+                if item['status'] in ACTIVE and item.get('owner_id') == self.instance_id:
+                    token = item.get('fencing_token')
+                else:
+                    return
+            if item.get('cancel_requested') and item.get('acquisition_id'):
+                self._cancel_owner_acquisition(item['acquisition_id'])
+            try:
+                if not self.jobs.heartbeat(ident, token):
+                    lost.set()
+                    if item.get('acquisition_id'):
+                        self._cancel_acquisition(item['acquisition_id'])
+                    return
+            except Exception:
+                # Retry transient connection errors; callbacks also fail closed before each next action.
+                continue
+
+    def _recover_shared(self):
+        if not self.postgresql:
+            return
+        try:
+            reclaimed = self.jobs.recover_expired()
+        except Exception as error:
+            print(f'[control] shared recovery: {type(error).__name__}', file=sys.stderr, flush=True)
+            return
+        for item in reclaimed:
+            self._start_worker(item)
 
     def _attempt(self, item):
         """Coordinator state of the request's last import attempt (the coordinator's journal is the authority)."""
@@ -158,19 +273,24 @@ class Actualizaciones:
         try:
             return self._reconcile_publication_once(item, coordinator_id=coordinator_id)
         except Exception as error:
+            if isinstance(error, PropiedadPerdida):
+                return False
             ident = coordinator_id or self._publication_id(item)
             # A mismatch or unreadable confirmation is an unknown outcome, not grounds to release the active lock.
-            with self.guard:
-                current = self.get(item['id'])
-                current.update(status='running', phase='publishing',
-                               publication_pending_id=ident,
-                               reconciliation_error=dict(type=type(error).__name__, message=str(error)[:300]),
-                               reconciliation_checked_at=now())
-                self._annotate_pending_age(current)
-                current['publication_attention_required'] = True
-                self.save(current)
-            print(f'[control] publication reconciliation {item["id"]}: {type(error).__name__}: {str(error)[:300]}',
-                  file=sys.stderr, flush=True)
+            try:
+                with self.guard:
+                    current = self.jobs.get(item['id']) if self.postgresql else self.get(item['id'])
+                    current.update(status='running', phase='publishing',
+                                   publication_pending_id=ident,
+                                   reconciliation_error=dict(type=type(error).__name__),
+                                   reconciliation_checked_at=now())
+                    self._annotate_pending_age(current)
+                    current['publication_attention_required'] = True
+                    self.save(current)
+            except Exception as record_error:
+                print(f'[control] publication reconciliation state: {type(record_error).__name__}',
+                      file=sys.stderr, flush=True)
+            print(f'[control] publication reconciliation {item["id"]}: {type(error).__name__}', file=sys.stderr, flush=True)
             return False
 
     @staticmethod
@@ -191,19 +311,31 @@ class Actualizaciones:
         if ident is None:
             return False
         try:
-            result = self.cliente.reconciliar_publicacion(self.c, item['request_id'], self.recipe, ident)
+            if self.postgresql:
+                self._touch_owner(item)
+                result = self.cliente.reconciliar_publicacion(
+                    self.c, item['request_id'], self.recipe, ident,
+                    trabajo_compartido=self._shared_owner(item))
+            else:
+                result = self.cliente.reconciliar_publicacion(self.c, item['request_id'], self.recipe, ident)
         except Exception as error:
+            if isinstance(error, PropiedadPerdida):
+                return False
             # An uncertain verification is not evidence of failure. Retain the active lock and retry this same ID.
-            with self.guard:
-                current = self.get(item['id'])
-                current.update(status='running', phase='publishing',
-                               publication_pending_id=ident,
-                               reconciliation_error=dict(type=type(error).__name__, message=str(error)[:300]),
-                               reconciliation_checked_at=now())
-                self._annotate_pending_age(current)
-                current['publication_attention_required'] = True
-                self.save(current)
-            print(f'[control] publication reconciliation {item["id"]}: {type(error).__name__}: {str(error)[:300]}',
+            try:
+                with self.guard:
+                    current = self.jobs.get(item['id']) if self.postgresql else self.get(item['id'])
+                    current.update(status='running', phase='publishing',
+                                   publication_pending_id=ident,
+                                   reconciliation_error=dict(type=type(error).__name__),
+                                   reconciliation_checked_at=now())
+                    self._annotate_pending_age(current)
+                    current['publication_attention_required'] = True
+                    self.save(current)
+            except Exception as record_error:
+                print(f'[control] publication reconciliation state: {type(record_error).__name__}',
+                      file=sys.stderr, flush=True)
+            print(f'[control] publication reconciliation {item["id"]}: {type(error).__name__}',
                   file=sys.stderr, flush=True)
             return False
 
@@ -259,6 +391,7 @@ class Actualizaciones:
             current.update(status='completed', phase='finished', published=True, finished_at=now(), resumable=False,
                            batch_count=max(current.get('batch_count', 0), current.get('pending_batch_sequence', 1)),
                            continuation_pending=False, result=final_result,
+                           confirmed_publication_id=ident,
                            reconciliation=dict(coordinator_id=ident, coordinator_state='completed',
                                                reconciled_at=now(), generation=generation))
             current.pop('publication_pending_id', None)
@@ -289,6 +422,30 @@ class Actualizaciones:
         return None, now()
 
     def _reconcile_loop(self):
+        if self.postgresql:
+            while not self.stop_reconciler.is_set():
+                if not self._pending_publications:
+                    self._reconcile_signal.wait()
+                    self._reconcile_signal.clear()
+                    continue
+                self._reconcile_signal.wait(PUBLICATION_RECONCILE_SECONDS)
+                self._reconcile_signal.clear()
+                for ident in tuple(self._pending_publications):
+                    try:
+                        item = self.jobs.get(ident)
+                    except Exception:
+                        continue
+                    if item['status'] not in ACTIVE or item.get('owner_id') != self.instance_id:
+                        self._pending_publications.discard(ident)
+                        continue
+                    if item.get('phase') == 'publishing' and item.get('publication_pending_id'):
+                        try:
+                            if self._reconcile_publication(item):
+                                self._pending_publications.discard(ident)
+                        except Exception as error:
+                            print(f'[control] publication reconciliation loop: {type(error).__name__}',
+                                  file=sys.stderr, flush=True)
+            return
         while not self.stop_reconciler.wait(PUBLICATION_RECONCILE_SECONDS):
             for item in self._rows("WHERE state='running'"):
                 if item.get('phase') != 'publishing':
@@ -300,6 +457,9 @@ class Actualizaciones:
 
     def _reconcile(self):
         """Reconcile durable publication IDs; only work before publication is treated as interrupted on restart."""
+        if self.postgresql:
+            self._recover_shared()
+            return
         for item in self._rows("WHERE state IN ('queued','running')"):
             if item.get('phase') == 'publishing' or item.get('publication_pending_id'):
                 publication_id = self._publication_id(item)
@@ -342,12 +502,16 @@ class Actualizaciones:
                     error=dict(code=code, message=message, retryable=retryable))
 
     def _last_finished(self):
+        if self.postgresql:
+            return self.jobs.latest_finished()
         rows = [r for r in self._rows("WHERE state NOT IN ('queued','running')")]
         return max(rows, key=lambda r: r['requested_at']) if rows else None
 
     def solicitar(self, idem):
         if not isinstance(idem, str) or str(uuid.UUID(idem)) != idem:
             raise ValueError('Idempotency-Key must be a UUID')
+        if self.postgresql:
+            return self._solicitar_postgresql(idem)
         refrescar = getattr(self.c, 'refrescar_generacion', None)
         if refrescar is not None:
             refrescar(force=True)
@@ -383,7 +547,43 @@ class Actualizaciones:
         worker.start()
         return item, False
 
+    def _solicitar_postgresql(self, idem):
+        self._recover_shared()
+        known = self.jobs.find_or_link(idem)
+        if known is not None:
+            return known, True
+        if not self.cliente.disponible(self.c):
+            raise Unavailable('Acquisition is not ready for this installation')
+        refrescar = getattr(self.c, 'refrescar_generacion', None)
+        if refrescar is not None:
+            refrescar(force=True)
+        try:
+            self.c.capturar()
+        except Exception:
+            raise Unavailable('No se pudo capturar la generación deportiva') from None
+        last = self.jobs.latest_finished()
+        reuse = last is not None and last['status'] == 'failed' and last.get('resumable')
+        request_id = last['request_id'] if reuse else str(uuid.uuid4())
+        item = dict(id=str(uuid.uuid4()), idem=idem, request_id=request_id,
+                    status='queued', phase='queued', published=False, requested_at=now(), finished_at=None,
+                    acquisition_id=None, publication_pending_id=None, cancel_requested=False,
+                    reused_bundle=bool(reuse), resumable=False, error=None, result=None,
+                    batch_mode=self.recipe == GROUP, batch_count=0,
+                    batch_request_ids=[request_id], batch_progress=None,
+                    continuation_pending=self.recipe == GROUP)
+        current, created = self.jobs.create_or_reuse(item, idem)
+        if not created:
+            return current, True
+        self._start_worker(current)
+        return current, False
+
     def cancelar(self, ident):
+        if self.postgresql:
+            self._recover_shared()
+            item = self.jobs.request_cancel(ident)
+            if item.get('owner_id') == self.instance_id and item.get('acquisition_id'):
+                self._cancel_owner_acquisition(item['acquisition_id'])
+            return item
         with self.guard:
             item = self.get(ident)
             if item['status'] == 'cancelled':
@@ -394,29 +594,43 @@ class Actualizaciones:
             self.save(item)
             acquisition = item['acquisition_id']
         if acquisition:
-            self._cancel_acquisition(acquisition)
+            self._cancel_owner_acquisition(acquisition)
         return item
 
     def _cancel_acquisition(self, acquisition):
         try:
             self.cliente.cancelar(acquisition)
         except Exception as e:  # the acquisition may have just finished; the job still stops before importing
-            print(f'[control] cancel {acquisition}: {e}', file=sys.stderr, flush=True)
+            print(f'[control] cancel {acquisition}: {type(e).__name__}', file=sys.stderr, flush=True)
 
-    def run(self, ident):
+    def run(self, ident, expected_fencing_token=None):
         def avance(fase, **datos):
             with self.guard:
                 item = self.get(ident)
+                if self.postgresql:
+                    try:
+                        self._touch_owner(item)
+                    except PropiedadPerdida:
+                        self._cancel_owner_acquisition(datos.get('acquisition_id') or item.get('acquisition_id'))
+                        raise
                 cancel = item['cancel_requested']
                 first = datos.get('acquisition_id') and item['acquisition_id'] is None
                 if first:
                     item['acquisition_id'] = datos['acquisition_id']
-                if cancel and fase in ('verifying', 'publishing'):
+                if datos.get('publication_id'):
+                    item['publication_pending_id'] = datos['publication_id']
+                if cancel and (fase in ('verifying', 'publishing')
+                               or datos.get('acquisition_state') == 'submitting'):
                     raise Cancelled()
                 item.update(status='running', phase=fase)
-                self.save(item)
-            if cancel and first:
-                self._cancel_acquisition(datos['acquisition_id'])
+                try:
+                    self.save(item)
+                except PropiedadPerdida:
+                    if datos.get('acquisition_id'):
+                        self._cancel_owner_acquisition(datos['acquisition_id'])
+                    raise
+            if cancel and (first or datos.get('acquisition_id')):
+                self._cancel_owner_acquisition(datos.get('acquisition_id') or item.get('acquisition_id'))
         from persistencia.adquisicion import AdquisicionRechazada
         from persistencia.bundle import Rejected
         try:
@@ -430,8 +644,14 @@ class Actualizaciones:
                 item = self.get(ident)
                 if item['cancel_requested']:
                     raise Cancelled()
-                result = self.cliente.publicar(self.c, item['request_id'], self.recipe, avance=avance,
-                                               operation_id=ident)
+                if self.postgresql:
+                    self._touch_owner(item)
+                    result = self.cliente.publicar(self.c, item['request_id'], self.recipe, avance=avance,
+                                                   operation_id=ident,
+                                                   trabajo_compartido=self._shared_owner(item))
+                else:
+                    result = self.cliente.publicar(self.c, item['request_id'], self.recipe, avance=avance,
+                                                   operation_id=ident)
                 if result.get('state') == 'pending':
                     coordinator_id = result.get('job_id')
                     if not coordinator_id or result.get('request_id') != item['request_id']:
@@ -444,6 +664,9 @@ class Actualizaciones:
                                     publication_pending_since=now(), reconciliation_checked_at=now())
                         self._annotate_pending_age(item)
                         self.save(item)
+                    if self.postgresql:
+                        self._pending_publications.add(ident)
+                        self._reconcile_signal.set()
                     return
                 batch_count += 1
                 coverage = result.get('coverage')
@@ -456,6 +679,8 @@ class Actualizaciones:
                 with self.guard:
                     item = self.get(ident)
                     item.update(published=True, batch_count=batch_count)
+                    if result.get('job_id'):
+                        item['confirmed_publication_id'] = result['job_id']
                     if progress is not None:
                         item['batch_progress'] = progress
                     previous_changed = (item.get('result') or {}).get('changed')
@@ -491,6 +716,7 @@ class Actualizaciones:
                     if item['cancel_requested']:
                         raise Cancelled()
                     item.update(request_id=next_request, acquisition_id=None, phase='acquiring', reused_bundle=False,
+                                publication_pending_id=None,
                                 batch_request_ids=item['batch_request_ids'] + [next_request], continuation_pending=True)
                     item['result']['reused_bundle'] = False
                     self.save(item)
@@ -500,6 +726,14 @@ class Actualizaciones:
                             resumable=False)
                 self.save(item)
         except Exception as error:
+            if isinstance(error, PropiedadPerdida):
+                stop = self._heartbeats.get(ident)
+                lost = self._lost_ownership.get(ident)
+                if stop is not None:
+                    stop.set()
+                if lost is not None:
+                    lost.set()
+                return
             text = str(error)
             if isinstance(error, Cancelled) or (isinstance(error, AdquisicionRechazada) and 'cancelled' in text):
                 code, resumable, status = 'CANCELLED', False, 'cancelled'
@@ -514,14 +748,39 @@ class Actualizaciones:
                 code, resumable, status = 'ACQUISITION_UNAVAILABLE', False, 'failed'
             else:
                 code, resumable, status = 'INTERNAL_ERROR', False, 'failed'
-            print(f'[control] job {ident}: {code}: {type(error).__name__}: {text[:300]}', file=sys.stderr, flush=True)
-            with self.guard:
-                item = self.get(ident)
-                self._fail(item, code, resumable=resumable, status=status)
-                self.save(item)
+            print(f'[control] job {ident}: {code}: {type(error).__name__}', file=sys.stderr, flush=True)
+            try:
+                with self.guard:
+                    item = self.get(ident)
+                    if self.postgresql and item.get('owner_id') != self.instance_id:
+                        return
+                    self._fail(item, code, resumable=resumable, status=status)
+                    self.save(item)
+            except PropiedadPerdida:
+                pass
         finally:
             with self.guard:
                 self.live_jobs.discard(ident)
+                if self.postgresql:
+                    try:
+                        current = self.jobs.get(ident)
+                        if current['status'] not in ACTIVE:
+                            self._pending_publications.discard(ident)
+                            stop = self._heartbeats.pop(ident, None)
+                            self._lost_ownership.pop(ident, None)
+                            if stop is not None:
+                                stop.set()
+                        elif current.get('owner_id') != self.instance_id:
+                            stop = self._heartbeats.pop(ident, None)
+                            self._lost_ownership.pop(ident, None)
+                            if stop is not None:
+                                stop.set()
+                        elif (current.get('owner_id') == self.instance_id
+                              and current.get('fencing_token') != expected_fencing_token):
+                            self._start_worker(current)
+                    except Exception:
+                        pass
+                    self._reconcile_signal.set()
 
     def _named(self, coverage):
         """The coverage with the names of the matches it mentions, from the generation just published (the interface
@@ -650,6 +909,15 @@ class Actualizaciones:
                                                                         if isinstance(item['result'].get('changed'), bool) else {})))
 
     def actual(self):
+        if self.postgresql:
+            self._recover_shared()
+            active = self.jobs.active()
+            last = self.jobs.latest_finished()
+            latest = self.jobs.latest_published()
+            return dict(available=self.cliente.disponible(self.c), scope=self._scope(),
+                        active_job=self.public(active), last_job=self.public(last),
+                        last_published=None if latest is None or not latest.get('result') else
+                        dict(at=latest['result']['published_at'], coverage=latest['result'].get('coverage')))
         active = self._rows("WHERE state IN ('queued','running')")
         last = self._last_finished()
         published = [r for r in self._rows() if r.get('published') and r.get('result')]
@@ -691,7 +959,12 @@ class Actualizaciones:
         return value
 
     def close(self, timeout=5):
+        self._closing = True
         self.stop_reconciler.set()
+        for stop in self._heartbeats.values():
+            stop.set()
+        for lost in self._lost_ownership.values():
+            lost.set()
         if hasattr(self, 'reconciler_thread'):
             self.reconciler_thread.join(timeout)
         for thread in self.threads:
