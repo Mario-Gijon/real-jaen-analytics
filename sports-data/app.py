@@ -130,7 +130,7 @@ def _enrichment_enabled():
 
 
 def _load_control(resources):
-    """Start the existing update coordinator only for an explicitly configured SQL installation."""
+    """Start one update coordinator for the explicitly selected SQLite or PostgreSQL backend."""
     from multiprocessing import parent_process
 
     if parent_process() is not None:
@@ -138,17 +138,13 @@ def _load_control(resources):
     workers = (os.environ.get('SPORTS_DATA_WORKERS'), os.environ.get('WEB_CONCURRENCY'))
     if any(value is not None and value != '1' for value in workers):
         raise ValueError('El modo control de sports-data solo admite un worker')
-    if os.environ.get('SPORTS_DATA_STORAGE', 'json') == 'postgresql':
-        raise ValueError('SPORTS_DATA_STORAGE=postgresql requiere SPORTS_DATA_CONTROL=0; no se puede mezclar con el coordinador SQLite')
-    if os.environ.get('SPORTS_DATA_STORAGE', 'json') != 'sql':
-        raise ValueError('El modo control requiere SPORTS_DATA_STORAGE=sql')
-    database = os.environ.get('SPORTS_DATA_DB')
-    if not database:
-        raise ValueError('SPORTS_DATA_DB es obligatorio en modo control')
+    storage = os.environ.get('SPORTS_DATA_STORAGE', 'json')
+    if storage not in ('sql', 'postgresql'):
+        raise ValueError('El modo control requiere SPORTS_DATA_STORAGE=sql o postgresql')
     scope = Path(os.environ.get('SPORTS_DATA_SCOPE', str(ROOT / 'ambito.json')))
 
     from control import Actualizaciones, RECIPE, restriccion, secret
-    from persistencia.actualizacion import Coordinador
+    from persistencia.actualizacion import Coordinador, CoordinadorPostgreSQL
     from persistencia.adquisicion import Cliente
 
     control_secret_file = os.environ.get('RJ_CONTROL_SECRET_FILE')
@@ -162,10 +158,21 @@ def _load_control(resources):
         modo=mode,
         restriccion=restriccion(os.environ),
     )
-    if _enrichment_enabled():
-        coordinator = Coordinador(database, scope, enrichment_snapshots=True)
+    if storage == 'postgresql':
+        workdir = os.environ.get('SPORTS_DATA_WORKDIR')
+        if not workdir:
+            raise ValueError('SPORTS_DATA_WORKDIR es obligatorio en control PostgreSQL')
+        from persistencia.postgresql import crear_motor_postgresql
+
+        motor = crear_motor_postgresql()
+        resources.callback(motor.dispose)
+        coordinator = CoordinadorPostgreSQL(motor, scope, workdir)
     else:
-        coordinator = Coordinador(database, scope)
+        database = os.environ.get('SPORTS_DATA_DB')
+        if not database:
+            raise ValueError('SPORTS_DATA_DB es obligatorio en modo control SQLite')
+        coordinator = (Coordinador(database, scope, enrichment_snapshots=True)
+                       if _enrichment_enabled() else Coordinador(database, scope))
     resources.enter_context(coordinator)
     updates = Actualizaciones(coordinator, client, recipe=os.environ.get('RJ_UPDATE_RECIPE', RECIPE))
     # ExitStack closes the update worker before releasing the coordinator's base lock.
@@ -370,10 +377,8 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
     storage = os.environ.get('SPORTS_DATA_STORAGE', 'json')
     control_mode = _control_enabled() if control_mode is None else control_mode
     enrichment_enabled = _enrichment_enabled()
-    if control_mode and storage == 'postgresql':
-        raise ValueError('SPORTS_DATA_STORAGE=postgresql requiere SPORTS_DATA_CONTROL=0; no se puede mezclar con el coordinador SQLite')
     if control_mode and data is not None:
-        raise ValueError('El modo control necesita la generación de SQLite, no datos precargados')
+        raise ValueError('El modo control necesita una generación del coordinador, no datos precargados')
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -389,6 +394,8 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                 (application.state.coordinator,
                  application.state.updates,
                  application.state.control_token) = _load_control(resources)
+                if getattr(application.state.coordinator, 'es_postgresql', False):
+                    application.state.postgresql_engine = application.state.coordinator.motor
             else:
                 if data is not None:
                     application.state.data = data

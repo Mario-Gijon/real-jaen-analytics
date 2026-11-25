@@ -273,6 +273,12 @@ class Actualizaciones:
 
     def _publication_run(self, result):
         """Return the coordinator import run's terminal status and timestamp when available."""
+        if getattr(self.c, 'es_postgresql', False):
+            status = result.get('run_status')
+            published_at = result.get('published_at')
+            if status in ('committed', 'no_changes') and isinstance(published_at, str):
+                return status, published_at
+            return None, now()
         run_id = result.get('run')
         if isinstance(run_id, int):
             try:

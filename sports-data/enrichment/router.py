@@ -258,6 +258,61 @@ def enriched_comments(
             detail={"error": "invalid_filter", "reason": str(error)},
         ) from error
 
+    if (getattr(request.app.state, "control_mode", False)
+            and getattr(request.app.state.coordinator, "es_postgresql", False)):
+        coordinator = request.app.state.coordinator
+        engine = request.app.state.postgresql_engine
+        if engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "enrichment_unavailable", "reason": "database_not_configured"},
+            )
+        # Pair the in-memory generation with a repeatable-read database snapshot. A concurrent
+        # COMMIT/swap may make the first capture stale; recapture against that committed state.
+        try:
+            for _attempt in range(3):
+                generation = coordinator.capturar()
+                with engine.connect() as connection:
+                    connection = connection.execution_options(isolation_level="REPEATABLE READ")
+                    with connection.begin():
+                        connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                        row = connection.execute(sqlalchemy_text(
+                            "SELECT generation_id FROM sports_data_publication_state WHERE singleton_id = 1"
+                        )).first()
+                        if row is None or str(row[0]) != generation.id:
+                            continue
+                        _validate_postgresql_enrichment_database(connection)
+                        return query_enriched_comments(
+                            connection,
+                            match_id=match_id,
+                            source_event_id=source_event_id,
+                            player_id=player_id,
+                            category=category,
+                            original_type=original_type,
+                            role=role,
+                            attributes=parsed_attributes,
+                            enrichment_version=DEFAULT_ENRICHMENT_VERSION,
+                            limit=limit,
+                            offset=offset,
+                        )
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "enrichment_unavailable", "reason": "generation_unavailable"},
+            )
+        except EnrichmentQueryError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "invalid_filter", "reason": str(error)},
+            ) from error
+        except HTTPException:
+            raise
+        except SQLAlchemyError:
+            # Driver errors can contain connection data; expose only the established API error shape.
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "enrichment_unavailable", "reason": "database_unavailable"},
+            ) from None
+
     lease = None
     postgresql_engine = None
     if getattr(request.app.state, "control_mode", False):

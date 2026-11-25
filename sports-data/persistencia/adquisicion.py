@@ -185,11 +185,13 @@ class Cliente:
         return body
 
     def _instalacion(self, coordinador):
-        marker = coordinador.base.with_name(coordinador.base.name + TEST_MARKER)
+        marker = getattr(coordinador, 'acquisition_test_marker', None)
+        if marker is None:
+            marker = coordinador.base.with_name(coordinador.base.name + TEST_MARKER)
         if self.modo == 'prueba':
-            if not marker.is_file() or marker.read_text() != TEST_CONTENT:
+            if not marker.is_file() or marker.is_symlink() or marker.read_text() != TEST_CONTENT:
                 raise AdquisicionRechazada('Instalacion de prueba no identificada')
-        elif marker.exists():
+        elif marker.exists() or marker.is_symlink():
             raise AdquisicionRechazada('Instalacion de prueba: proveedor real deshabilitado')
 
     def publicar(self, coordinador, request_id, recipe_id, *, timeout=600, avance=None, operation_id=None):

@@ -7,6 +7,7 @@ from contextlib import closing
 from dataclasses import dataclass
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import queue
 import shutil
@@ -108,6 +109,35 @@ def preparar(base, ambito, ident, *, enrichment_snapshots=None):
         if snapshot is not None:
             snapshot.release_owner()
         raise
+
+
+def preparar_postgresql(conexion, ambito, ident):
+    """Prepare an immutable API generation from the caller's uncommitted PostgreSQL snapshot."""
+    from persistencia.comentarios import comments_schema_ready, load_current_comments_postgresql
+
+    generacion = Generacion(
+        ident,
+        lectura.cargar_desde_postgresql(conexion, ambito),
+        load_current_comments_postgresql(conexion),
+        comments_schema_ready(conexion),
+        None,
+    )
+    rutas = ['/health', '/api/v1/scope']
+    for plural, entidad, clave, sufijos in (
+        ('equipos', 'teams', 'team_id', ('', '/players', '/matches', '/performance', '/player-stats')),
+        ('jugadores', 'players', 'player_id', ('', '/matches')),
+        ('partidos', 'matches', 'match_id', ('', '/statistics', '/lineups', '/incidents')),
+    ):
+        rutas.extend(f'/api/v1/{entidad}/{fila[clave]}{sufijo}'
+                     for fila in generacion._datos[plural] for sufijo in sufijos)
+    for ruta in rutas:
+        generacion.consultar(ruta)
+    for fila in generacion._datos['partidos']:
+        public_match_id = f"sofascore-match-{fila['match_id']}"
+        status, _ = generacion.consultar_comentarios(public_match_id)
+        if status != 200:
+            raise CoordinacionRechazada(f'No se pudo preparar la generación de comentarios de {public_match_id}')
+    return generacion
 
 
 class Coordinador:
@@ -481,3 +511,387 @@ class Coordinador:
 
     def __exit__(self, *_):
         self.close()
+
+
+class CoordinadorPostgreSQL(Coordinador):
+    """PostgreSQL publication coordinator with local operational journals only.
+
+    The shared job queue and API contracts come from ``Coordinador``. Sports state,
+    publication identity, and generation changes are authoritative in pg0002.
+    """
+
+    es_postgresql = True
+    GENERACION_INICIAL = '00000000-0000-4000-8000-000000000001'
+
+    def __init__(self, motor, ambito, directorio, *, _frontera=None):
+        self.motor = motor
+        self.ambito = Path(ambito).resolve()
+        self.directorio = Path(directorio).resolve()
+        self.directorio.mkdir(parents=True, exist_ok=True)
+        # Compatibility sentinel only. This file is never created or read as a sports database.
+        self.base = self.directorio / 'sports-data-postgresql'
+        self.acquisition_test_marker = self.directorio / '.acquisition-test-installation'
+        self.journal = self.directorio / 'jobs.sqlite'
+        self._enrichment_snapshots = None
+        self.reserva = 0
+        self._frontera = _frontera or (lambda nombre: None)
+        self._puerta = threading.Lock()
+        self._cola = queue.Queue()
+        self._listo = threading.Event()
+        self._bloqueado = None
+        self._inicio_error = None
+        self._cerrado = False
+        self._lock_descriptor = None
+        self._hilo = threading.Thread(target=self._propietario, daemon=False, name='sports-data-pg-coordinator')
+        self._hilo.start()
+        self._listo.wait()
+        if self._inicio_error:
+            self._hilo.join()
+            raise CoordinacionRechazada('No se pudo iniciar el coordinador PostgreSQL') from None
+
+    def _adquirir_lock_local(self):
+        import errno
+        import fcntl
+
+        lock_path = self.directorio / 'coordinator.lock'
+        self._lock_descriptor = lock_path.open('a+b')
+        try:
+            fcntl.flock(self._lock_descriptor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            self._lock_descriptor.close()
+            self._lock_descriptor = None
+            if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise CoordinacionRechazada('Ya hay una instalación activa para este directorio PostgreSQL') from None
+            raise
+
+    def _soltar_lock_local(self):
+        import fcntl
+
+        if self._lock_descriptor is not None:
+            fcntl.flock(self._lock_descriptor.fileno(), fcntl.LOCK_UN)
+            self._lock_descriptor.close()
+            self._lock_descriptor = None
+
+    def _abrir_postgresql(self):
+        from sqlalchemy import text
+
+        self.directorio.mkdir(parents=True, exist_ok=True)
+        with closing(self._db()) as journal, journal:
+            journal.execute('CREATE TABLE IF NOT EXISTS trabajo(id TEXT PRIMARY KEY, estado TEXT NOT NULL, detalle TEXT NOT NULL)')
+            journal.execute("CREATE UNIQUE INDEX IF NOT EXISTS unico_activo ON trabajo((1)) WHERE estado IN ('queued','running')")
+            journal.execute('CREATE TABLE IF NOT EXISTS confirmado(id INTEGER PRIMARY KEY CHECK(id=1), detalle TEXT NOT NULL)')
+
+        # A local job may have survived process exit before its operational journal was finalized.
+        for trabajo in self._activos():
+            publicacion = self._publicacion_durable(trabajo['id'])
+            if publicacion is not None:
+                trabajo.update(estado='completed', fase='finished', generacion=publicacion['result_generation'],
+                               resultado=publicacion['result'])
+            else:
+                trabajo.update(estado='interrupted', fase='finished',
+                               error='Proceso interrumpido antes de confirmar la publicación')
+            self._guardar(trabajo)
+
+        reglas = self._reglas()
+        with self.motor.connect() as connection, connection.begin():
+            # Must precede the state read used to initialize/recover the active generation.
+            sincronizacion.bloquear_escritura_postgresql(connection)
+            row = connection.execute(text("""
+                SELECT generation_id, generation_number, code_sha256, scope_sha256
+                FROM sports_data_publication_state WHERE singleton_id = 1 FOR UPDATE
+            """)).mappings().first()
+            if row is None:
+                raise CoordinacionRechazada('Falta la inicialización de pg0002')
+            current_scope = hashlib.sha256(self.ambito.read_bytes()).hexdigest()
+            if row['scope_sha256'] is not None and row['scope_sha256'] != current_scope:
+                raise CoordinacionRechazada('Cambió el ámbito guardado; requiere mantenimiento explícito')
+            if row['code_sha256'] is not None and not codigo_compatible(row['code_sha256']):
+                raise CoordinacionRechazada('Cambió la huella de reglas guardada; requiere mantenimiento explícito')
+            connection.execute(text("""
+                UPDATE sports_data_publication_state
+                SET code_sha256 = :code,
+                    scope_sha256 = COALESCE(scope_sha256, :scope),
+                    updated_at = now()
+                WHERE singleton_id = 1
+            """), {'code': reglas['codigo'], 'scope': current_scope})
+            sincronizacion.exigir_coherencia(connection)
+            generation_id = str(row['generation_id'])
+            self._actual = preparar_postgresql(connection, self.ambito, generation_id)
+            confirmed = dict(codigo=reglas['codigo'], ambito=current_scope, generacion=generation_id,
+                             numero_generacion=row['generation_number'])
+        with closing(self._db()) as journal, journal:
+            journal.execute('INSERT OR REPLACE INTO confirmado(id, detalle) VALUES(1, ?)',
+                            (json.dumps(confirmed),))
+
+    def _propietario(self):
+        try:
+            self._adquirir_lock_local()
+            self._abrir_postgresql()
+            self._listo.set()
+            while True:
+                item = self._cola.get()
+                if item is None:
+                    return
+                if not self._bloqueado:
+                    self._ejecutar(item)
+        except BaseException as error:
+            self._inicio_error = error
+        finally:
+            self._soltar_lock_local()
+            self._listo.set()
+
+    def capturar(self, *, enrichment=False):
+        if enrichment:
+            raise CoordinacionRechazada('El enriquecimiento PostgreSQL usa una transacción de lectura coherente')
+        return super().capturar(enrichment=False)
+
+    def estado(self, ident):
+        trabajo = self._leer(ident)
+        if trabajo['estado'] == 'running' and trabajo.get('fase') == 'publishing':
+            try:
+                durable = self._publicacion_durable(ident)
+                if durable is not None:
+                    from sqlalchemy import text
+
+                    with self.motor.connect() as connection, connection.begin():
+                        sincronizacion.bloquear_escritura_postgresql(connection)
+                        state = connection.execute(text("""
+                            SELECT generation_id FROM sports_data_publication_state
+                            WHERE singleton_id = 1 FOR UPDATE
+                        """)).scalar_one()
+                        current = preparar_postgresql(connection, self.ambito, str(state))
+                    with self._puerta:
+                        anterior = self._instalar_generacion(current)
+                        self._bloqueado = None
+                        if anterior is not None:
+                            self._liberar_generacion(anterior)
+                        trabajo.update(estado='completed', fase='finished',
+                                       generacion=durable['result_generation'], resultado=durable['result'])
+                        self._guardar(trabajo)
+            except Exception:
+                # Keep the job pending until the durable outcome can be read safely.
+                pass
+        return self._leer(ident)
+
+    def esperar(self, ident, timeout=30):
+        if self._bloqueado:
+            self.estado(ident)
+            trabajo = self._leer(ident)
+            if trabajo['estado'] in ('queued', 'running'):
+                return dict(estado='pending', identificador=ident)
+            return trabajo
+        return super().esperar(ident, timeout)
+
+    def _congelar_postgresql(self, trabajo):
+        directorio = self.directorio / trabajo['id']
+        directorio.mkdir(exist_ok=True)
+        entradas, manifiesto = {}, []
+        for grupo, valores in trabajo['entradas'].items():
+            entradas[grupo] = []
+            for i, valor in enumerate(valores):
+                ruta, equipo = valor if grupo == 'exportaciones' else (valor, None)
+                ruta = Path(ruta)
+                if not ruta.is_file() or ruta.is_symlink():
+                    raise CoordinacionRechazada('Entrada de publicación ausente o insegura')
+                destino = directorio / f'{grupo}-{i}.jsonl'
+                shutil.copyfile(ruta, destino)
+                with destino.open('r+b') as stream:
+                    import os
+                    os.fsync(stream.fileno())
+                digest = hashlib.sha256(destino.read_bytes()).hexdigest()
+                manifiesto.append(dict(grupo=grupo, nombre=ruta.name, equipo=equipo, sha256=digest))
+                entradas[grupo].append((destino, equipo) if grupo == 'exportaciones' else destino)
+        fingerprint = hashlib.sha256(json.dumps(manifiesto, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        trabajo['manifiesto'] = manifiesto
+        trabajo['huella_entradas'] = fingerprint
+        return entradas, fingerprint
+
+    def _publicacion_durable(self, ident):
+        from sqlalchemy import text
+
+        try:
+            with self.motor.connect() as connection:
+                row = connection.execute(text("""
+                    SELECT publication_id, source_generation, result_generation, input_sha256,
+                           published_at, run_status, result_json
+                    FROM sports_data_publication WHERE publication_id = :publication_id
+                """), {'publication_id': ident}).mappings().first()
+            if row is None:
+                return None
+            result = row['result_json']
+            if isinstance(result, str):
+                result = json.loads(result)
+            return dict(publication_id=str(row['publication_id']), source_generation=str(row['source_generation']),
+                        result_generation=str(row['result_generation']), input_sha256=row['input_sha256'],
+                        published_at=row['published_at'].isoformat(), run_status=row['run_status'], result=result)
+        except Exception:
+            # Driver errors can include server or connection details; callers decide whether to block/retry.
+            raise CoordinacionRechazada('No se pudo consultar el registro durable de publicaciones') from None
+
+    def _ejecutar(self, ident):
+        from sqlalchemy import text
+
+        trabajo = self._leer(ident)
+        nueva = None
+        instalada = False
+        input_fingerprint = None
+        try:
+            trabajo.update(estado='running', fase='preparing')
+            self._guardar(trabajo)
+            self._frontera('before_import')
+            entradas, input_fingerprint = self._congelar_postgresql(trabajo)
+            trabajo['fase'] = 'publishing'
+            self._guardar(trabajo)
+            self._frontera('before_transaction')
+
+            connection = self.motor.connect()
+            transaction = connection.begin()
+            try:
+                # First database operation in the publication transaction: serialize all sports writers.
+                sincronizacion.bloquear_escritura_postgresql(connection)
+                existing = connection.execute(text("""
+                    SELECT publication_id, source_generation, result_generation, input_sha256,
+                           published_at, run_status, result_json
+                    FROM sports_data_publication WHERE publication_id = :publication_id
+                """), {'publication_id': ident}).mappings().first()
+                if existing is not None:
+                    old_hash = existing['input_sha256']
+                    if old_hash != input_fingerprint:
+                        raise CoordinacionRechazada('ID de publicación reutilizado con otras entradas')
+                    durable_result = existing['result_json']
+                    if isinstance(durable_result, str):
+                        durable_result = json.loads(durable_result)
+                    result = dict(durable_result, published_at=existing['published_at'].isoformat(),
+                                  run_status=existing['run_status'])
+                    generation_id = str(existing['result_generation'])
+                    transaction.rollback()
+                    with self._puerta:
+                        trabajo.update(estado='completed', fase='finished', generacion=generation_id,
+                                       resultado=result)
+                        self._guardar(trabajo)
+                    return
+
+                state = connection.execute(text("""
+                    SELECT generation_id, generation_number, code_sha256, scope_sha256
+                    FROM sports_data_publication_state WHERE singleton_id = 1 FOR UPDATE
+                """)).mappings().one()
+                source_generation = str(state['generation_id'])
+                expected = trabajo.get('generacion_base')
+                if expected is not None and expected != source_generation:
+                    raise CoordinacionRechazada('La generación esperada ya no está vigente')
+                rules = self._reglas()
+                if state['scope_sha256'] != rules['ambito'] or not codigo_compatible(state['code_sha256']):
+                    raise CoordinacionRechazada('Cambió el código o el ámbito durante la publicación')
+
+                comments = entradas.pop('comentarios', [])
+                informe = sincronizacion.importar_evidencia_postgresql(
+                    connection,
+                    exportaciones=entradas.get('exportaciones', []),
+                    calendarios=entradas.get('calendarios', []),
+                    fichas=entradas.get('fichas', []),
+                )
+                if comments:
+                    from persistencia.comentarios import import_group_bundle_postgresql
+                    comentario = {'captured_ids': [], 'failed_ids': []}
+                    for response_file in comments:
+                        current = import_group_bundle_postgresql(connection, response_file)
+                        comentario['captured_ids'] = sorted(set(comentario['captured_ids']) | set(current['captured_ids']))
+                        comentario['failed_ids'] = sorted(set(comentario['failed_ids']) | set(current['failed_ids']))
+                    informe['comments_persisted'] = comentario
+                from enrichment.store import (
+                    ensure_selected_enrichments_complete_postgresql,
+                    persist_selected_enrichments_postgresql,
+                )
+                enrichment_result = persist_selected_enrichments_postgresql(connection, 'rules-v1')
+                ensure_selected_enrichments_complete_postgresql(connection, 'rules-v1')
+                informe['enrichment_persisted'] = enrichment_result
+                sincronizacion.exigir_coherencia(connection)
+                self._frontera('before_generation')
+                result_generation = str(uuid.uuid4())
+                nueva = preparar_postgresql(connection, self.ambito, result_generation)
+                published_at = datetime.now(timezone.utc)
+                result = dict(informe, generation_id=result_generation, source_generation=source_generation,
+                              published_at=published_at.isoformat(), run_status=informe['estado'])
+                connection.execute(text("""
+                    INSERT INTO sports_data_publication
+                        (publication_id, source_generation, result_generation, input_sha256, published_at,
+                         run_status, result_json)
+                    VALUES (:publication_id, :source_generation, :result_generation, :input_sha256,
+                            :published_at, :run_status, CAST(:result_json AS jsonb))
+                """), {'publication_id': ident, 'source_generation': source_generation,
+                       'result_generation': result_generation, 'input_sha256': input_fingerprint,
+                       'published_at': published_at, 'run_status': informe['estado'],
+                       'result_json': json.dumps(result, ensure_ascii=False, allow_nan=False)})
+                connection.execute(text("""
+                    UPDATE sports_data_publication_state
+                    SET generation_id = :generation_id, generation_number = generation_number + 1,
+                        code_sha256 = :code_sha256, scope_sha256 = :scope_sha256,
+                        last_publication_id = :publication_id, updated_at = :published_at
+                    WHERE singleton_id = 1
+                """), {'generation_id': result_generation, 'code_sha256': rules['codigo'],
+                       'scope_sha256': rules['ambito'], 'publication_id': ident, 'published_at': published_at})
+                trabajo.update(generacion=result_generation, resultado=result, esperada=source_generation)
+                self._guardar(trabajo)
+                self._frontera('before_commit')
+                with self._puerta:
+                    self._frontera('before_confirmation')
+                    try:
+                        transaction.commit()
+                        self._frontera('committed')
+                    except Exception:
+                        # A failed/uncertain COMMIT must block captures before the gate is released.
+                        self._bloqueado = CoordinacionRechazada('Resultado de COMMIT incierto; reconciliación en curso')
+                        raise
+                    anterior = self._instalar_generacion(nueva)
+                    instalada = True
+                    if anterior is not None:
+                        self._liberar_generacion(anterior)
+                    trabajo.update(estado='completed', fase='finished')
+                    self._guardar(trabajo, dict(codigo=rules['codigo'], ambito=rules['ambito'],
+                                                generacion=result_generation,
+                                                numero_generacion=int(state['generation_number']) + 1))
+                    self._frontera('swapped')
+            finally:
+                if transaction.is_active:
+                    transaction.rollback()
+                connection.close()
+        except Exception as error:
+            # COMMIT errors can be uncertain. A fresh connection to pg0002 is authoritative.
+            try:
+                durable = self._publicacion_durable(ident)
+                if durable is not None:
+                    if durable['input_sha256'] != input_fingerprint:
+                        raise CoordinacionRechazada('La publicación durable tiene otra huella de entradas')
+                    if nueva is None:
+                        raise CoordinacionRechazada('Publicación confirmada; la generación se recuperará al reiniciar')
+                    with self._puerta:
+                        if not instalada:
+                            anterior = self._instalar_generacion(nueva)
+                            instalada = True
+                            if anterior is not None:
+                                self._liberar_generacion(anterior)
+                        self._bloqueado = None
+                        trabajo.update(estado='completed', fase='finished',
+                                       generacion=durable['result_generation'], resultado=durable['result'])
+                        self._guardar(trabajo)
+                    return
+                safe_code = getattr(getattr(error, 'orig', None), 'sqlstate', None)
+                detail = f' (SQLSTATE {safe_code})' if safe_code else ''
+                trabajo.update(estado='failed', fase='finished',
+                               error=f'{type(error).__name__}{detail}')
+                self._guardar(trabajo)
+            except Exception:
+                # Unknown durable outcome: stop serving new captures until a restart reconciles pg0002.
+                self._bloqueado = CoordinacionRechazada('Resultado de COMMIT incierto; requiere reconciliación durable')
+                trabajo.update(estado='running', fase='publishing',
+                               error='Resultado durable temporalmente no disponible')
+                try:
+                    self._guardar(trabajo)
+                except Exception:
+                    pass
+        finally:
+            if nueva is not None and not instalada:
+                self._liberar_generacion(nueva)
+
+    def close(self):
+        super().close()
