@@ -141,6 +141,12 @@ class Cliente:
             return False
 
     @staticmethod
+    def _refrescar_generacion(coordinador):
+        refrescar = getattr(coordinador, 'refrescar_generacion', None)
+        if refrescar is not None:
+            refrescar(force=True)
+
+    @staticmethod
     def _id(ident):
         if not isinstance(ident, str) or str(uuid.UUID(ident)) != ident:
             raise AdquisicionRechazada('ID invalido')
@@ -199,6 +205,7 @@ class Cliente:
         an exception it raises stops the request there, before any import if raised before 'publishing'."""
         avance = avance or (lambda fase, **datos: None)
         self._instalacion(coordinador)
+        self._refrescar_generacion(coordinador)
         self._id(request_id)
         operation_id=self._id(operation_id or request_id)
         if recipe_id not in RECIPES:
@@ -259,6 +266,7 @@ class Cliente:
         request_id, coordinator_id = self._id(request_id), self._id(coordinator_id)
         if recipe_id not in RECIPES:
             raise AdquisicionRechazada('Receta invalida')
+        self._refrescar_generacion(coordinador)
         root = coordinador.directorio / 'adquisiciones'
         folder = root / request_id
         paths = (folder / 'solicitud.json', folder / 'inventory.json', folder / 'bundle.json')
@@ -288,13 +296,12 @@ class Cliente:
         if state['estado'] != 'completed':
             return dict(state='failed', job_id=coordinator_id, request_id=request_id,
                         acquisition_id=record['acquisition_id'])
-        if state.get('generacion') != current.id:
-            raise Rejected('Completed publication is not the confirmed current generation')
-        return self.recibir(coordinador, folder, record, baseline)
+        return self.recibir(coordinador, folder, record, baseline, estado_confirmado=state)
 
-    def recibir(self, coordinador, folder, record, baseline, avance=None):
+    def recibir(self, coordinador, folder, record, baseline, avance=None, *, estado_confirmado=None):
         """Verify the private copy and hand it to the coordinator. Records each coordinator attempt before it starts."""
         from .actualizacion import CoordinacionRechazada
+        self._refrescar_generacion(coordinador)
         descriptor, job = record['bundle'], record['acquisition_id']
         body = (folder / 'bundle.json').read_bytes()
         manifest, files = verificar_sellado(body, descriptor, baseline, (job, record['request_id']),
@@ -307,8 +314,8 @@ class Cliente:
         comprobar_restriccion(manifest, self.restriccion)
         path = folder / 'solicitud.json'
         last = record['intentos'][-1] if record['intentos'] else None
-        state = None
-        if last is not None:
+        state = estado_confirmado
+        if state is None and last is not None:
             try:
                 state = coordinador.estado(last)
             except KeyError:
@@ -336,7 +343,12 @@ class Cliente:
                                       generacion_esperada=baseline['generation_id'],comentarios=comments)
             except CoordinacionRechazada as e:
                 raise Rejected(f'Coordinador: {e}') from None
-        result = _esperar_publicacion(coordinador, last)
+        if state is not None and state['estado'] == 'completed':
+            # A durable publication may be historical relative to the latest shared generation.
+            # Return that job's result without reinstalling it or trying to publish it again.
+            result = state
+        else:
+            result = _esperar_publicacion(coordinador, last)
         if result['estado'] == 'pending':
             return dict(state='pending', job_id=last, acquisition_id=job, request_id=record['request_id'],
                         bundle=descriptor)

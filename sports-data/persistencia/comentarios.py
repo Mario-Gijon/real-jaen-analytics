@@ -840,7 +840,7 @@ def import_group_bundle_postgresql(connection, response_file: Path) -> dict:
 
     _require_postgresql_write_lock(connection)
     if not comments_schema_ready(connection):
-        return {'captured_ids': [], 'failed_ids': sorted(attempted)}
+        raise NarrativeCommentImportRejected('PostgreSQL comments schema is incomplete')
 
     captured, failed = set(), set()
     for row in records:

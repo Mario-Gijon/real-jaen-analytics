@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 from datetime import datetime, timezone
+import math
+import os
 from pathlib import Path
 import queue
 import shutil
@@ -25,6 +27,22 @@ from persistencia.enrichment_snapshot import EnrichmentSnapshot, EnrichmentSnaps
 
 class CoordinacionRechazada(RuntimeError):
     pass
+
+
+INTERVALO_GENERACION_MINIMO = 5.0
+VARIABLE_INTERVALO_GENERACION = 'SPORTS_DATA_GENERATION_CHECK_INTERVAL_SECONDS'
+
+
+def intervalo_comprobacion_generacion(valor=None):
+    """Read the local cache interval while enforcing the shared five-second minimum."""
+    valor = os.environ.get(VARIABLE_INTERVALO_GENERACION, '5') if valor is None else valor
+    try:
+        segundos = float(valor)
+    except (TypeError, ValueError):
+        raise ValueError(f'{VARIABLE_INTERVALO_GENERACION} debe ser un número de al menos 5 segundos') from None
+    if not math.isfinite(segundos) or segundos < INTERVALO_GENERACION_MINIMO:
+        raise ValueError(f'{VARIABLE_INTERVALO_GENERACION} debe ser un número de al menos 5 segundos')
+    return segundos
 
 
 def codigo():
@@ -71,6 +89,7 @@ class Generacion:
     _comentarios: dict
     comments_enabled: bool = True
     enrichment_snapshot: EnrichmentSnapshot | None = None
+    generation_number: int = 0
 
     def consultar(self, ruta):
         # Devuelve una respuesta propia: los consumidores no pueden mutar la instantánea.
@@ -111,7 +130,7 @@ def preparar(base, ambito, ident, *, enrichment_snapshots=None):
         raise
 
 
-def preparar_postgresql(conexion, ambito, ident):
+def preparar_postgresql(conexion, ambito, ident, generation_number=0):
     """Prepare an immutable API generation from the caller's uncommitted PostgreSQL snapshot."""
     from persistencia.comentarios import comments_schema_ready, load_current_comments_postgresql
 
@@ -121,6 +140,7 @@ def preparar_postgresql(conexion, ambito, ident):
         load_current_comments_postgresql(conexion),
         comments_schema_ready(conexion),
         None,
+        generation_number,
     )
     rutas = ['/health', '/api/v1/scope']
     for plural, entidad, clave, sufijos in (
@@ -523,11 +543,12 @@ class CoordinadorPostgreSQL(Coordinador):
     es_postgresql = True
     GENERACION_INICIAL = '00000000-0000-4000-8000-000000000001'
 
-    def __init__(self, motor, ambito, directorio, *, _frontera=None):
+    def __init__(self, motor, ambito, directorio, *, intervalo_generacion=None, _frontera=None):
         self.motor = motor
         self.ambito = Path(ambito).resolve()
         self.directorio = Path(directorio).resolve()
         self.directorio.mkdir(parents=True, exist_ok=True)
+        self.intervalo_generacion = intervalo_comprobacion_generacion(intervalo_generacion)
         # Compatibility sentinel only. This file is never created or read as a sports database.
         self.base = self.directorio / 'sports-data-postgresql'
         self.acquisition_test_marker = self.directorio / '.acquisition-test-installation'
@@ -536,6 +557,11 @@ class CoordinadorPostgreSQL(Coordinador):
         self.reserva = 0
         self._frontera = _frontera or (lambda nombre: None)
         self._puerta = threading.Lock()
+        self._refresco_condition = threading.Condition()
+        self._refrescando_generacion = False
+        self._ultima_comprobacion_generacion = 0.0
+        self._comprobacion_generacion_valida = False
+        self._numero_generacion = 0
         self._cola = queue.Queue()
         self._listo = threading.Event()
         self._bloqueado = None
@@ -586,42 +612,47 @@ class CoordinadorPostgreSQL(Coordinador):
             publicacion = self._publicacion_durable(trabajo['id'])
             if publicacion is not None:
                 trabajo.update(estado='completed', fase='finished', generacion=publicacion['result_generation'],
+                               generacion_vigente=publicacion['current_generation'],
+                               numero_generacion_vigente=publicacion['current_generation_number'],
                                resultado=publicacion['result'])
             else:
                 trabajo.update(estado='interrupted', fase='finished',
                                error='Proceso interrumpido antes de confirmar la publicación')
             self._guardar(trabajo)
 
-        reglas = self._reglas()
-        with self.motor.connect() as connection, connection.begin():
-            # Must precede the state read used to initialize/recover the active generation.
-            sincronizacion.bloquear_escritura_postgresql(connection)
-            row = connection.execute(text("""
-                SELECT generation_id, generation_number, code_sha256, scope_sha256
-                FROM sports_data_publication_state WHERE singleton_id = 1 FOR UPDATE
-            """)).mappings().first()
-            if row is None:
-                raise CoordinacionRechazada('Falta la inicialización de pg0002')
-            current_scope = hashlib.sha256(self.ambito.read_bytes()).hexdigest()
-            if row['scope_sha256'] is not None and row['scope_sha256'] != current_scope:
-                raise CoordinacionRechazada('Cambió el ámbito guardado; requiere mantenimiento explícito')
-            if row['code_sha256'] is not None and not codigo_compatible(row['code_sha256']):
-                raise CoordinacionRechazada('Cambió la huella de reglas guardada; requiere mantenimiento explícito')
-            connection.execute(text("""
-                UPDATE sports_data_publication_state
-                SET code_sha256 = :code,
-                    scope_sha256 = COALESCE(scope_sha256, :scope),
-                    updated_at = now()
-                WHERE singleton_id = 1
-            """), {'code': reglas['codigo'], 'scope': current_scope})
-            sincronizacion.exigir_coherencia(connection)
-            generation_id = str(row['generation_id'])
-            self._actual = preparar_postgresql(connection, self.ambito, generation_id)
-            confirmed = dict(codigo=reglas['codigo'], ambito=current_scope, generacion=generation_id,
-                             numero_generacion=row['generation_number'])
+        scope_hash = hashlib.sha256(self.ambito.read_bytes()).hexdigest()
+        with self.motor.connect() as connection:
+            connection = connection.execution_options(isolation_level='REPEATABLE READ')
+            with connection.begin():
+                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+                # The row and both business snapshots are read from the same MVCC view.
+                database, role, read_only, can_read_alembic = connection.exec_driver_sql("""
+                    SELECT current_database(), current_user, current_setting('transaction_read_only'),
+                           has_table_privilege(current_user, 'public.alembic_version', 'SELECT')
+                """).one()
+                if (database != 'sports_data' or role != 'sports_data_app' or read_only != 'on'
+                        or can_read_alembic):
+                    raise CoordinacionRechazada('La conexión no cumple el perfil de ejecución de Sports Data')
+                row = connection.execute(text("""
+                    SELECT generation_id, generation_number, code_sha256, scope_sha256
+                    FROM sports_data_publication_state WHERE singleton_id = 1
+                """)).mappings().first()
+                if row is None:
+                    raise CoordinacionRechazada('Falta la inicialización de pg0002')
+                if row['scope_sha256'] is not None and row['scope_sha256'] != scope_hash:
+                    raise CoordinacionRechazada('Cambió el ámbito guardado; requiere mantenimiento explícito')
+                sincronizacion.exigir_coherencia(connection)
+                generation_id = str(row['generation_id'])
+                generation_number = int(row['generation_number'])
+                self._actual = preparar_postgresql(connection, self.ambito, generation_id, generation_number)
+                self._numero_generacion = generation_number
+                confirmed = dict(ambito=scope_hash, generacion=generation_id,
+                                 numero_generacion=generation_number)
         with closing(self._db()) as journal, journal:
             journal.execute('INSERT OR REPLACE INTO confirmado(id, detalle) VALUES(1, ?)',
                             (json.dumps(confirmed),))
+        self._ultima_comprobacion_generacion = time.monotonic()
+        self._comprobacion_generacion_valida = True
 
     def _propietario(self):
         try:
@@ -640,9 +671,128 @@ class CoordinadorPostgreSQL(Coordinador):
             self._soltar_lock_local()
             self._listo.set()
 
+    def _leer_estado_generacion(self):
+        from sqlalchemy import text
+
+        with self.motor.connect() as connection:
+            connection = connection.execution_options(isolation_level='REPEATABLE READ')
+            with connection.begin():
+                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+                row = connection.execute(text("""
+                    SELECT generation_id, generation_number, scope_sha256
+                    FROM sports_data_publication_state WHERE singleton_id = 1
+                """)).mappings().first()
+                if row is None:
+                    raise CoordinacionRechazada('Falta la inicialización de pg0002')
+                scope_hash = hashlib.sha256(self.ambito.read_bytes()).hexdigest()
+                if row['scope_sha256'] is not None and row['scope_sha256'] != scope_hash:
+                    raise CoordinacionRechazada('Cambió el ámbito guardado; requiere mantenimiento explícito')
+                return str(row['generation_id']), int(row['generation_number'])
+
+    def _preparar_generacion_vigente(self, minimo):
+        from sqlalchemy import text
+
+        with self.motor.connect() as connection:
+            connection = connection.execution_options(isolation_level='REPEATABLE READ')
+            with connection.begin():
+                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+                row = connection.execute(text("""
+                    SELECT generation_id, generation_number, scope_sha256
+                    FROM sports_data_publication_state WHERE singleton_id = 1
+                """)).mappings().first()
+                if row is None:
+                    raise CoordinacionRechazada('Falta la inicialización de pg0002')
+                generation_number = int(row['generation_number'])
+                if generation_number < minimo:
+                    raise CoordinacionRechazada('La generación PostgreSQL retrocedió durante la lectura')
+                scope_hash = hashlib.sha256(self.ambito.read_bytes()).hexdigest()
+                if row['scope_sha256'] is not None and row['scope_sha256'] != scope_hash:
+                    raise CoordinacionRechazada('Cambió el ámbito guardado; requiere mantenimiento explícito')
+                sincronizacion.exigir_coherencia(connection)
+                generation = preparar_postgresql(connection, self.ambito, str(row['generation_id']),
+                                                  generation_number)
+        return generation, generation_number
+
+    def _instalar_generacion_versionada(self, generation, generation_number):
+        """Install a prepared snapshot only when its database version is not older than memory."""
+        with self._puerta:
+            if generation_number < self._numero_generacion:
+                self._liberar_generacion(generation)
+                return self._actual
+            if generation_number == self._numero_generacion:
+                if generation.id != self._actual.id:
+                    self._liberar_generacion(generation)
+                    raise CoordinacionRechazada('El ID de generación no coincide con su número durable')
+                self._liberar_generacion(generation)
+                self._bloqueado = None
+                return self._actual
+            previous = self._instalar_generacion(generation)
+            self._numero_generacion = generation_number
+            self._bloqueado = None
+            if previous is not None:
+                self._liberar_generacion(previous)
+            return generation
+
+    def refrescar_generacion(self, *, force=False):
+        """Check pg0002 on demand, rebuilding only when its monotonic generation number advances."""
+        with self._refresco_condition:
+            while self._refrescando_generacion:
+                self._refresco_condition.wait()
+                if self._refrescando_generacion:
+                    continue
+                # Share the in-flight result, including an immediate check requested by another caller.
+                if not self._comprobacion_generacion_valida:
+                    raise CoordinacionRechazada('No se pudo comprobar la generación PostgreSQL vigente')
+                with self._puerta:
+                    return self._actual
+            now = time.monotonic()
+            if (not force and self._bloqueado is None
+                    and now - self._ultima_comprobacion_generacion < self.intervalo_generacion):
+                if not self._comprobacion_generacion_valida:
+                    raise CoordinacionRechazada('No se pudo comprobar la generación PostgreSQL vigente')
+                with self._puerta:
+                    return self._actual
+            # The condition protects ownership only. PostgreSQL I/O and snapshot construction happen unlocked.
+            self._refrescando_generacion = True
+
+        try:
+            remote_id, remote_number = self._leer_estado_generacion()
+            with self._puerta:
+                local_id, local_number = self._actual.id, self._numero_generacion
+            if remote_number < local_number:
+                raise CoordinacionRechazada('La generación PostgreSQL retrocedió')
+            if remote_number == local_number:
+                if remote_id != local_id:
+                    raise CoordinacionRechazada('El ID de generación no coincide con su número durable')
+                with self._puerta:
+                    self._bloqueado = None
+                    current = self._actual
+            else:
+                candidate, candidate_number = self._preparar_generacion_vigente(remote_number)
+                current = self._instalar_generacion_versionada(candidate, candidate_number)
+        except Exception:
+            with self._refresco_condition:
+                self._ultima_comprobacion_generacion = time.monotonic()
+                self._comprobacion_generacion_valida = False
+                self._refrescando_generacion = False
+                self._refresco_condition.notify_all()
+            raise CoordinacionRechazada('No se pudo comprobar/refrescar la generación PostgreSQL') from None
+        with self._refresco_condition:
+            self._ultima_comprobacion_generacion = time.monotonic()
+            self._comprobacion_generacion_valida = True
+            self._refrescando_generacion = False
+            self._refresco_condition.notify_all()
+        return current
+
+    @property
+    def numero_generacion(self):
+        with self._puerta:
+            return self._numero_generacion
+
     def capturar(self, *, enrichment=False):
         if enrichment:
             raise CoordinacionRechazada('El enriquecimiento PostgreSQL usa una transacción de lectura coherente')
+        self.refrescar_generacion()
         return super().capturar(enrichment=False)
 
     def estado(self, ident):
@@ -651,22 +801,15 @@ class CoordinadorPostgreSQL(Coordinador):
             try:
                 durable = self._publicacion_durable(ident)
                 if durable is not None:
-                    from sqlalchemy import text
-
-                    with self.motor.connect() as connection, connection.begin():
-                        sincronizacion.bloquear_escritura_postgresql(connection)
-                        state = connection.execute(text("""
-                            SELECT generation_id FROM sports_data_publication_state
-                            WHERE singleton_id = 1 FOR UPDATE
-                        """)).scalar_one()
-                        current = preparar_postgresql(connection, self.ambito, str(state))
+                    current = self.refrescar_generacion(force=True)
+                    if current.generation_number < durable['current_generation_number']:
+                        raise CoordinacionRechazada('No se pudo instalar la generación durable vigente')
                     with self._puerta:
-                        anterior = self._instalar_generacion(current)
-                        self._bloqueado = None
-                        if anterior is not None:
-                            self._liberar_generacion(anterior)
                         trabajo.update(estado='completed', fase='finished',
-                                       generacion=durable['result_generation'], resultado=durable['result'])
+                                       generacion=durable['result_generation'],
+                                       generacion_vigente=current.id,
+                                       numero_generacion_vigente=current.generation_number,
+                                       resultado=durable['result'])
                         self._guardar(trabajo)
             except Exception:
                 # Keep the job pending until the durable outcome can be read safely.
@@ -713,8 +856,12 @@ class CoordinadorPostgreSQL(Coordinador):
             with self.motor.connect() as connection:
                 row = connection.execute(text("""
                     SELECT publication_id, source_generation, result_generation, input_sha256,
-                           published_at, run_status, result_json
-                    FROM sports_data_publication WHERE publication_id = :publication_id
+                           published_at, run_status, result_json,
+                           state.generation_id AS current_generation,
+                           state.generation_number AS current_generation_number
+                    FROM sports_data_publication AS publication
+                    CROSS JOIN sports_data_publication_state AS state
+                    WHERE publication.publication_id = :publication_id AND state.singleton_id = 1
                 """), {'publication_id': ident}).mappings().first()
             if row is None:
                 return None
@@ -723,7 +870,9 @@ class CoordinadorPostgreSQL(Coordinador):
                 result = json.loads(result)
             return dict(publication_id=str(row['publication_id']), source_generation=str(row['source_generation']),
                         result_generation=str(row['result_generation']), input_sha256=row['input_sha256'],
-                        published_at=row['published_at'].isoformat(), run_status=row['run_status'], result=result)
+                        published_at=row['published_at'].isoformat(), run_status=row['run_status'], result=result,
+                        current_generation=str(row['current_generation']),
+                        current_generation_number=int(row['current_generation_number']))
         except Exception:
             # Driver errors can include server or connection details; callers decide whether to block/retry.
             raise CoordinacionRechazada('No se pudo consultar el registro durable de publicaciones') from None
@@ -765,8 +914,11 @@ class CoordinadorPostgreSQL(Coordinador):
                                   run_status=existing['run_status'])
                     generation_id = str(existing['result_generation'])
                     transaction.rollback()
+                    current = self.refrescar_generacion(force=True)
                     with self._puerta:
                         trabajo.update(estado='completed', fase='finished', generacion=generation_id,
+                                       generacion_vigente=current.id,
+                                       numero_generacion_vigente=current.generation_number,
                                        resultado=result)
                         self._guardar(trabajo)
                     return
@@ -780,8 +932,12 @@ class CoordinadorPostgreSQL(Coordinador):
                 if expected is not None and expected != source_generation:
                     raise CoordinacionRechazada('La generación esperada ya no está vigente')
                 rules = self._reglas()
-                if state['scope_sha256'] != rules['ambito'] or not codigo_compatible(state['code_sha256']):
-                    raise CoordinacionRechazada('Cambió el código o el ámbito durante la publicación')
+                if state['scope_sha256'] is not None and state['scope_sha256'] != rules['ambito']:
+                    raise CoordinacionRechazada('Cambió el ámbito durante la publicación')
+
+                from persistencia.comentarios import comments_schema_ready
+                if not comments_schema_ready(connection):
+                    raise CoordinacionRechazada('El esquema PostgreSQL de comentarios está incompleto')
 
                 comments = entradas.pop('comentarios', [])
                 informe = sincronizacion.importar_evidencia_postgresql(
@@ -808,7 +964,8 @@ class CoordinadorPostgreSQL(Coordinador):
                 sincronizacion.exigir_coherencia(connection)
                 self._frontera('before_generation')
                 result_generation = str(uuid.uuid4())
-                nueva = preparar_postgresql(connection, self.ambito, result_generation)
+                result_generation_number = int(state['generation_number']) + 1
+                nueva = preparar_postgresql(connection, self.ambito, result_generation, result_generation_number)
                 published_at = datetime.now(timezone.utc)
                 result = dict(informe, generation_id=result_generation, source_generation=source_generation,
                               published_at=published_at.isoformat(), run_status=informe['estado'])
@@ -844,12 +1001,18 @@ class CoordinadorPostgreSQL(Coordinador):
                         raise
                     anterior = self._instalar_generacion(nueva)
                     instalada = True
+                    self._numero_generacion = result_generation_number
+                    self._bloqueado = None
+                    self._ultima_comprobacion_generacion = time.monotonic()
+                    self._comprobacion_generacion_valida = True
                     if anterior is not None:
                         self._liberar_generacion(anterior)
                     trabajo.update(estado='completed', fase='finished')
+                    trabajo.update(generacion_vigente=result_generation,
+                                   numero_generacion_vigente=result_generation_number)
                     self._guardar(trabajo, dict(codigo=rules['codigo'], ambito=rules['ambito'],
                                                 generacion=result_generation,
-                                                numero_generacion=int(state['generation_number']) + 1))
+                                                numero_generacion=result_generation_number))
                     self._frontera('swapped')
             finally:
                 if transaction.is_active:
@@ -862,17 +1025,15 @@ class CoordinadorPostgreSQL(Coordinador):
                 if durable is not None:
                     if durable['input_sha256'] != input_fingerprint:
                         raise CoordinacionRechazada('La publicación durable tiene otra huella de entradas')
-                    if nueva is None:
-                        raise CoordinacionRechazada('Publicación confirmada; la generación se recuperará al reiniciar')
+                    current = self.refrescar_generacion(force=True)
+                    if current.generation_number < durable['current_generation_number']:
+                        raise CoordinacionRechazada('No se pudo instalar la generación durable vigente')
                     with self._puerta:
-                        if not instalada:
-                            anterior = self._instalar_generacion(nueva)
-                            instalada = True
-                            if anterior is not None:
-                                self._liberar_generacion(anterior)
-                        self._bloqueado = None
                         trabajo.update(estado='completed', fase='finished',
-                                       generacion=durable['result_generation'], resultado=durable['result'])
+                                       generacion=durable['result_generation'],
+                                       generacion_vigente=current.id,
+                                       numero_generacion_vigente=current.generation_number,
+                                       resultado=durable['result'])
                         self._guardar(trabajo)
                     return
                 safe_code = getattr(getattr(error, 'orig', None), 'sqlstate', None)

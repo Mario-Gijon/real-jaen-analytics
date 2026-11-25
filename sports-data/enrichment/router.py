@@ -258,8 +258,7 @@ def enriched_comments(
             detail={"error": "invalid_filter", "reason": str(error)},
         ) from error
 
-    if (getattr(request.app.state, "control_mode", False)
-            and getattr(request.app.state.coordinator, "es_postgresql", False)):
+    if getattr(request.app.state, "postgresql_coordinator", False):
         coordinator = request.app.state.coordinator
         engine = request.app.state.postgresql_engine
         if engine is None:
@@ -267,34 +266,47 @@ def enriched_comments(
                 status_code=503,
                 detail={"error": "enrichment_unavailable", "reason": "database_not_configured"},
             )
-        # Pair the in-memory generation with a repeatable-read database snapshot. A concurrent
-        # COMMIT/swap may make the first capture stale; recapture against that committed state.
+        # Pair the in-memory generation with a repeatable-read database snapshot. If another
+        # installation published after capture, force the shared coordinator refresh before retrying.
         try:
             for _attempt in range(3):
-                generation = coordinator.capturar()
+                try:
+                    generation = coordinator.capturar()
+                except Exception:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"error": "enrichment_unavailable", "reason": "generation_unavailable"},
+                    ) from None
+                matches_generation = False
+                response = None
                 with engine.connect() as connection:
                     connection = connection.execution_options(isolation_level="REPEATABLE READ")
                     with connection.begin():
                         connection.exec_driver_sql("SET TRANSACTION READ ONLY")
                         row = connection.execute(sqlalchemy_text(
-                            "SELECT generation_id FROM sports_data_publication_state WHERE singleton_id = 1"
+                            "SELECT generation_id, generation_number FROM sports_data_publication_state "
+                            "WHERE singleton_id = 1"
                         )).first()
-                        if row is None or str(row[0]) != generation.id:
-                            continue
-                        _validate_postgresql_enrichment_database(connection)
-                        return query_enriched_comments(
-                            connection,
-                            match_id=match_id,
-                            source_event_id=source_event_id,
-                            player_id=player_id,
-                            category=category,
-                            original_type=original_type,
-                            role=role,
-                            attributes=parsed_attributes,
-                            enrichment_version=DEFAULT_ENRICHMENT_VERSION,
-                            limit=limit,
-                            offset=offset,
-                        )
+                        matches_generation = (row is not None and str(row[0]) == generation.id
+                                              and int(row[1]) == generation.generation_number)
+                        if matches_generation:
+                            _validate_postgresql_enrichment_database(connection)
+                            response = query_enriched_comments(
+                                connection,
+                                match_id=match_id,
+                                source_event_id=source_event_id,
+                                player_id=player_id,
+                                category=category,
+                                original_type=original_type,
+                                role=role,
+                                attributes=parsed_attributes,
+                                enrichment_version=DEFAULT_ENRICHMENT_VERSION,
+                                limit=limit,
+                                offset=offset,
+                            )
+                if matches_generation:
+                    return response
+                coordinator.refrescar_generacion(force=True)
             raise HTTPException(
                 status_code=503,
                 detail={"error": "enrichment_unavailable", "reason": "generation_unavailable"},
@@ -311,6 +323,11 @@ def enriched_comments(
             raise HTTPException(
                 status_code=503,
                 detail={"error": "enrichment_unavailable", "reason": "database_unavailable"},
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "enrichment_unavailable", "reason": "generation_unavailable"},
             ) from None
 
     lease = None

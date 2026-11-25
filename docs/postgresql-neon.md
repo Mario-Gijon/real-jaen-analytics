@@ -34,11 +34,12 @@ La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, es
 
 ## Lectura provisional de Sports Data
 
-Sports Data puede arrancar en modo de consulta con `SPORTS_DATA_STORAGE=postgresql` y `SPORTS_DATA_CONTROL=0`. Carga la generación deportiva y los comentarios seleccionados en una misma transacción `REPEATABLE READ READ ONLY`, y la conserva en memoria durante la vida del proceso. Con `SPORTS_DATA_ENRICHMENT_ENABLED=1`, `/api/v1/enrichment/comments` usa el mismo motor PostgreSQL y ejecuta validación, recuento, página y participantes en una transacción de lectura por petición; ignora `SPORTS_DATA_ENRICHMENT_DB`. No habilita actualizaciones, no combina PostgreSQL con el coordinador SQLite y no cambia la persistencia habitual ni las fotografías locales.
+Sports Data puede arrancar en modo de consulta con `SPORTS_DATA_STORAGE=postgresql` y `SPORTS_DATA_CONTROL=0`. Tanto este modo como el modo PostgreSQL con control comparten `CoordinadorPostgreSQL`: cada instalación carga datos y comentarios desde una misma transacción `REPEATABLE READ READ ONLY`, y conserva esa generación en memoria. No se mantienen transacciones durante su vida. Con `SPORTS_DATA_ENRICHMENT_ENABLED=1`, `/api/v1/enrichment/comments` coteja la generación capturada con `sports_data_publication_state` y ejecuta validación, recuento, página y participantes dentro de una transacción de lectura coherente; ignora `SPORTS_DATA_ENRICHMENT_DB`. El modo de solo consulta no habilita actualizaciones ni combina PostgreSQL con el coordinador SQLite.
 
 Desde `sports-data`, carga solo `SPORTS_DATA_DATABASE_URL` de `.env.neon` y arranca con:
 
 ```sh
+SPORTS_DATA_WORKDIR=/ruta/local/sports-data-dev \
 SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 SPORTS_DATA_ENRICHMENT_ENABLED=1 \
   .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8002
 ```
@@ -81,12 +82,22 @@ La función no abre conexiones ni confirma o revierte la transacción externa. A
 
 ## Coordinador PostgreSQL (Hito 04D)
 
-`persistencia.actualizacion.CoordinadorPostgreSQL` conserva las interfaces de `Coordinador` que usa Acquisition y Actualizaciones. En `SPORTS_DATA_STORAGE=postgresql` con `SPORTS_DATA_CONTROL=1`, abre un motor de ejecución PostgreSQL y exige `SPORTS_DATA_WORKDIR`, un directorio local explícito que guarda únicamente journals operativos, staging y el bloqueo de instalación. Se permite una única instalación activa por directorio. El archivo deportivo SQLite y las instantáneas deportivas no se usan.
+`persistencia.actualizacion.CoordinadorPostgreSQL` conserva las interfaces de `Coordinador` que usa Acquisition y Actualizaciones. En ambos modos PostgreSQL, abre un motor de ejecución y exige `SPORTS_DATA_WORKDIR`, un directorio local explícito que guarda únicamente journals operativos, staging y el bloqueo de instalación. Cada instalación debe usar su propio directorio de trabajo; se permite una única instancia activa por directorio. El archivo deportivo SQLite y las instantáneas deportivas no se usan.
 
 Cada paquete que Acquisition ya verificó se congela localmente antes de abrir la transacción. El coordinador adquiere primero `pg_advisory_xact_lock(1380075856, 4)`, comprueba la generación vigente, importa datos deportivos, comentarios y enriquecimientos, valida completitud y coherencia, prepara la generación de API desde esa misma conexión y registra la publicación. PostgreSQL confirma los datos, el registro y la nueva generación en un solo `COMMIT`; solo entonces se cambia la generación en memoria. Un fallo anterior al `COMMIT` revierte todo y conserva la generación anterior. Las consultas en curso mantienen su generación capturada.
 
 El nuevo esquema `pg0002` crea `sports_data_publication` (ID idempotente, generaciones de origen y resultado, huella SHA-256, fecha y resultado) y la fila única `sports_data_publication_state` (generación vigente y huellas de código y ámbito). La generación inicial es estable. `sports_data_app` solo puede leer e insertar publicaciones y leer y actualizar la fila de estado; la revisión de Alembic la conserva inaccesible. Ante un resultado de `COMMIT` incierto o un reinicio, el coordinador consulta este registro durable y reconstruye la generación vigente desde PostgreSQL.
 
-Con el control PostgreSQL habilitado, `/api/v1/enrichment/comments` consulta las tablas PostgreSQL en una transacción `REPEATABLE READ READ ONLY` y comprueba que el ID de generación coincide con el capturado en memoria. Reintenta la captura ante un intercambio concurrente; no solicita una instantánea SQLite. El camino SQLite habitual conserva su coordinador, candidata, journal y recuperación por copia.
+## Sincronización de generaciones (Hito 05A)
+
+Cada coordinador consulta bajo demanda la fila única `sports_data_publication_state`, usando un reloj monotónico local. `SPORTS_DATA_GENERATION_CHECK_INTERVAL_SECONDS` define el intervalo de caché y tiene un mínimo de 5 segundos; su valor predeterminado es 5. Las lecturas normales respetan ese intervalo. Antes de iniciar una adquisición, construir su inventario o verificar una publicación, el control fuerza una consulta inmediata. No hay un hilo de polling.
+
+Si el número de generación no cambia, se reutilizan los objetos de datos y comentarios en memoria. Si avanza, el coordinador carga la generación identificada dentro de una transacción corta `REPEATABLE READ READ ONLY` y cambia la referencia en memoria bajo un cerrojo. Un único cerrojo de refresco evita reconstrucciones duplicadas; el número durable impide instalar una reconstrucción antigua. Las peticiones que ya capturaron la generación anterior conservan sus referencias. Si la comprobación falla, las respuestas de datos cierran el paso con 503 y las publicaciones no comienzan; una comprobación posterior puede recuperarse cuando vuelva PostgreSQL.
+
+El endpoint de enriquecimientos compara ID y número de generación dentro de la misma transacción de lectura que ejecuta la consulta y fuerza el refresco si encuentra una vista desactualizada. La recuperación durable conserva por separado la generación producida por un trabajo histórico y la que está vigente; reconocer un `COMMIT` confirmado no hace retroceder la generación servida. Si el esquema de comentarios PostgreSQL está incompleto, la publicación se rechaza como conjunto.
+
+La huella general de código almacenada por pg0002 es informativa: puede cambiar al editar código de persistencia. La compatibilidad efectiva sigue protegida por la validación de reglas deportivas y por la huella del ámbito, sin bloquear lecturas compatibles por cambios internos de persistencia.
+
+El camino SQLite habitual conserva su coordinador, candidata, journal y recuperación por copia.
 
 `pg0002` no se aplica a Neon en este hito. Sus validaciones se ejecutan exclusivamente en PostgreSQL 18 local mediante un contenedor temporal; no se utiliza Neon ni se cambia su estado.

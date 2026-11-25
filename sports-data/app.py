@@ -3,8 +3,8 @@
 Run with ``uvicorn app:app``. By default this reads ``datos/``. Set
 ``SPORTS_DATA_STORAGE=sql`` and ``SPORTS_DATA_DB`` to read one SQLite generation;
 the cooperative lock is kept until the ASGI app shuts down. Development can
-temporarily set ``SPORTS_DATA_STORAGE=postgresql`` with ``SPORTS_DATA_CONTROL=0``
-to load Sports Data and selected comments from one read-only PostgreSQL snapshot.
+temporarily set ``SPORTS_DATA_STORAGE=postgresql`` to serve a cached generation
+refreshed from the shared PostgreSQL publication state on demand.
 The separate
 read-only enrichment endpoint is registered only with
 ``SPORTS_DATA_ENRICHMENT_ENABLED=1``. Outside control mode it reads the explicitly
@@ -69,38 +69,19 @@ def _load_data(resources):
 
 
 def _load_postgresql(resources):
-    """Load sports and comment snapshots from one read-only PostgreSQL snapshot."""
-    from sqlalchemy.exc import SQLAlchemyError
-
-    from persistencia import lectura
-    from persistencia.comentarios import load_current_comments_postgresql
+    """Start the shared generation coordinator for PostgreSQL query-only mode."""
+    from persistencia.actualizacion import CoordinadorPostgreSQL
     from persistencia.postgresql import crear_motor_postgresql
 
     motor = crear_motor_postgresql()
     resources.callback(motor.dispose)
     scope = Path(os.environ.get('SPORTS_DATA_SCOPE', str(ROOT / 'ambito.json')))
-    try:
-        with motor.connect() as connection:
-            connection = connection.execution_options(isolation_level='REPEATABLE READ')
-            with connection.begin():
-                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
-                database, role, read_only, can_read_alembic = connection.exec_driver_sql("""
-                    SELECT current_database(), current_user, current_setting('transaction_read_only'),
-                           has_table_privilege(current_user, 'public.alembic_version', 'SELECT')
-                """).one()
-                if (database != 'sports_data' or role != 'sports_data_app' or read_only != 'on'
-                        or can_read_alembic):
-                    from persistencia.lectura import BaseNoUtilizable
-                    raise BaseNoUtilizable('La conexión no cumple el perfil de lectura de Sports Data')
-                datos = lectura.cargar_desde_postgresql(connection, scope)
-                comentarios = load_current_comments_postgresql(connection)
-        return datos, comentarios, motor
-    except SQLAlchemyError as error:
-        # Driver exceptions may contain connection details; keep startup errors credential-free.
-        from persistencia.lectura import BaseNoUtilizable
-        code = getattr(getattr(error, 'orig', None), 'sqlstate', None)
-        detail = f' (SQLSTATE {code})' if code else ''
-        raise BaseNoUtilizable(f'No se pudo cargar Sports Data desde PostgreSQL{detail}') from None
+    workdir = os.environ.get('SPORTS_DATA_WORKDIR')
+    if not workdir:
+        raise ValueError('SPORTS_DATA_WORKDIR es obligatorio con SPORTS_DATA_STORAGE=postgresql')
+    coordinator = CoordinadorPostgreSQL(motor, scope, workdir)
+    resources.enter_context(coordinator)
+    return coordinator, motor
 
 
 def _load_comments(database):
@@ -187,12 +168,13 @@ def _data_response(request: Request):
     path = raw_path.decode('latin-1') if raw_path is not None else request.url.path
     if query:
         status, body = 400, {'error': 'Esta versión no admite filtros de consulta.'}
-    elif getattr(request.app.state, 'control_mode', False):
+    elif (getattr(request.app.state, 'control_mode', False)
+          or getattr(request.app.state, 'postgresql_coordinator', False)):
         try:
             generation = request.app.state.coordinator.capturar()
-        except Exception as e:
+        except Exception as error:
             import sys
-            print(f'[control] capture: {e}', file=sys.stderr, flush=True)
+            print(f'[control] generation capture: {type(error).__name__}', file=sys.stderr, flush=True)
             status, body = 503, {'error': 'Datos no disponibles'}
         else:
             # Capture once for the full request. A later publication only affects the next request.
@@ -226,11 +208,12 @@ def _comments_response(request: Request, public_match_id: str):
     query = request.scope.get('query_string', b'')
     if query:
         status, body = 400, {'error': 'Esta versión no admite filtros de consulta.'}
-    elif getattr(request.app.state, 'control_mode', False):
+    elif (getattr(request.app.state, 'control_mode', False)
+          or getattr(request.app.state, 'postgresql_coordinator', False)):
         try:
             generation = request.app.state.coordinator.capturar()
         except Exception as error:
-            print(f'[control] capture comments: {error}', file=sys.stderr, flush=True)
+            print(f'[control] capture comments: {type(error).__name__}', file=sys.stderr, flush=True)
             status, body = 503, {'error': 'Datos no disponibles'}
         else:
             # Match and comments come from one captured published generation.
@@ -285,7 +268,7 @@ def _updates_response(request: Request):
         except Unavailable:
             status, body = 409, {'error': 'update_unavailable'}
         except Exception as e:
-            print(f'[control] {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+            print(f'[control] {type(e).__name__}', file=sys.stderr, flush=True)
             status, body = 503, {'error': 'unavailable'}
     return APIJSONResponse(content=body, status_code=status, headers={'Cache-Control': 'no-store'})
 
@@ -387,6 +370,7 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
             application.state.control_mode = control_mode
             application.state.storage = storage
             application.state.postgresql_engine = None
+            application.state.postgresql_coordinator = False
             application.state.photo_root = photo_root()
             application.state.photo_reader = photo_serving.PhotoReader(
                 application.state.photo_root, photo_serving.source_priority())
@@ -396,13 +380,15 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                  application.state.control_token) = _load_control(resources)
                 if getattr(application.state.coordinator, 'es_postgresql', False):
                     application.state.postgresql_engine = application.state.coordinator.motor
+                    application.state.postgresql_coordinator = True
             else:
                 if data is not None:
                     application.state.data = data
                     application.state.comments = {}
                 elif storage == 'postgresql':
-                    (application.state.data, application.state.comments,
+                    (application.state.coordinator,
                      application.state.postgresql_engine) = _load_postgresql(resources)
+                    application.state.postgresql_coordinator = True
                 else:
                     application.state.data = _load_data(resources)
                     database = os.environ.get('SPORTS_DATA_DB') if storage == 'sql' else None

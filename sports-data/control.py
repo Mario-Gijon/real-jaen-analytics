@@ -232,11 +232,9 @@ class Actualizaciones:
             raise ValueError('Publication reconciliation returned an inconsistent result')
 
         confirmed = self.c.estado(ident)
-        current_generation = self.c.capturar().id
         generation = result.get('generation_id')
-        if (confirmed.get('estado') != 'completed' or confirmed.get('generacion') != generation
-                or current_generation != generation):
-            raise ValueError('Publication is not the confirmed current generation')
+        if confirmed.get('estado') != 'completed' or confirmed.get('generacion') != generation:
+            raise ValueError('Publication is not durably confirmed for this coordinator ID')
 
         coverage = result.get('coverage')
         with self.guard:
@@ -350,6 +348,9 @@ class Actualizaciones:
     def solicitar(self, idem):
         if not isinstance(idem, str) or str(uuid.UUID(idem)) != idem:
             raise ValueError('Idempotency-Key must be a UUID')
+        refrescar = getattr(self.c, 'refrescar_generacion', None)
+        if refrescar is not None:
+            refrescar(force=True)
         with self.guard:
             known = self._rows('WHERE idem=?', (idem,))
             if known:
@@ -663,6 +664,9 @@ class Actualizaciones:
     def _scope(self):
         if self.recipe != GROUP:
             return SCOPES[self.recipe]
+        refrescar = getattr(self.c, 'refrescar_generacion', None)
+        if refrescar is not None:
+            refrescar(force=True)
         generation=self.c.capturar()
         cached=self._scope_cache
         if cached is not None and cached[0]==generation.id:

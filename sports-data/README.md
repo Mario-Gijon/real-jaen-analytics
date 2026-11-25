@@ -9,7 +9,7 @@ Las instrucciones de ejecución con Compose están en el [README raíz](../READM
 ## Lectura temporal desde PostgreSQL de desarrollo
 
 Para arrancar Sports Data leyendo directamente `sports_data` en Neon, instala los requisitos SQL, carga únicamente la
-variable de ejecución desde `../.env.neon` y deshabilita el coordinador de actualizaciones:
+variable de ejecución desde `../.env.neon` y deja deshabilitado el control de actualizaciones:
 
 ```sh
 .venv/bin/pip install -r requirements-fastapi.txt -r requirements-sql.txt
@@ -18,15 +18,18 @@ while IFS='=' read -r key value; do
     SPORTS_DATA_DATABASE_URL) export "$key=$value" ;;
   esac
 done < ../.env.neon
+SPORTS_DATA_WORKDIR=/ruta/local/sports-data-dev \
 SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 SPORTS_DATA_ENRICHMENT_ENABLED=1 \
   .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8002
 ```
 
-El modo reconstruye los datos y comentarios narrativos al arrancar, dentro de una transacción `REPEATABLE READ READ
-ONLY`, y conserva la generación en memoria hasta detener la aplicación. Con `SPORTS_DATA_ENRICHMENT_ENABLED=1`, el
-endpoint de enriquecimientos consulta la misma base PostgreSQL mediante el motor de la aplicación y una transacción
-de lectura por petición; ignora `SPORTS_DATA_ENRICHMENT_DB`. No permite combinar PostgreSQL con el coordinador SQLite
-ni habilita actualizaciones. La instalación habitual conserva su modo actual y las fotografías siguen usando el
+El directorio de trabajo debe ser escribible y exclusivo de esta instalación; guarda solo el journal operativo y
+staging. El coordinador carga los datos y comentarios dentro de una transacción `REPEATABLE READ READ ONLY` y revisa
+bajo demanda `sports_data_publication_state`. `SPORTS_DATA_GENERATION_CHECK_INTERVAL_SECONDS` fija la comprobación
+normal (5 segundos por defecto y como mínimo); también puede forzarse antes de operaciones de actualización. No hay
+polling en segundo plano. Con `SPORTS_DATA_ENRICHMENT_ENABLED=1`, el endpoint de enriquecimientos consulta la misma
+base y verifica la generación en una transacción de lectura coherente; ignora `SPORTS_DATA_ENRICHMENT_DB`. Este modo
+no habilita actualizaciones. La instalación habitual conserva su modo actual y las fotografías siguen usando el
 almacenamiento local.
 
 ## Esquema PostgreSQL de desarrollo
