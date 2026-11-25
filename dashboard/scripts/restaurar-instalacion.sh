@@ -211,9 +211,9 @@ for item in sorted(stage.iterdir()):
         raise FileExistsError(target)
     item.rename(target)
 stage.rmdir()"
-docker run --rm --network none --user 10001:10001 --mount "type=volume,source=$VIDEO_VOLUME,target=/state:ro" \
+docker run --rm --network none --user 10001:10001 --mount "type=volume,source=$VIDEO_VOLUME,target=/state,readonly" \
   --entrypoint python "$VIDEO_SERVICE_IMAGE" -c "import sqlite3; d=sqlite3.connect('file:/state/video-service.sqlite?mode=ro',uri=True); assert d.execute('PRAGMA integrity_check').fetchone()[0]=='ok'"
-docker run --rm --network none --user 10001:10001 --mount "type=volume,source=$JOBS_VOLUME,target=/jobs:ro" \
+docker run --rm --network none --user 10001:10001 --mount "type=volume,source=$JOBS_VOLUME,target=/jobs,readonly" \
   --entrypoint python "$SPORTS_DATA_IMAGE" -c "import sqlite3; d=sqlite3.connect('file:/jobs/jobs.sqlite?mode=ro',uri=True); assert d.execute('PRAGMA integrity_check').fetchone()[0]=='ok'"
 
 case "$(uname -s)" in MINGW*|MSYS*) video_helper=$(cygpath -m "$video_helper"); catalog_parent_docker=$(cygpath -m "$catalog_parent") ;; *) catalog_parent_docker=$catalog_parent ;; esac

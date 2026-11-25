@@ -53,6 +53,7 @@ function fixture(existingVolume = "", failAfterFirstVolume = false, activeMount 
   writeFileSync(configPath, JSON.stringify(config));
   const markerPath = join(imports, ".real-jaen-restore-incomplete");
   const callsPath = join(root, "docker-calls.log");
+  const argvPath = join(root, "docker-argv.log");
   const videoFirstMountPath = join(root, "video-volume-first-mount");
   const videoCopyUpPath = join(root, "video-volume-image-copy-up");
   const fakeDocker = join(bin, "docker");
@@ -64,6 +65,8 @@ exec "$REAL_PYTHON" "$@"
   chmodSync(fakePython, 0o755);
   writeFileSync(fakeDocker, `#!/bin/sh
 printf '%s\\n' "$*" >> "$DOCKER_CALLS"
+for argument do printf '%s\\037' "$argument" >> "$DOCKER_ARGV"; done
+printf '%s\\037' '__DOCKER_CALL_END__' >> "$DOCKER_ARGV"
 if [ "$1" = compose ] && [ "$*" != "" ]; then
   case "$*" in
     *"config --images sports-data"*) echo local/rja/sports:restore; exit 0 ;;
@@ -117,6 +120,7 @@ exit 93
     ...process.env,
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     DOCKER_CALLS: callsPath,
+    DOCKER_ARGV: argvPath,
     COMPOSE_JSON: configPath,
     PROJECT: project,
     PREFIX: prefix,
@@ -137,7 +141,7 @@ exit 93
   const result = spawnSync("sh", [join(repositoryRoot, "dashboard/scripts/restaurar-instalacion.sh"), backup], {
     cwd: repositoryRoot, env, encoding: "utf8",
   });
-  return { root, imports, markerPath, callsPath, result, prefix };
+  return { root, imports, markerPath, callsPath, argvPath, result, prefix, catalog, catalogParent };
 }
 
 describe("installation restore script", () => {
@@ -190,6 +194,43 @@ describe("installation restore script", () => {
       expect(volumeOwnership).toContain(`source=${test.prefix}-acquisition-profiles,target=/profiles,volume-nocopy`);
       expect(volumeOwnership).toContain(`source=${test.prefix}-sports-state,target=/state,volume-nocopy`);
       expect(volumeOwnership).toContain(`source=${test.prefix}-video-state,target=/video,volume-nocopy`);
+    } finally {
+      rmSync(test.root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes valid read-only mount arguments to both SQLite integrity checks", () => {
+    const test = fixture();
+    try {
+      expect(test.result.status, test.result.stderr + test.result.stdout).toBe(0);
+      const records = readFileSync(test.argvPath, "utf8").split("\x1f");
+      const invocations: string[][] = [];
+      let current: string[] = [];
+      for (const argument of records) {
+        if (argument === "__DOCKER_CALL_END__") {
+          invocations.push(current);
+          current = [];
+        } else current.push(argument);
+      }
+      const videoIntegrity = invocations.find((args) => args.some((arg) => arg.includes("file:/state/video-service.sqlite?mode=ro")));
+      const jobsIntegrity = invocations.find((args) => args.some((arg) => arg.includes("file:/jobs/jobs.sqlite?mode=ro")));
+      expect(videoIntegrity).toBeDefined();
+      expect(jobsIntegrity).toBeDefined();
+      const mounts = (args: string[]) => args.flatMap((argument, index) =>
+        argument === "--mount" ? [args[index + 1]] : []);
+      expect(mounts(videoIntegrity!)).toContain(`type=volume,source=${test.prefix}-video-state,target=/state,readonly`);
+      expect(mounts(jobsIntegrity!)).toContain(`type=volume,source=${test.prefix}-acquisition-jobs,target=/jobs,readonly`);
+      expect(mounts(videoIntegrity!).some((mount) => mount.includes(":ro"))).toBe(false);
+      expect(mounts(jobsIntegrity!).some((mount) => mount.includes(":ro"))).toBe(false);
+
+      const catalogValidation = invocations.find((args) => args.some((arg) => arg.includes("VideoCatalog.load")));
+      expect(catalogValidation).toBeDefined();
+      expect(mounts(catalogValidation!)).toContain(`type=bind,source=${test.catalogParent},target=/catalog-parent,readonly`);
+      expect(catalogValidation).toContain(`VIDEO_SERVICE_MANIFEST=videos.json`);
+      const profileInitialization = invocations.find((args) => args.includes("initialize-profile"));
+      expect(profileInitialization).toBeDefined();
+      expect(mounts(profileInitialization!)).toContain(`type=volume,source=${test.prefix}-acquisition-profiles,target=/profiles`);
+      expect(profileInitialization).toContain("10001:10001");
     } finally {
       rmSync(test.root, { recursive: true, force: true });
     }
