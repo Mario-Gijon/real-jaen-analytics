@@ -1,7 +1,7 @@
 # Fotografías de jugadores en Sports Data
 
-Sports Data mantiene las fotografías fuera de `real-jaen.sqlite` y de las generaciones deportivas. El catálogo vive
-por defecto en `/state/player-photos/`, dentro del volumen `sports-state` ya existente:
+Sports Data mantiene las fotografías fuera de `real-jaen.sqlite` y de las generaciones deportivas. En los modos JSON y
+SQLite, el catálogo vive por defecto en `/state/player-photos/`, dentro del volumen `sports-state` ya existente:
 
 ```text
 /state/player-photos/
@@ -14,6 +14,12 @@ por defecto en `/state/player-photos/`, dentro del volumen `sports-state` ya exi
 inventario no crean el catálogo: si no hay fotografías, la API responde con `photo_url: null`. Una importación aceptada
 inicializa el índice. Ninguna de estas operaciones abre ni modifica la base deportiva, ni cambia la huella del
 coordinador.
+
+Con `SPORTS_DATA_STORAGE=postgresql`, las fotografías persistentes viven en la misma base `sports_data`. Sports Data
+usa el motor PostgreSQL compartido en los modos con y sin control; no crea ni consulta `fotos.sqlite`, `blobs/` ni
+`tmp/`. Los bytes originales se guardan en `sports_data_photo_blob.content` como BYTEA. La clave SHA-256 deduplica el
+contenido entre jugadores y fuentes. Las consultas de `photo_url` leen metadatos; solo el servicio de una imagen carga
+y vuelve a verificar el BYTEA.
 
 ## Consulta y servicio
 
@@ -52,6 +58,40 @@ previsto. Esta integración no incluye fotografías originales.
 La imagen acepta únicamente WebP de hasta 4 MiB por archivo y dimensiones máximas de 4096 × 4096. Los blobs se nombran
 por SHA-256; la API nunca deriva una ruta de archivo de un parámetro de petición. `SPORTS_DATA_PHOTO_SOURCES` determina
 el orden de fuentes servidas (por defecto, solo `df11`).
+
+## Esquema PostgreSQL y migración explícita
+
+`pg0004` corrige el índice de trabajos compartidos con una expresión constante y el predicado de estados `queued` y
+`running`, de modo que PostgreSQL rechaza ambos estados activos aunque sean distintos. `pg0005` crea
+`sports_data_photo_meta`, `sports_data_photo_blob`, `sports_data_photo_import`, `sports_data_photo` y
+`sports_data_photo_import_entry`. Se conservan SHA-256, MIME, tamaño, dimensiones, procedencia, colección, recibos y
+resultados por entrada. `sofascore_id` es el identificador externo de photos-v1 y no la clave primaria interna de
+`player`. Se mantiene un máximo de una foto activa por jugador externo y fuente. `sports_data_app` obtiene permisos de
+lectura e inserción y las actualizaciones necesarias; la administración del esquema permanece separada.
+
+Las importaciones photos-v1 usan el bloqueo asesor transaccional compartido
+`pg_advisory_xact_lock(1380601928, 1330925361)` (claves ASCII `RJPH`/`OTO1`). Bajo ese bloqueo una única transacción
+revalida el recibo y la huella del inventario, clasifica entradas, guarda el historial y los BYTEA, y confirma todo
+junto. Base64 permanece solo en el protocolo de transporte: los bytes originales se guardan sin recomprimir,
+redimensionar ni convertir. Las demás instalaciones ven una foto confirmada sin reiniciar ni sincronizar directorios.
+
+La carga de un almacén antiguo es administrativa, explícita y no se ejecuta al arrancar:
+
+```sh
+cd sports-data
+.venv/bin/python scripts/migrate_photos_to_postgresql.py \
+  --source-root /ruta/player-photos
+```
+
+La sesión debe proporcionar `SPORTS_DATA_MIGRATION_DATABASE_URL` desde un archivo local seguro, sin copiar el valor a
+la línea de comandos. El script abre `fotos.sqlite` en solo lectura, valida integridad, referencias, rutas, tamaños y
+hashes; exige vacías las tablas fotográficas PostgreSQL; copia IDs, metadatos e historial en una transacción; ajusta la
+secuencia y verifica recuentos y bytes. El origen permanece intacto y los blobs huérfanos se informan sin borrarse.
+Los 387 WebP y 4.157.744 bytes del respaldo histórico son solo una referencia, no un requisito.
+
+Las rutas, autenticación, Content-Type, ETag y Cache-Control HTTP no cambian. En adelante `pg_dump` de `sports_data`
+contendrá metadatos y bytes originales. La integración de esa copia en los procedimientos generales de backup y
+restauración queda para el Hito 09.
 
 ## Importación manual desde Acquisition
 

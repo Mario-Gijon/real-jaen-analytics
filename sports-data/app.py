@@ -5,6 +5,8 @@ Run with ``uvicorn app:app``. By default this reads ``datos/``. Set
 the cooperative lock is kept until the ASGI app shuts down. Development can
 temporarily set ``SPORTS_DATA_STORAGE=postgresql`` to serve a cached generation
 refreshed from the shared PostgreSQL publication state on demand.
+That mode also stores and serves player photos from the shared PostgreSQL database;
+the JSON and SQLite modes retain their legacy local photo store.
 The separate
 read-only enrichment endpoint is registered only with
 ``SPORTS_DATA_ENRICHMENT_ENABLED=1``. Outside control mode it reads the explicitly
@@ -371,9 +373,7 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
             application.state.storage = storage
             application.state.postgresql_engine = None
             application.state.postgresql_coordinator = False
-            application.state.photo_root = photo_root()
-            application.state.photo_reader = photo_serving.PhotoReader(
-                application.state.photo_root, photo_serving.source_priority())
+            application.state.photo_root = None if storage == 'postgresql' else photo_root()
             if control_mode:
                 (application.state.coordinator,
                  application.state.updates,
@@ -385,6 +385,11 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                 if data is not None:
                     application.state.data = data
                     application.state.comments = {}
+                    if storage == 'postgresql':
+                        from persistencia.postgresql import crear_motor_postgresql
+
+                        application.state.postgresql_engine = crear_motor_postgresql()
+                        resources.callback(application.state.postgresql_engine.dispose)
                 elif storage == 'postgresql':
                     (application.state.coordinator,
                      application.state.postgresql_engine) = _load_postgresql(resources)
@@ -393,6 +398,18 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                     application.state.data = _load_data(resources)
                     database = os.environ.get('SPORTS_DATA_DB') if storage == 'sql' else None
                     application.state.comments = _load_comments(Path(database)) if database else {}
+            if storage == 'postgresql':
+                from fotos.postgresql import PostgreSQLPhotoReader, PostgreSQLPhotoStore
+
+                if application.state.postgresql_engine is None:
+                    raise RuntimeError('El modo PostgreSQL necesita el motor compartido para las fotografías')
+                application.state.photo_store = PostgreSQLPhotoStore(application.state.postgresql_engine)
+                application.state.photo_reader = PostgreSQLPhotoReader(
+                    application.state.postgresql_engine, photo_serving.source_priority())
+            else:
+                application.state.photo_reader = photo_serving.PhotoReader(
+                    application.state.photo_root, photo_serving.source_priority())
+                application.state.photo_store = None
             application.state.photo_import_token = player_photos.import_secret(control_mode)
             yield
 

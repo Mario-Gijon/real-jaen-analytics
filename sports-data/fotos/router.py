@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response
 
 from fotos import bundle, producers, serving
 from fotos.players import PlayersFromQuery
-from fotos.store import ImportConflict, PhotoStore, StoreError
+from fotos.store import ImportConflict, InventoryConflict, PhotoStore, StoreError
 from queries import consultar
 
 PREFIX = '/internal/v1/player-photos'
@@ -50,7 +50,8 @@ def _photo_response(request: Request, ident: str, version: str):
         return _error(404, 'Fotografía no encontrada')
 
     player_path = f'/api/v1/players/{ident}'
-    if getattr(request.app.state, 'control_mode', False):
+    if (getattr(request.app.state, 'control_mode', False)
+            or getattr(request.app.state, 'postgresql_coordinator', False)):
         try:
             generation = request.app.state.coordinator.capturar()
         except Exception as error:
@@ -147,7 +148,8 @@ async def import_bundle(request: Request):
         print(f'[fotos] paquete rechazado: {type(error).__name__}: {error}', file=sys.stderr, flush=True)
         return _error(422, 'Paquete de fotografías rechazado')
 
-    if getattr(request.app.state, 'control_mode', False):
+    if (getattr(request.app.state, 'control_mode', False)
+            or getattr(request.app.state, 'postgresql_coordinator', False)):
         try:
             generation = request.app.state.coordinator.capturar()
         except Exception as error:
@@ -159,14 +161,18 @@ async def import_bundle(request: Request):
         consult = lambda path: consultar(data, path)
 
     try:
-        summary = PhotoStore(request.app.state.photo_root).import_bundle(verified, PlayersFromQuery(consult))
+        photo_store = (request.app.state.photo_store if request.app.state.storage == 'postgresql'
+                       else PhotoStore(request.app.state.photo_root))
+        summary = photo_store.import_bundle(verified, PlayersFromQuery(consult))
     except ImportConflict:
         return _error(409, 'La solicitud ya se importó con otro paquete.')
+    except InventoryConflict:
+        return _error(409, 'El inventario cambió durante la importación; vuelve a generarla.')
     except (OSError, StoreError, sqlite3.Error) as error:
-        print(f'[fotos] importación fallida: {type(error).__name__}: {error}', file=sys.stderr, flush=True)
+        print(f'[fotos] importación fallida: {type(error).__name__}', file=sys.stderr, flush=True)
         return _error(503, 'No se pudo guardar el paquete de fotografías.')
     except Exception as error:
-        print(f'[fotos] importación fallida: {type(error).__name__}: {error}', file=sys.stderr, flush=True)
+        print(f'[fotos] importación fallida: {type(error).__name__}', file=sys.stderr, flush=True)
         return _error(503, 'No se pudo guardar el paquete de fotografías.')
     return JSONResponse(content=summary, headers={'Cache-Control': 'no-store'})
 

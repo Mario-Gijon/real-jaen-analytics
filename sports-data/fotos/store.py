@@ -1,4 +1,7 @@
-"""Persistent player photo store: content-addressed files plus an independent SQLite index.
+"""Legacy SQLite photo store: content-addressed files plus an independent SQLite index.
+
+This class remains active for JSON and SQLite sporting modes. PostgreSQL mode uses fotos.postgresql and does not open
+this directory store.
 
   <root>/                      /state/player-photos by default (SPORTS_DATA_PHOTOS_DIR overrides it)
     blobs/<sha256>.<ext>       immutable, one file per distinct content, shared by every row that uses it
@@ -90,6 +93,10 @@ class StoreError(RuntimeError):
 
 class ImportConflict(StoreError):
     """The request id was already imported with a different bundle."""
+
+
+class InventoryConflict(StoreError):
+    """The verified bundle was based on an inventory that changed before commit."""
 
 
 def default_root() -> Path:

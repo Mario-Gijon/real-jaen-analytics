@@ -104,7 +104,7 @@ El camino SQLite habitual conserva su coordinador, candidata, journal y recupera
 
 ## Trabajos compartidos entre instalaciones (Hito 05B)
 
-La revisión `pg0003` añade `sports_data_update_state`, `sports_data_update_job` y `sports_data_update_idempotency`. La fila única de estado asigna fencing tokens crecientes; el registro de trabajo conserva estado, fase, propietario, vencimiento del lease, heartbeat, cancelación, IDs de Acquisition, publicación en curso y última publicación confirmada, fechas y progreso/resultado JSONB. Una restricción parcial permite como máximo un trabajo `queued` o `running`. Las claves de idempotencia se guardan en una tabla aparte, por lo que claves distintas pueden apuntar al mismo trabajo activo. La revisión no modifica pg0001 ni pg0002 y concede a `sports_data_app` solo lectura y actualización del contador en la fila de estado, lectura/escritura de trabajos y lectura/inserción de claves.
+La revisión `pg0003` añade `sports_data_update_state`, `sports_data_update_job` y `sports_data_update_idempotency`. La fila única de estado asigna fencing tokens crecientes; el registro de trabajo conserva estado, fase, propietario, vencimiento del lease, heartbeat, cancelación, IDs de Acquisition, publicación en curso y última publicación confirmada, fechas y progreso/resultado JSONB. `pg0004` sustituye el índice parcial de `pg0003` por uno único sobre una expresión constante: PostgreSQL no permite que convivan dos trabajos `queued`/`running`, incluso si sus estados son diferentes. Las claves de idempotencia se guardan en una tabla aparte, por lo que claves distintas pueden apuntar al mismo trabajo activo. Las revisiones no modifican pg0001 ni pg0002 y conceden a `sports_data_app` solo lectura y actualización del contador en la fila de estado, lectura/escritura de trabajos y lectura/inserción de claves.
 
 Cada proceso tiene un UUID de propietario. El lease predeterminado dura 60 segundos y se renueva cada 15 segundos mientras el trabajo siga activo y pertenezca a ese proceso. Se pueden configurar `SPORTS_DATA_UPDATE_LEASE_SECONDS` y `SPORTS_DATA_UPDATE_HEARTBEAT_SECONDS`; ambos valores deben ser números positivos y el intervalo de heartbeat debe ser menor que el lease. PostgreSQL calcula los vencimientos. La creación toma brevemente la fila contadora para asignar el fencing token y serializar solicitudes simultáneas; no mantiene transacciones abiertas durante Acquisition.
 
@@ -117,3 +117,24 @@ Una cancelación remota se guarda en el trabajo compartido. El propietario la de
 En modo PostgreSQL ya no se crea ni se consulta `control/jobs.sqlite`: el estado autoritativo reside en pg0003. El journal SQLite que conserva `CoordinadorPostgreSQL` es local al propietario y sirve para staging operativo y para esperar/reconciliar una publicación local; no coordina instalaciones ni prevalece sobre el registro pg0002. Los paquetes y recibos de Acquisition también siguen siendo locales. No se importan automáticamente trabajos históricos del journal de control. Para cambiar una instalación de SQLite a PostgreSQL, primero se dejan terminar o se cancelan explícitamente los trabajos SQLite activos; si alguno sigue activo, se mantiene esa instalación en modo SQLite hasta resolverlo. Después se configura pg0003 y un directorio de trabajo PostgreSQL independiente. Esto conserva la posibilidad de revisar el journal anterior sin descartar silenciosamente trabajos.
 
 La coordinación y pg0003 se validan solo con PostgreSQL 18 local. Neon permanece sin cambios. No se transfiere Acquisition local entre ordenadores ni se recupera automáticamente un paquete que solo exista en otro disco.
+
+## Fotografías de jugadores (Hito 06)
+
+`pg0005` añade el catálogo `sports_data_photo_*` a `sports_data`, con bytes originales en BYTEA y deduplicación global
+por SHA-256. Sports Data usa el motor compartido tanto con control como en modo de consulta y no crea ni consulta
+`fotos.sqlite` o directorios de blobs en PostgreSQL. `sofascore_id` conserva el identificador externo de photos-v1 y
+no se enlaza a la clave interna de `player`.
+
+El protocolo photos-v1, las rutas HTTP y sus encabezados no cambian. Base64 se conserva en el transporte, pero los bytes
+verificados se guardan sin transformar. Las consultas para `photo_url` leen metadatos; el servicio recupera BYTEA y
+metadatos desde una misma consulta PostgreSQL. Cada importación toma el bloqueo asesor transaccional compartido
+`pg_advisory_xact_lock(1380601928, 1330925361)` (claves ASCII `RJPH`/`OTO1`) y revalida recibo e inventario dentro
+de la transacción.
+
+La transferencia desde el almacén anterior es manual: desde `sports-data`, con `SPORTS_DATA_MIGRATION_DATABASE_URL`
+administrativa configurada en el entorno, ejecuta
+`scripts/migrate_photos_to_postgresql.py --source-root /ruta/player-photos`. El importador valida SQLite en solo
+lectura y cada blob, exige vacías las tablas de destino, preserva IDs e historial, copia todo en una transacción y deja
+intacto el origen. Los blobs no indexados se informan aparte y no se borran. Los backups generales no cambian en este
+hito; un `pg_dump` de `sports_data` contendrá fotos, y el procedimiento operativo se integrará en el Hito 09.
+Las validaciones de pg0004 y pg0005 se realizan en PostgreSQL 18 local con fixtures sintéticos; Neon no se modifica.
