@@ -19,7 +19,7 @@ Los roles de ejecución se crearon como roles con acceso `read_write`, sin perte
 
 ## Conexiones locales
 
-Las cuatro cadenas son conexiones directas, no agrupadas, con TLS (`sslmode=require`). Se guardan localmente en `.env.neon`, que está excluido de Git y tiene permisos `600`:
+Las cuatro cadenas son conexiones directas, no agrupadas, con TLS. Se guardan localmente en `.env.neon`, que está excluido de Git y tiene permisos `600`. La configuración PostgreSQL de Sports Data eleva la validación del certificado y hostname a `verify-full` con el bundle de CA del sistema:
 
 - `SPORTS_DATA_DATABASE_URL`
 - `VIDEO_SERVICE_DATABASE_URL`
@@ -28,4 +28,6 @@ Las cuatro cadenas son conexiones directas, no agrupadas, con TLS (`sslmode=requ
 
 Las dos variables `*_MIGRATION_DATABASE_URL` apuntan a su base correspondiente con el rol administrativo `neondb_owner`; las variables de ejecución usan las credenciales de los roles de servicio. No guardar valores de estas variables en documentación, commits ni registros.
 
-Este hito prepara únicamente la infraestructura remota. No crea tablas de negocio, importa datos ni cambia la persistencia de la aplicación o Docker Compose.
+## Esquema Sports Data
+
+La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, está aplicada en `sports_data` de la rama `development`. La base sigue vacía de datos de negocio. La aplicación continúa usando SQLite; `video_service` no se ha migrado. Las instrucciones para preparar el entorno Python y ejecutar la migración están en [README de Sports Data](../sports-data/README.md#esquema-postgresql-de-desarrollo).
