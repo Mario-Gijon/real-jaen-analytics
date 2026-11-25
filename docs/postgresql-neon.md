@@ -44,3 +44,27 @@ SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 SPORTS_DATA_ENRICHMENT_ENAB
 ```
 
 La conexión de ejecución verifica TLS con `verify-full`. El lector valida una firma de columnas y la carga inicial confirmada sin consultar `alembic_version`, que permanece inaccesible para el rol de ejecución. Para instalar dependencias y cargar la variable sin evaluar el archivo como shell, consulta [README de Sports Data](../sports-data/README.md#lectura-temporal-desde-postgresql-de-desarrollo).
+
+## Importación deportiva transaccional (Hito 04A)
+
+`persistencia.sincronizacion.importar_evidencia_postgresql(conexion, ...)` reutiliza `Presentacion`, `estado_deseado`, `planificar`, `aplicar` y el registro `import_run`. Recibe una `sqlalchemy.Connection` PostgreSQL con una transacción ya abierta. No abre conexiones ni confirma o revierte la transacción; quien la llama debe dejar que los errores salgan del bloque transaccional para revertir toda la operación. El camino SQLite y su comando habitual siguen disponibles.
+
+Ejemplo desde `sports-data`:
+
+```python
+from persistencia.postgresql import crear_motor_postgresql
+from persistencia.sincronizacion import importar_evidencia_postgresql
+
+motor = crear_motor_postgresql()
+with motor.begin() as conexion:
+    resultado = importar_evidencia_postgresql(
+        conexion,
+        exportaciones=[('/ruta/export.json', 123456)],
+        comando='importar evidencia',
+    )
+motor.dispose()
+```
+
+Los IDs nuevos del plan son marcadores internos; al aplicar, PostgreSQL asigna los IDs definitivos mediante los defaults de sus secuencias y se traducen las referencias dentro del mismo plan. El plan en seco no consume secuencias. Si una secuencia heredada devuelve un ID ya ocupado, la inserción detecta el conflicto de PK y la adelanta mediante `nextval` bajo el bloqueo, sin requerir `setval` ni permisos administrativos. La escritura adquiere el bloqueo transaccional `pg_advisory_xact_lock(1380075856, 4)` antes de validar y planificar. El coordinador del Hito 04D deberá adquirir ese mismo bloqueo en su transacción externa antes de leer o modificar el estado deportivo y conservarlo hasta confirmar la publicación conjunta.
+
+La coherencia deportiva se sigue verificando antes y después de la importación; PostgreSQL aplica sus claves foráneas y restricciones nativas durante las escrituras. La comprobación `PRAGMA foreign_key_check` queda solo para SQLite. La ordenación de filas usa las claves primarias; en SQLite, la PK entera conserva el orden equivalente al antiguo `rowid`.

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 import importar
 from persistencia import carga, reconstruccion, sqlite
@@ -43,6 +43,13 @@ REFERENCIAS = {'match_id': 'match', 'team_id': 'team', 'home_team_id': 'team', '
 # Columnas que registran la ejecución: en el estado deseado valen la ejecución en curso y no se comparan.
 EJECUCION = ('run_id', 'created_in_run', 'first_run_id', 'declared_in_run')
 EVIDENCIA = ('raw', 'listing', 'player_profile')
+# `entity_id` is polymorphic in the six external-id tables, so it cannot be
+# represented by the ordinary column-to-table map above.
+TABLAS_ID_EXTERNO = {f'{tipo}_external_id': tipo for tipo in ENTIDADES}
+
+# Stable application lock key. PostgreSQL writers that publish sports state
+# (including the future coordinator) must acquire this transaction lock first.
+PG_LOCK_NAMESPACE, PG_LOCK_SPORTS_IMPORT = 1380075856, 4
 
 
 class ReglasDistintas(CargaRechazada):
@@ -113,12 +120,31 @@ class Plan:
         return {t: dict(+v) for t, v in sorted(self.cambios.items()) if +v}
 
 
-def filas_bd(c, tabla, orden='rowid'):
+def filas_bd(c, tabla, orden=None):
+    """Read rows in a deterministic primary-key order (SQLite INTEGER PK keeps rowid order)."""
+    if orden is None:
+        cache = c.info.setdefault('sincronizacion.pk_columns', {})
+        if tabla not in cache:
+            cache[tabla] = inspect(c).get_pk_constraint(tabla).get('constrained_columns') or []
+        claves = cache[tabla]
+        if not claves:
+            raise CargaRechazada(f'{tabla}: no tiene clave primaria para ordenar de forma determinista')
+        orden = ', '.join(f'"{columna}"' for columna in claves)
     return [dict(r) for r in c.exec_driver_sql(f'SELECT * FROM "{tabla}" ORDER BY {orden}').mappings()]
 
 
 def siguiente_id(c, tabla):
-    return (c.exec_driver_sql(f'SELECT max(id) FROM "{tabla}"').scalar() or 0) + 1
+    if c.dialect.name == 'postgresql':
+        # Planning stays read-only. PostgreSQL assigns the real ID with the
+        # table's sequence during apply; negative values are plan-local tokens.
+        maximo = c.exec_driver_sql(f'SELECT min(id) FROM "{tabla}"').scalar()
+        return min(-1, maximo - 1 if maximo is not None else -1)
+    maximo = c.exec_driver_sql(f'SELECT max(id) FROM "{tabla}"').scalar()
+    return (maximo or 0) + 1
+
+
+def incrementar_id_plan(c, siguiente):
+    return siguiente - 1 if c.dialect.name == 'postgresql' else siguiente + 1
 
 
 def agrupar(filas, campo):
@@ -178,7 +204,7 @@ def planificar_reglas(c, filas, p, t, reconstruir):
                                       'a las reglas actuales; ejecute `persistencia reconstruir`')
             p.insertar('rule_set', [dict(d, id=siguiente)])
             existentes[clave] = siguiente
-            siguiente += 1
+            siguiente = incrementar_id_plan(c, siguiente)
         t.ids['rule_set'][d['id']] = existentes[clave]
 
 
@@ -203,7 +229,7 @@ def planificar_entidades(c, filas, p, t):
             p.insertar(tipo, [dict(fila, id=siguiente)])
             p.insertar(f'{tipo}_external_id', [dict(provider=carga.PROVEEDOR, external_id=ext, entity_id=siguiente,
                                                      status='origin', created_in_run=t.run)], 'nuevos')
-            siguiente += 1
+            siguiente = incrementar_id_plan(c, siguiente)
 
 
 def planificar_evidencia(c, filas, p, t):
@@ -216,7 +242,7 @@ def planificar_evidencia(c, filas, p, t):
         if actual is None:
             actual = ficheros[d['label']] = dict(t({k: v for k, v in d.items() if k != 'id'}), id=siguiente)
             p.insertar('source_file', [actual])
-            siguiente += 1
+            siguiente = incrementar_id_plan(c, siguiente)
         elif actual['sha256'] != d['sha256'] or actual['kind'] != d['kind']:
             raise CargaRechazada(f'La etiqueta {d["label"]} ya corresponde a otro fichero')
         t.ids['source_file'][d['id']] = actual['id']
@@ -231,7 +257,7 @@ def planificar_evidencia(c, filas, p, t):
         if actual is None:
             nuevas.append(dict(fila, id=siguiente))
             t.ids['observation'][d['id']] = siguiente
-            siguiente += 1
+            siguiente = incrementar_id_plan(c, siguiente)
             continue
         t.ids['observation'][d['id']] = actual['id']
         cambios = distintos(actual, fila)
@@ -323,7 +349,7 @@ def planificar_convocatorias(c, filas, p, t):
         if actual is None:
             t.ids['call_up'][d['id']] = siguiente
             p.insertar('call_up', [dict(fila, id=siguiente)])
-            siguiente += 1
+            siguiente = incrementar_id_plan(c, siguiente)
             continue
         t.ids['call_up'][d['id']] = actual['id']
         cambios = distintos(actual, fila)
@@ -382,7 +408,7 @@ def planificar_discrepancias(c, filas, p, t):
         p.insertar('discrepancy_reason', [dict(discrepancy_id=siguiente, reason=r, ordinal=i) for r, i in m])
         p.insertar('discrepancy_observation', [dict(discrepancy_id=siguiente, observation_id=x) for x, _ in o])
         p.insertar('discrepancy_value', [dict(discrepancy_id=siguiente, field=a, ordinal=b, value_json=x) for a, b, x in v])
-        siguiente += 1
+        siguiente = incrementar_id_plan(c, siguiente)
     for clave, actual in vigentes.items():
         if clave not in vistas:
             p.actualizar('discrepancy', {'id': actual['id']}, {'superseded_in_run': t.run}, 'superadas')
@@ -393,12 +419,84 @@ def t_sin_discrepancia(t):
     return lambda f: dict(f, observation_id=t.ids['observation'][f['observation_id']])
 
 
+def _traducir_ids_postgresql(tabla, fila, ids_generados):
+    salida = dict(fila)
+    for columna, valor in fila.items():
+        destino = REFERENCIAS.get(columna)
+        if columna == 'entity_id':
+            destino = TABLAS_ID_EXTERNO.get(tabla)
+        elif columna == 'id':
+            destino = tabla
+        if destino is not None and (destino, valor) in ids_generados:
+            salida[columna] = ids_generados[(destino, valor)]
+    return salida
+
+
+def _insertar_postgresql(c, tabla, filas, ids_generados):
+    """Insert plan tokens with PostgreSQL sequences and translate their references."""
+    for fila in filas:
+        valores = _traducir_ids_postgresql(tabla, fila, ids_generados)
+        token = valores.get('id')
+        if isinstance(token, int) and token < 0:
+            valores.pop('id')
+            columnas = list(valores)
+            if columnas:
+                nombres = ', '.join('"' + k + '"' for k in columnas)
+                parametros = ', '.join(':' + k for k in columnas)
+                consulta = (f'INSERT INTO "{tabla}" ({nombres}) VALUES ({parametros}) '
+                            'ON CONFLICT (id) DO NOTHING RETURNING id')
+            else:
+                consulta = f'INSERT INTO "{tabla}" DEFAULT VALUES ON CONFLICT (id) DO NOTHING RETURNING id'
+            ident = c.execute(text(consulta), valores).scalar_one_or_none()
+            if ident is None:
+                # The runtime role has USAGE but not UPDATE on sequences. A
+                # legacy/stale sequence is advanced with nextval only, in one
+                # statement, after a PK collision; no administrative setval.
+                secuencia = c.execute(text("SELECT pg_get_serial_sequence(:tabla, 'id')"),
+                                      {'tabla': f'public.{tabla}'}).scalar_one_or_none()
+                maximo = c.exec_driver_sql(f'SELECT max(id) FROM "{tabla}"').scalar_one()
+                if secuencia is None or maximo is None:
+                    raise CargaRechazada(f'{tabla}: no se pudo reconciliar la secuencia de identificadores')
+                estado = c.execute(text("""
+                    SELECT last_value, start_value, increment_by
+                    FROM pg_sequences
+                    WHERE schemaname = 'public'
+                      AND sequencename = (SELECT relname FROM pg_class WHERE oid = CAST(:secuencia AS regclass))
+                """), {'secuencia': secuencia}).mappings().one_or_none()
+                if estado is None or estado['increment_by'] <= 0:
+                    raise CargaRechazada(f'{tabla}: no se pudo leer la secuencia de identificadores')
+                base = estado['last_value']
+                if base is None:
+                    base = estado['start_value'] - estado['increment_by']
+                    pasos = max(1, (maximo - base + estado['increment_by'] - 1) // estado['increment_by'])
+                elif base <= maximo:
+                    pasos = (maximo - base) // estado['increment_by'] + 1
+                else:
+                    pasos = 1
+                c.execute(text("SELECT max(nextval(CAST(:secuencia AS regclass))) "
+                               "FROM generate_series(1, :pasos)"),
+                          {'secuencia': secuencia, 'pasos': pasos}).scalar_one()
+                ident = c.execute(text(consulta), valores).scalar_one_or_none()
+                if ident is None:
+                    raise CargaRechazada(f'{tabla}: la secuencia sigue colisionando con identificadores existentes')
+            ids_generados[(tabla, token)] = ident
+        else:
+            insertar(c, tabla, [valores])
+
+
 def aplicar(c, plan):
+    ids_generados = {}
     for operacion, tabla, a, b in plan.operaciones:
         if operacion == 'insertar':
             for columnas, grupo in agrupar_por_columnas(a):
-                insertar(c, tabla, grupo)
+                if c.dialect.name == 'postgresql':
+                    _insertar_postgresql(c, tabla, grupo, ids_generados)
+                else:
+                    insertar(c, tabla, grupo)
         elif operacion == 'actualizar':
+            if c.dialect.name == 'postgresql':
+                a = _traducir_ids_postgresql(tabla, a, ids_generados)
+                b = _traducir_ids_postgresql(tabla, b, ids_generados)
             asignar = ', '.join(f'"{k}" = :v_{k}' for k in b)
             donde = ' AND '.join(f'"{k}" = :w_{k}' for k in a)
             r = c.execute(text(f'UPDATE "{tabla}" SET {asignar} WHERE {donde}'),
@@ -406,6 +504,8 @@ def aplicar(c, plan):
             if r.rowcount != 1:
                 raise CargaRechazada(f'{tabla} {a}: se esperaba actualizar una fila y son {r.rowcount}')
         else:
+            if c.dialect.name == 'postgresql':
+                a = _traducir_ids_postgresql(tabla, a, ids_generados)
             donde = ' AND '.join(f'"{k}" = :w_{k}' for k in a)
             c.execute(text(f'DELETE FROM "{tabla}" WHERE {donde}'), {f'w_{k}': v for k, v in a.items()})
 
@@ -454,9 +554,10 @@ def reglas_desfasadas(c):
 def problemas_de_estado(c):
     """(problemas, plan en seco). Ningún problema y plan vacío = el estado guardado es el de las reglas actuales."""
     problemas = []
-    rotas = sqlite.comprobar_integridad(c)
-    if rotas:
-        problemas.append(f'claves foráneas rotas: {[tuple(r) for r in rotas[:5]]}')
+    if c.dialect.name == 'sqlite':
+        rotas = sqlite.comprobar_integridad(c)
+        if rotas:
+            problemas.append(f'claves foráneas rotas: {[tuple(r) for r in rotas[:5]]}')
     fuera = convocatorias_fuera_de_seleccion(c)
     if fuera:
         problemas.append(f'{len(fuera)} convocatorias activas no salen de la alineación seleccionada: {fuera[:10]}')
@@ -603,6 +704,61 @@ def importar_evidencia(ruta_base, exportaciones=(), calendarios=(), fichas=(), e
         motor.dispose()
     return {'base': str(ruta), 'run': run, 'estado': estado, 'copia': copia['ruta'], 'cambios': plan.recuento(),
             'ficheros': informe['ficheros']}
+
+
+def bloquear_escritura_postgresql(conexion):
+    """Take the shared transaction lock required before planning PostgreSQL sports writes."""
+    if conexion.dialect.name != 'postgresql':
+        raise ValueError('El bloqueo de importación requiere una conexión PostgreSQL')
+    if not conexion.in_transaction():
+        raise ValueError('La transacción PostgreSQL debe estar abierta y gestionada por quien llama')
+    conexion.execute(text('SELECT pg_advisory_xact_lock(:namespace, :lock_id)'),
+                     {'namespace': PG_LOCK_NAMESPACE, 'lock_id': PG_LOCK_SPORTS_IMPORT})
+
+
+def importar_evidencia_postgresql(conexion, exportaciones=(), calendarios=(), fichas=(), entradas=(), comando=None):
+    """Apply an incremental sports import in the caller's PostgreSQL transaction.
+
+    This function never opens, commits, or rolls back a transaction. Let exceptions
+    escape to the caller's transaction context so the whole publication is reverted.
+    """
+    if conexion.dialect.name != 'postgresql':
+        raise ValueError('La importación PostgreSQL requiere una conexión PostgreSQL')
+    bloquear_escritura_postgresql(conexion)
+    referencia = carga.referencia_del_codigo()
+    reconstruccion.informe_de_carga(conexion)
+    exigir_coherencia(conexion)
+
+    run = nueva_ejecucion(conexion, 'import', referencia, comando)
+    nuevos = Presentacion(conexion)
+    for ruta_fichero in entradas:
+        nuevos.presentar(ruta_fichero, 'raw')
+    for ruta_fichero, equipo in exportaciones:
+        nuevos.presentar(ruta_fichero, 'raw', equipo)
+    for ruta_fichero in calendarios:
+        nuevos.presentar(ruta_fichero, 'listing')
+    for ruta_fichero in fichas:
+        nuevos.presentar(ruta_fichero, 'player_profile')
+
+    filas, salida = estado_deseado(conexion, nuevos, run, referencia['texto'])
+    plan = planificar(conexion, filas, run, resumen=salida['resumen'])
+    aplicar(conexion, plan)
+    ids = {r['label']: r['id'] for r in filas_bd(conexion, 'source_file')}
+    insertar(conexion, 'import_run_file', [
+        dict(run_id=run, source_file_id=ids[x['etiqueta']], position=i,
+             presented_name=x['nombre'], presented_path=x['ruta'], outcome=x['outcome'])
+        for i, x in enumerate(nuevos.presentados, 1)
+    ])
+    informe = {
+        'cambios': plan.recuento(), 'resumen': salida['resumen'], 'codigo': referencia,
+        'ficheros': [{k: x[k] for k in ('etiqueta', 'nombre', 'outcome')} for x in nuevos.presentados],
+    }
+    if nuevos.cambia_evidencia:
+        informe['imported_at'] = ahora()
+    estado = 'committed' if plan.operaciones else 'no_changes'
+    cerrar_ejecucion(conexion, run, estado, informe)
+    exigir_coherencia(conexion)
+    return {'run': run, 'estado': estado, 'cambios': plan.recuento(), 'ficheros': informe['ficheros']}
 
 
 @exclusivo('ruta_base')
