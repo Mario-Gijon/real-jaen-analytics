@@ -28,6 +28,51 @@ class NarrativeCommentImportRejected(ValueError):
     """The saved response is not the reviewed, valid response for the local event."""
 
 
+def _sqlalchemy_connection(connection) -> bool:
+    return getattr(getattr(connection, 'dialect', None), 'name', None) is not None
+
+
+def _execute(connection, statement, parameters=None):
+    parameters = parameters or {}
+    if _sqlalchemy_connection(connection):
+        from sqlalchemy import text
+        return connection.execute(text(statement), parameters)
+    return connection.execute(statement, parameters)
+
+
+def _executemany(connection, statement, parameters):
+    if not parameters:
+        return None
+    if _sqlalchemy_connection(connection):
+        from sqlalchemy import text
+        return connection.execute(text(statement), parameters)
+    return connection.executemany(statement, parameters)
+
+
+def _row_as_dict(result, row):
+    mapping = getattr(row, '_mapping', None)
+    if mapping is not None:
+        return dict(mapping)
+    return dict(zip((column[0] for column in result.description), row))
+
+
+def _fetchone(connection, statement, parameters=None):
+    result = _execute(connection, statement, parameters)
+    row = result.fetchone()
+    return None if row is None else _row_as_dict(result, row)
+
+
+def _fetchall(connection, statement, parameters=None):
+    result = _execute(connection, statement, parameters)
+    return [_row_as_dict(result, row) for row in result.fetchall()]
+
+
+def _require_postgresql_write_lock(connection):
+    if _sqlalchemy_connection(connection) and connection.dialect.name == 'postgresql':
+        from persistencia.sincronizacion import bloquear_escritura_postgresql
+        bloquear_escritura_postgresql(connection)
+
+
 def _strict_json(text: str):
     def reject_constant(value):
         raise NarrativeCommentImportRejected(f'Constante JSON no válida: {value}')
@@ -135,14 +180,17 @@ def _scoped_event_match(connection, event_id: str, scope_pairs: set[tuple[str, s
     if not re.fullmatch(r'[1-9][0-9]{0,11}', str(event_id)) or not scope_pairs:
         raise NarrativeCommentImportRejected('Evento o ámbito de comentarios no válido')
     pairs = sorted((str(tournament), str(season)) for tournament, season in scope_pairs)
-    placeholders = ','.join('(?, ?)' for _ in pairs)
-    args = [PROVIDER, str(event_id)] + [value for pair in pairs for value in pair]
-    rows = connection.execute(f"""
+    placeholders = ','.join(f'(:tournament_{i}, :season_{i})' for i in range(len(pairs)))
+    params = {'provider': PROVIDER, 'event_id': str(event_id)}
+    for i, (tournament, season) in enumerate(pairs):
+        params[f'tournament_{i}'] = tournament
+        params[f'season_{i}'] = season
+    rows = _fetchall(connection, f"""
         SELECT m.id
         FROM match_external_id AS external
         JOIN match AS m ON m.id = external.entity_id
         JOIN match_state AS ms ON ms.match_id = m.id
-        WHERE external.provider = ? AND external.namespace = '' AND external.external_id = ?
+        WHERE external.provider = :provider AND external.namespace = '' AND external.external_id = :event_id
           AND external.status IN ('origin', 'verified')
           AND m.status = 'active' AND ms.status = 'finished'
           AND (ms.external_stage_id, ms.external_season_id) IN ({placeholders})
@@ -150,10 +198,10 @@ def _scoped_event_match(connection, event_id: str, scope_pairs: set[tuple[str, s
               SELECT 1 FROM local_replacement AS replacement
               WHERE replacement.replaced_match_id = m.id AND replacement.status = 'active'
           )
-    """, args).fetchall()
+    """, params)
     if len(rows) != 1:
         raise NarrativeCommentImportRejected('El evento no es un partido finalizado y vigente del Grupo 2 configurado')
-    return rows[0][0]
+    return rows[0]['id']
 
 
 def _capture_is_spanish(capture, event_id: str, expected_path: str, *, selected_sha256=None,
@@ -171,40 +219,45 @@ def _capture_is_spanish(capture, event_id: str, expected_path: str, *, selected_
 
 def record_http_attempt(connection, *, event_id: str, scope_pairs: set[tuple[str, str]], http_status: int | None,
                         response: bytes | None, source_path: str, captured_at: str,
-                        transport_report: dict | None = None, error_code: str | None = None) -> dict:
-    """Record one completed comment request in an existing SQLite transaction.
+                        transport_report: dict | None = None, error_code: str | None = None,
+                        _write_lock_acquired: bool = False, _schema_ready: bool = False) -> dict:
+    """Record one completed comment request in the caller's existing transaction.
 
     Only a structurally valid HTTP 200 creates or deduplicates an immutable capture. An empty response replaces an
     unverified selection but retains a proven Spanish capture with comments; errors retain only proven Spanish data.
+    PostgreSQL callers must use an open transaction; its shared sports-write advisory lock is acquired here.
     """
+    if not _write_lock_acquired:
+        _require_postgresql_write_lock(connection)
     match_id = _scoped_event_match(connection, event_id, scope_pairs)
     timestamp = _validated_timestamp(captured_at)
     expected_path = f'/event/{event_id}/comments/es-la'
     if source_path != expected_path:
         raise NarrativeCommentImportRejected('Ruta de origen distinta del endpoint español autorizado')
-    selection_columns = {row[1] for row in connection.execute(
-        'PRAGMA table_info(narrative_comment_selection)')}
-    if 'selected_spanish_sha256' not in selection_columns:
+    if not _schema_ready and not comments_schema_ready(connection):
         raise NarrativeCommentImportRejected('La persistencia de comentarios necesita la migración 0007')
 
     def prior_selection():
-        row = connection.execute("""
+        row = _fetchone(connection, """
             SELECT selection.capture_id, selection.selected_spanish_sha256,
                    selection.last_successful_source_path, capture.provider, capture.source_event_id,
                    capture.source_path, capture.availability, capture.response_sha256
             FROM narrative_comment_selection AS selection
             LEFT JOIN narrative_comment_capture AS capture
               ON capture.id = selection.capture_id AND capture.match_id = selection.match_id
-            WHERE selection.match_id = ?
-        """, (match_id,)).fetchone()
-        if row is None or row[0] is None or row[3] is None:
+            WHERE selection.match_id = :match_id
+        """, {'match_id': match_id})
+        if row is None or row['capture_id'] is None or row['provider'] is None:
             return None, False
-        capture = dict(provider=row[3], source_event_id=row[4], source_path=row[5], availability=row[6],
-                       response_sha256=row[7])
-        trusted = _capture_is_spanish(capture, event_id, expected_path, selected_sha256=row[1],
-                                      last_successful_source_path=row[2])
-        return dict(capture_id=row[0], selected_sha256=row[1], last_successful_source_path=row[2],
-                    availability=row[6], response_sha256=row[7]), trusted
+        capture = dict(provider=row['provider'], source_event_id=row['source_event_id'],
+                       source_path=row['source_path'], availability=row['availability'],
+                       response_sha256=row['response_sha256'])
+        trusted = _capture_is_spanish(capture, event_id, expected_path,
+                                      selected_sha256=row['selected_spanish_sha256'],
+                                      last_successful_source_path=row['last_successful_source_path'])
+        return dict(capture_id=row['capture_id'], selected_sha256=row['selected_spanish_sha256'],
+                    last_successful_source_path=row['last_successful_source_path'],
+                    availability=row['availability'], response_sha256=row['response_sha256']), trusted
 
     if http_status == 200 and response is not None:
         digest = hashlib.sha256(response).hexdigest()
@@ -215,31 +268,44 @@ def record_http_attempt(connection, *, event_id: str, scope_pairs: set[tuple[str
         document = _strict_json(original_json)
         rows = _comment_rows(document)
         availability = 'available' if rows else 'empty'
-        existing = connection.execute("""
+        existing = _fetchone(connection, """
             SELECT id, response_json, availability
-            FROM narrative_comment_capture WHERE match_id = ? AND response_sha256 = ?
-        """, (match_id, digest)).fetchone()
+            FROM narrative_comment_capture WHERE match_id = :match_id AND response_sha256 = :digest
+        """, {'match_id': match_id, 'digest': digest})
         if existing:
-            capture_id, saved_json, saved_availability = existing
+            capture_id = existing['id']
+            saved_json, saved_availability = existing['response_json'], existing['availability']
             if saved_json != original_json or saved_availability != availability:
                 raise NarrativeCommentImportRejected('La respuesta duplicada no coincide byte a byte con la captura guardada')
             inserted_capture = False
         else:
             report_json = json.dumps(transport_report or {}, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-            cursor = connection.execute("""
+            insert_capture = """
                 INSERT INTO narrative_comment_capture
                     (match_id, provider, source_event_id, source_path, captured_at, http_status, availability,
                      comment_count, response_sha256, response_json, transport_report_json)
-                VALUES (?, ?, ?, ?, ?, 200, ?, ?, ?, ?, ?)
-            """, (match_id, PROVIDER, event_id, source_path, timestamp, availability, len(rows), digest,
-                  original_json, report_json))
-            capture_id = cursor.lastrowid
-            connection.executemany("""
+                VALUES (:match_id, :provider, :event_id, :source_path, :captured_at, 200, :availability,
+                        :comment_count, :digest, :response_json, :transport_report_json)
+            """
+            if _sqlalchemy_connection(connection) and connection.dialect.name == 'postgresql':
+                insert_capture += ' RETURNING id'
+            cursor = _execute(connection, insert_capture, {
+                'match_id': match_id, 'provider': PROVIDER, 'event_id': event_id, 'source_path': source_path,
+                'captured_at': timestamp, 'availability': availability, 'comment_count': len(rows),
+                'digest': digest, 'response_json': original_json, 'transport_report_json': report_json,
+            })
+            capture_id = cursor.scalar_one() if _sqlalchemy_connection(connection) else cursor.lastrowid
+            comment_fields = ('source_comment_id', 'source_position', 'text', 'type', 'minute', 'period_name',
+                              'is_home', 'home_score', 'away_score', 'incident_id', 'participants_json',
+                              'context_json')
+            comment_params = [dict(capture_id=capture_id, **dict(zip(comment_fields, row))) for row in rows]
+            _executemany(connection, """
                 INSERT INTO narrative_comment
                     (capture_id, source_comment_id, source_position, text, type, minute, period_name, is_home,
                      home_score, away_score, incident_id, participants_json, context_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [(capture_id, *row) for row in rows])
+                VALUES (:capture_id, :source_comment_id, :source_position, :text, :type, :minute, :period_name,
+                        :is_home, :home_score, :away_score, :incident_id, :participants_json, :context_json)
+            """, comment_params)
             inserted_capture = True
 
         prior, prior_is_spanish = prior_selection()
@@ -263,11 +329,12 @@ def record_http_attempt(connection, *, event_id: str, scope_pairs: set[tuple[str
                       comments=0, response_sha256=None, captured_at=timestamp,
                       selected_capture_id=selected_capture_id, error_code=saved_error)
 
-    connection.execute("""
+    _execute(connection, """
         INSERT INTO narrative_comment_selection
             (match_id, capture_id, last_successful_source_path, selected_spanish_sha256, last_attempt_state,
              last_attempt_at, last_http_status, last_error_code)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (:match_id, :capture_id, :source_path, :spanish_sha256, :attempt_state,
+                :attempt_at, :http_status, :error_code)
         ON CONFLICT(match_id) DO UPDATE SET
             capture_id = excluded.capture_id,
             selected_spanish_sha256 = excluded.selected_spanish_sha256,
@@ -277,8 +344,9 @@ def record_http_attempt(connection, *, event_id: str, scope_pairs: set[tuple[str
             last_attempt_at = excluded.last_attempt_at,
             last_http_status = excluded.last_http_status,
             last_error_code = excluded.last_error_code
-    """, (match_id, selected_capture_id, successful_source_path, selected_spanish_sha256,
-          attempt_state, timestamp, saved_status, saved_error))
+    """, {'match_id': match_id, 'capture_id': selected_capture_id, 'source_path': successful_source_path,
+          'spanish_sha256': selected_spanish_sha256, 'attempt_state': attempt_state,
+          'attempt_at': timestamp, 'http_status': saved_status, 'error_code': saved_error})
     return result
 
 
@@ -615,12 +683,31 @@ def load_current_comments_postgresql(connection) -> dict[str, dict]:
     return output
 
 
-def comments_schema_ready(base: Path) -> bool:
+def comments_schema_ready(base) -> bool:
     """True only when capture provenance and selected-capture Spanish proof are present."""
-    base = Path(base).resolve()
-    with bloquear(base), closing(sqlite3.connect(base.as_uri() + '?mode=ro', uri=True, timeout=10)) as connection:
-        capture = {row[1] for row in connection.execute('PRAGMA table_info(narrative_comment_capture)')}
-        selection = {row[1] for row in connection.execute('PRAGMA table_info(narrative_comment_selection)')}
+    if _sqlalchemy_connection(base) and base.dialect.name == 'postgresql':
+        rows = _fetchall(base, """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND ((table_name = 'narrative_comment_capture'
+                    AND column_name IN ('source_path', 'transport_report_json'))
+                OR (table_name = 'narrative_comment_selection'
+                    AND column_name IN ('last_successful_source_path', 'selected_spanish_sha256')))
+        """)
+        columns = {row['table_name']: set() for row in rows}
+        for row in rows:
+            columns[row['table_name']].add(row['column_name'])
+        capture = columns.get('narrative_comment_capture', set())
+        selection = columns.get('narrative_comment_selection', set())
+    elif isinstance(base, sqlite3.Connection):
+        capture = {row[1] for row in base.execute('PRAGMA table_info(narrative_comment_capture)')}
+        selection = {row[1] for row in base.execute('PRAGMA table_info(narrative_comment_selection)')}
+    else:
+        base = Path(base).resolve()
+        with bloquear(base), closing(sqlite3.connect(base.as_uri() + '?mode=ro', uri=True, timeout=10)) as connection:
+            capture = {row[1] for row in connection.execute('PRAGMA table_info(narrative_comment_capture)')}
+            selection = {row[1] for row in connection.execute('PRAGMA table_info(narrative_comment_selection)')}
     return ({'source_path', 'transport_report_json'} <= capture
             and {'last_successful_source_path', 'selected_spanish_sha256'} <= selection)
 
@@ -670,47 +757,58 @@ def match_comments_response(data: dict, snapshots: dict[str, dict], public_match
     return 200, {'matchId': public_match_id, **json.loads(json.dumps(public_snapshot, ensure_ascii=False, allow_nan=False))}
 
 
+def _apply_group_record(connection, row, *, schema_ready=False, write_lock_acquired=False):
+    ident = row['event_id']
+    raw = base64.b64decode(row['raw_b64'], validate=True) if row['raw_b64'] is not None else None
+    if raw is not None and hashlib.sha256(raw).hexdigest() != row['raw_sha256']:
+        raise NarrativeCommentImportRejected('Comments response hash mismatch')
+    status = row['status'] if type(row['status']) is int and 100 <= row['status'] <= 599 else None
+    error_code = row['reason']
+    response = None
+    if status == 200 and raw is not None:
+        try:
+            validar_respuesta(raw)
+            response = raw
+            error_code = None
+        except NarrativeCommentImportRejected:
+            error_code = 'invalid_response'
+    report = dict(row['transport_report'])
+    record_http_attempt(connection, event_id=str(ident), scope_pairs={('94191', '97382')},
+                        http_status=status, response=response,
+                        source_path=f'/event/{ident}/comments/es-la', captured_at=row['captured_at'],
+                        transport_report=report, error_code=error_code,
+                        _write_lock_acquired=write_lock_acquired, _schema_ready=schema_ready)
+    return ident, status, response
+
+
+def _group_records(response_file):
+    response_file = Path(response_file)
+    records = [json.loads(line) for line in response_file.read_bytes().splitlines()]
+    return records, {row['event_id'] for row in records}
+
+
 def import_group_bundle(base: Path, response_file: Path) -> dict:
-    """Apply verified Group 2 comment attempts to the unpublished coordinator candidate only."""
-    response_file=Path(response_file)
-    records=[json.loads(line) for line in response_file.read_bytes().splitlines()]
-    attempted={row['event_id'] for row in records}
+    """Apply verified Group 2 comment attempts to the unpublished SQLite coordinator candidate."""
+    records, attempted = _group_records(response_file)
     if not records:
         return {'captured_ids': [], 'failed_ids': []}
     if not comments_schema_ready(base):
         return {'captured_ids': [], 'failed_ids': sorted(attempted)}
-    connection=sqlite3.connect(base,timeout=10)
-    captured=set();failed=set()
+    connection = sqlite3.connect(base, timeout=10)
+    captured, failed = set(), set()
     try:
         connection.execute('PRAGMA foreign_keys = ON')
         if connection.execute('PRAGMA foreign_keys').fetchone()[0] != 1:
             raise NarrativeCommentImportRejected('SQLite foreign keys unavailable')
         connection.execute('BEGIN IMMEDIATE')
-        for index,row in enumerate(records):
-            ident=row['event_id']
-            savepoint=f'comment_{index}'
+        for index, row in enumerate(records):
+            ident = row['event_id']
+            savepoint = f'comment_{index}'
             connection.execute(f'SAVEPOINT {savepoint}')
             try:
-                raw=base64.b64decode(row['raw_b64'],validate=True) if row['raw_b64'] is not None else None
-                if raw is not None and hashlib.sha256(raw).hexdigest()!=row['raw_sha256']:
-                    raise NarrativeCommentImportRejected('Comments response hash mismatch')
-                status=row['status'] if type(row['status']) is int and 100<=row['status']<=599 else None
-                error_code=row['reason']
-                response=None
-                if status==200 and raw is not None:
-                    try:
-                        validar_respuesta(raw)
-                        response=raw
-                        error_code=None
-                    except NarrativeCommentImportRejected:
-                        error_code='invalid_response'
-                report=dict(row['transport_report'])
-                record_http_attempt(connection,event_id=str(ident),scope_pairs={('94191','97382')},
-                                    http_status=status,response=response,
-                                    source_path=f'/event/{ident}/comments/es-la',captured_at=row['captured_at'],
-                                    transport_report=report,error_code=error_code)
+                _ident, status, response = _apply_group_record(connection, row, schema_ready=True)
                 connection.execute(f'RELEASE {savepoint}')
-                if status==200 and response is not None:
+                if status == 200 and response is not None:
                     captured.add(ident)
             except Exception:
                 connection.execute(f'ROLLBACK TO {savepoint}')
@@ -723,4 +821,36 @@ def import_group_bundle(base: Path, response_file: Path) -> dict:
         captured.clear()
     finally:
         connection.close()
-    return {'captured_ids':sorted(captured),'failed_ids':sorted(failed)}
+    return {'captured_ids': sorted(captured), 'failed_ids': sorted(failed)}
+
+
+def import_group_bundle_postgresql(connection, response_file: Path) -> dict:
+    """Apply a comments bundle inside the caller's PostgreSQL transaction and shared sports-write lock.
+
+    Invalid individual attempts are rolled back to their savepoint and returned as failed IDs. Database, integrity,
+    connection, and transaction errors propagate so the outer coordinator can roll back the full publication.
+    """
+    if not _sqlalchemy_connection(connection) or connection.dialect.name != 'postgresql':
+        raise ValueError('La importación de comentarios requiere una conexión PostgreSQL de SQLAlchemy')
+    if not connection.in_transaction():
+        raise ValueError('La transacción PostgreSQL debe estar abierta y gestionada por quien llama')
+    records, attempted = _group_records(response_file)
+    if not records:
+        return {'captured_ids': [], 'failed_ids': []}
+
+    _require_postgresql_write_lock(connection)
+    if not comments_schema_ready(connection):
+        return {'captured_ids': [], 'failed_ids': sorted(attempted)}
+
+    captured, failed = set(), set()
+    for row in records:
+        ident = row['event_id']
+        try:
+            with connection.begin_nested():
+                _ident, status, response = _apply_group_record(
+                    connection, row, schema_ready=True, write_lock_acquired=True)
+            if status == 200 and response is not None:
+                captured.add(ident)
+        except (NarrativeCommentImportRejected, ValueError, TypeError, KeyError):
+            failed.add(ident)
+    return {'captured_ids': sorted(captured), 'failed_ids': sorted(failed)}
