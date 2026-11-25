@@ -34,12 +34,12 @@ La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, es
 
 ## Lectura provisional de Sports Data
 
-Sports Data puede arrancar en modo de consulta con `SPORTS_DATA_STORAGE=postgresql` y `SPORTS_DATA_CONTROL=0`. Carga la generación deportiva y los comentarios seleccionados en una misma transacción `REPEATABLE READ READ ONLY`, y la conserva en memoria durante la vida del proceso. No habilita actualizaciones, no combina PostgreSQL con el coordinador SQLite y no cambia la persistencia habitual ni las fotografías locales.
+Sports Data puede arrancar en modo de consulta con `SPORTS_DATA_STORAGE=postgresql` y `SPORTS_DATA_CONTROL=0`. Carga la generación deportiva y los comentarios seleccionados en una misma transacción `REPEATABLE READ READ ONLY`, y la conserva en memoria durante la vida del proceso. Con `SPORTS_DATA_ENRICHMENT_ENABLED=1`, `/api/v1/enrichment/comments` usa el mismo motor PostgreSQL y ejecuta validación, recuento, página y participantes en una transacción de lectura por petición; ignora `SPORTS_DATA_ENRICHMENT_DB`. No habilita actualizaciones, no combina PostgreSQL con el coordinador SQLite y no cambia la persistencia habitual ni las fotografías locales.
 
 Desde `sports-data`, carga solo `SPORTS_DATA_DATABASE_URL` de `.env.neon` y arranca con:
 
 ```sh
-SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 \
+SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 SPORTS_DATA_ENRICHMENT_ENABLED=1 \
   .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8002
 ```
 

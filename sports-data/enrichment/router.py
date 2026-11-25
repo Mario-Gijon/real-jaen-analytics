@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import text as sqlalchemy_text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .queries import (
     DEFAULT_PAGE_SIZE,
@@ -32,6 +34,9 @@ def get_enrichment_database_path(request: Request) -> Path | None:
     if getattr(request.app.state, "control_mode", False):
         # A coordinator-backed request resolves its path only after the handler
         # has validated filters and atomically retained the current generation.
+        return None
+    if getattr(request.app.state, "storage", None) == "postgresql":
+        # PostgreSQL mode must never fall back to SPORTS_DATA_ENRICHMENT_DB.
         return None
     database_path = getattr(request.app.state, "enrichment_database_path", None)
     if database_path is None:
@@ -121,6 +126,100 @@ def _validate_enrichment_database(connection: sqlite3.Connection) -> None:
         )
 
 
+_POSTGRESQL_REQUIRED_COLUMNS = {
+    ("narrative_comment_selection", column)
+    for column in ("capture_id", "match_id", "selected_spanish_sha256", "last_successful_source_path")
+} | {
+    ("narrative_comment_capture", column)
+    for column in ("id", "match_id", "source_event_id", "provider", "source_path", "availability",
+                   "response_sha256", "captured_at", "http_status")
+} | {
+    ("narrative_comment", column)
+    for column in ("capture_id", "source_comment_id", "source_position", "text", "type", "minute",
+                   "period_name", "is_home", "home_score", "away_score", "incident_id",
+                   "participants_json", "context_json")
+} | {
+    ("narrative_comment_enrichment", column)
+    for column in ("capture_id", "source_comment_id", "enrichment_version", "category", "attributes_json")
+} | {
+    ("narrative_comment_enrichment_participant", column)
+    for column in ("capture_id", "source_comment_id", "enrichment_version", "participant_position",
+                   "source_role", "role", "source_id_json", "normalizer_role")
+}
+
+
+def _validate_postgresql_enrichment_database(connection) -> None:
+    """Check the pg0001 enrichment signature without reading Alembic's private version table."""
+    try:
+        columns = {
+            (row[0], row[1])
+            for row in connection.execute(sqlalchemy_text("""
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name IN (
+                      'narrative_comment_selection', 'narrative_comment_capture', 'narrative_comment',
+                      'narrative_comment_enrichment', 'narrative_comment_enrichment_participant'
+                  )
+            """))
+        }
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "enrichment_unavailable", "reason": "migration_0008_required"},
+        ) from None
+    if not _POSTGRESQL_REQUIRED_COLUMNS.issubset(columns):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "enrichment_unavailable", "reason": "migration_0008_required"},
+        )
+
+    try:
+        has_version = connection.execute(sqlalchemy_text(
+            "SELECT 1 FROM narrative_comment_enrichment "
+            "WHERE enrichment_version = :version LIMIT 1"
+        ), {"version": DEFAULT_ENRICHMENT_VERSION}).first()
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "enrichment_unavailable", "reason": "migration_0008_required"},
+        ) from None
+    if has_version is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "enrichment_unavailable", "reason": "rules_v1_not_found"},
+        )
+
+    try:
+        pending = connection.execute(sqlalchemy_text(f"""
+            SELECT 1
+            FROM narrative_comment_selection AS selection
+            JOIN narrative_comment_capture AS capture
+              ON capture.id = selection.capture_id AND capture.match_id = selection.match_id
+            JOIN narrative_comment AS comment
+              ON comment.capture_id = selection.capture_id
+            WHERE {SELECTED_SPANISH_CAPTURE_PREDICATE}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM narrative_comment_enrichment AS enrichment
+                  WHERE enrichment.capture_id = comment.capture_id
+                    AND enrichment.source_comment_id = comment.source_comment_id
+                    AND enrichment.enrichment_version = :version
+              )
+            LIMIT 1
+        """), {"version": DEFAULT_ENRICHMENT_VERSION}).first()
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "enrichment_unavailable", "reason": "database_unavailable"},
+        ) from None
+    if pending is not None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "enrichment_unavailable", "reason": "enrichment_incomplete"},
+        )
+
+
 def _parse_attributes(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -160,6 +259,7 @@ def enriched_comments(
         ) from error
 
     lease = None
+    postgresql_engine = None
     if getattr(request.app.state, "control_mode", False):
         try:
             coordinator = request.app.state.coordinator
@@ -170,6 +270,13 @@ def enriched_comments(
                 status_code=503,
                 detail={"error": "enrichment_unavailable", "reason": "generation_unavailable"},
             ) from error
+    elif getattr(request.app.state, "storage", None) == "postgresql":
+        postgresql_engine = getattr(request.app.state, "postgresql_engine", None)
+        if postgresql_engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "enrichment_unavailable", "reason": "database_not_configured"},
+            )
     elif database_path is None:
         raise HTTPException(
             status_code=503,
@@ -177,6 +284,40 @@ def enriched_comments(
         )
 
     try:
+        if postgresql_engine is not None:
+            try:
+                with postgresql_engine.connect() as connection:
+                    connection = connection.execution_options(isolation_level="REPEATABLE READ")
+                    with connection.begin():
+                        connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                        _validate_postgresql_enrichment_database(connection)
+                        return query_enriched_comments(
+                            connection,
+                            match_id=match_id,
+                            source_event_id=source_event_id,
+                            player_id=player_id,
+                            category=category,
+                            original_type=original_type,
+                            role=role,
+                            attributes=parsed_attributes,
+                            enrichment_version=DEFAULT_ENRICHMENT_VERSION,
+                            limit=limit,
+                            offset=offset,
+                        )
+            except EnrichmentQueryError as error:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "invalid_filter", "reason": str(error)},
+                ) from error
+            except HTTPException:
+                raise
+            except SQLAlchemyError:
+                # Driver errors can contain connection data; expose only the established API error shape.
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error": "enrichment_unavailable", "reason": "database_unavailable"},
+                ) from None
+
         try:
             connection = open_readonly_connection(database_path)
         except (OSError, sqlite3.Error) as error:

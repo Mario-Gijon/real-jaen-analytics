@@ -18,13 +18,15 @@ while IFS='=' read -r key value; do
     SPORTS_DATA_DATABASE_URL) export "$key=$value" ;;
   esac
 done < ../.env.neon
-SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 \
+SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 SPORTS_DATA_ENRICHMENT_ENABLED=1 \
   .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8002
 ```
 
 El modo reconstruye los datos y comentarios narrativos al arrancar, dentro de una transacción `REPEATABLE READ READ
-ONLY`, y conserva la generación en memoria hasta detener la aplicación. No permite combinar PostgreSQL con el coordinador
-SQLite ni habilita actualizaciones. La instalación habitual conserva su modo actual y las fotografías siguen usando el
+ONLY`, y conserva la generación en memoria hasta detener la aplicación. Con `SPORTS_DATA_ENRICHMENT_ENABLED=1`, el
+endpoint de enriquecimientos consulta la misma base PostgreSQL mediante el motor de la aplicación y una transacción
+de lectura por petición; ignora `SPORTS_DATA_ENRICHMENT_DB`. No permite combinar PostgreSQL con el coordinador SQLite
+ni habilita actualizaciones. La instalación habitual conserva su modo actual y las fotografías siguen usando el
 almacenamiento local.
 
 ## Esquema PostgreSQL de desarrollo

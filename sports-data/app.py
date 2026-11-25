@@ -94,7 +94,7 @@ def _load_postgresql(resources):
                     raise BaseNoUtilizable('La conexión no cumple el perfil de lectura de Sports Data')
                 datos = lectura.cargar_desde_postgresql(connection, scope)
                 comentarios = load_current_comments_postgresql(connection)
-        return datos, comentarios
+        return datos, comentarios, motor
     except SQLAlchemyError as error:
         # Driver exceptions may contain connection details; keep startup errors credential-free.
         from persistencia.lectura import BaseNoUtilizable
@@ -367,9 +367,10 @@ def fallback(request: Request, path: str):
 
 def create_app(data=None, *, control_mode=None) -> FastAPI:
     """Build an app, optionally with a preloaded dataset for isolated tests."""
+    storage = os.environ.get('SPORTS_DATA_STORAGE', 'json')
     control_mode = _control_enabled() if control_mode is None else control_mode
     enrichment_enabled = _enrichment_enabled()
-    if control_mode and os.environ.get('SPORTS_DATA_STORAGE', 'json') == 'postgresql':
+    if control_mode and storage == 'postgresql':
         raise ValueError('SPORTS_DATA_STORAGE=postgresql requiere SPORTS_DATA_CONTROL=0; no se puede mezclar con el coordinador SQLite')
     if control_mode and data is not None:
         raise ValueError('El modo control necesita la generación de SQLite, no datos precargados')
@@ -379,6 +380,8 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
         require_complete_restore()
         with ExitStack() as resources:
             application.state.control_mode = control_mode
+            application.state.storage = storage
+            application.state.postgresql_engine = None
             application.state.photo_root = photo_root()
             application.state.photo_reader = photo_serving.PhotoReader(
                 application.state.photo_root, photo_serving.source_priority())
@@ -387,12 +390,12 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                  application.state.updates,
                  application.state.control_token) = _load_control(resources)
             else:
-                storage = os.environ.get('SPORTS_DATA_STORAGE', 'json')
                 if data is not None:
                     application.state.data = data
                     application.state.comments = {}
                 elif storage == 'postgresql':
-                    application.state.data, application.state.comments = _load_postgresql(resources)
+                    (application.state.data, application.state.comments,
+                     application.state.postgresql_engine) = _load_postgresql(resources)
                 else:
                     application.state.data = _load_data(resources)
                     database = os.environ.get('SPORTS_DATA_DB') if storage == 'sql' else None
@@ -411,7 +414,8 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
 
         enrichment_database = os.environ.get('SPORTS_DATA_ENRICHMENT_DB')
         application.state.enrichment_database_path = (
-            Path(enrichment_database) if enrichment_database and not control_mode else None
+            Path(enrichment_database)
+            if enrichment_database and not control_mode and storage != 'postgresql' else None
         )
         application.include_router(enrichment_router)
     application.include_router(router)
