@@ -142,16 +142,16 @@ create_volume() {
   echo "Creado volumen nuevo: $1"
 }
 create_volume "$STATE_VOLUME" sports-state
-docker run --rm --network none --user 0:0 --mount "type=volume,source=$STATE_VOLUME,target=/state" \
+docker run --rm --network none --user 0:0 --mount "type=volume,source=$STATE_VOLUME,target=/state,volume-nocopy" \
   --entrypoint python "$SPORTS_DATA_IMAGE" -c "from pathlib import Path; p=Path('/state/real-jaen.sqlite.restauracion-incompleta'); p.open('x').write('restore incomplete'); p.chmod(0o444)"
 create_volume "$VIDEO_VOLUME" video-state
-docker run --rm --network none --user 0:0 --mount "type=volume,source=$VIDEO_VOLUME,target=/state" \
+docker run --rm --network none --user 0:0 --mount "type=volume,source=$VIDEO_VOLUME,target=/state,volume-nocopy" \
   --entrypoint python "$VIDEO_SERVICE_IMAGE" -c "from pathlib import Path; p=Path('/state/.real-jaen-restore-incomplete'); p.open('x').write('restore incomplete'); p.chmod(0o444)"
 create_volume "$JOBS_VOLUME" acquisition-jobs
 create_volume "$PROFILE_VOLUME" acquisition-profiles
 docker run --rm --network none --user 0:0 \
-  --mount "type=volume,source=$STATE_VOLUME,target=/state" --mount "type=volume,source=$JOBS_VOLUME,target=/jobs" \
-  --mount "type=volume,source=$PROFILE_VOLUME,target=/profiles" --mount "type=volume,source=$VIDEO_VOLUME,target=/video" \
+  --mount "type=volume,source=$STATE_VOLUME,target=/state,volume-nocopy" --mount "type=volume,source=$JOBS_VOLUME,target=/jobs,volume-nocopy" \
+  --mount "type=volume,source=$PROFILE_VOLUME,target=/profiles,volume-nocopy" --mount "type=volume,source=$VIDEO_VOLUME,target=/video,volume-nocopy" \
   --entrypoint python "$SPORTS_DATA_IMAGE" -c "import os; [os.chown(p,10001,10001) for p in ('/state','/jobs','/profiles','/video')]"
 
 docker run --rm --network none --user 10001:10001 --mount "type=volume,source=$STATE_VOLUME,target=/state" \

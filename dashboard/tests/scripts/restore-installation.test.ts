@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
-function fixture(existingVolume = "", failAfterFirstVolume = false, activeMount = "") {
+function fixture(existingVolume = "", failAfterFirstVolume = false, activeMount = "", modelVideoCopyUp = false) {
   const root = mkdtempSync(join(tmpdir(), "rja-restore-script-"));
   const bin = join(root, "bin");
   const imports = join(root, "imports");
@@ -53,6 +53,8 @@ function fixture(existingVolume = "", failAfterFirstVolume = false, activeMount 
   writeFileSync(configPath, JSON.stringify(config));
   const markerPath = join(imports, ".real-jaen-restore-incomplete");
   const callsPath = join(root, "docker-calls.log");
+  const videoFirstMountPath = join(root, "video-volume-first-mount");
+  const videoCopyUpPath = join(root, "video-volume-image-copy-up");
   const fakeDocker = join(bin, "docker");
   const fakePython = join(bin, "python3");
   writeFileSync(fakePython, `#!/bin/sh
@@ -87,6 +89,19 @@ case "$*" in
   'info'|'image inspect '*) exit 0 ;;
   'volume create '*) [ -f "$RESTORE_MARKER" ] || exit 91; echo 'marker-present' >> "$DOCKER_CALLS"; exit 0 ;;
   'run '*)
+    if [ "$MODEL_VIDEO_COPY_UP" = 1 ]; then
+      case "$*" in
+        *"source=$PREFIX-video-state,target=/state"*)
+          if [ ! -f "$VIDEO_FIRST_MOUNT" ]; then
+            touch "$VIDEO_FIRST_MOUNT"
+            case "$*" in *volume-nocopy*) ;; *) touch "$VIDEO_COPY_UP" ;; esac
+          fi ;;
+      esac
+      case "$*" in
+        *"stage = root / '.restore-state'"*)
+          if [ -f "$VIDEO_COPY_UP" ]; then echo 'FileExistsError: /video/calibrations' >&2; exit 88; fi ;;
+      esac
+    fi
     if [ "\${FAIL_AFTER_FIRST_VOLUME:-0}" = 1 ] && [ -f "$RESTORE_MARKER" ]; then
       case "$*" in *"source=$PREFIX-sports-state,target=/state"*) exit 92 ;; esac
     fi
@@ -111,6 +126,9 @@ exit 93
     RESTORE_MARKER: markerPath,
     EXISTING_VOLUME: existingVolume,
     FAIL_AFTER_FIRST_VOLUME: failAfterFirstVolume ? "1" : "0",
+    MODEL_VIDEO_COPY_UP: modelVideoCopyUp ? "1" : "0",
+    VIDEO_FIRST_MOUNT: videoFirstMountPath,
+    VIDEO_COPY_UP: videoCopyUpPath,
     ACTIVE_MOUNT: activeMount === "imports" ? imports : activeMount,
     REAL_PYTHON: spawnSync("which", ["python3"], { encoding: "utf8" }).stdout.trim(),
     ENV_FILE: envFile,
@@ -151,6 +169,27 @@ describe("installation restore script", () => {
       expect(acquisitionJobsRestore).toBeGreaterThan(firstVolume);
       expect(acquisitionJobsRestore).toBeLessThan(coordinatorCheck);
       expect(test.result.stdout).toContain("sin arrancar servicios");
+    } finally {
+      rmSync(test.root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses volume-nocopy on fresh volumes so image calibrations cannot collide with restored state", () => {
+    // Model Docker's copy-up: the Video Service image contains /state/calibrations,
+    // which would make the later guarded restore merge fail without volume-nocopy.
+    const test = fixture("", false, "", true);
+    try {
+      expect(test.result.status, test.result.stderr + test.result.stdout).toBe(0);
+      const calls = readFileSync(test.callsPath, "utf8").split("\n").filter(Boolean);
+      const sportsMarker = calls.find((call) => call.includes(`source=${test.prefix}-sports-state,target=/state`));
+      const videoMarker = calls.find((call) => call.includes(`source=${test.prefix}-video-state,target=/state`));
+      const volumeOwnership = calls.find((call) => call.includes("os.chown(p,10001,10001)"));
+      expect(sportsMarker).toContain("volume-nocopy");
+      expect(videoMarker).toContain("volume-nocopy");
+      expect(volumeOwnership).toContain(`source=${test.prefix}-acquisition-jobs,target=/jobs,volume-nocopy`);
+      expect(volumeOwnership).toContain(`source=${test.prefix}-acquisition-profiles,target=/profiles,volume-nocopy`);
+      expect(volumeOwnership).toContain(`source=${test.prefix}-sports-state,target=/state,volume-nocopy`);
+      expect(volumeOwnership).toContain(`source=${test.prefix}-video-state,target=/video,volume-nocopy`);
     } finally {
       rmSync(test.root, { recursive: true, force: true });
     }
