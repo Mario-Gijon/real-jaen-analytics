@@ -2,7 +2,10 @@
 
 Run with ``uvicorn app:app``. By default this reads ``datos/``. Set
 ``SPORTS_DATA_STORAGE=sql`` and ``SPORTS_DATA_DB`` to read one SQLite generation;
-the cooperative lock is kept until the ASGI app shuts down. The separate
+the cooperative lock is kept until the ASGI app shuts down. Development can
+temporarily set ``SPORTS_DATA_STORAGE=postgresql`` with ``SPORTS_DATA_CONTROL=0``
+to load Sports Data and selected comments from one read-only PostgreSQL snapshot.
+The separate
 read-only enrichment endpoint is registered only with
 ``SPORTS_DATA_ENRICHMENT_ENABLED=1``. Outside control mode it reads the explicitly
 configured ``SPORTS_DATA_ENRICHMENT_DB``; control mode reads a retained snapshot
@@ -65,6 +68,41 @@ def _load_data(resources):
     raise ValueError(f'SPORTS_DATA_STORAGE debe ser json o sql, no {storage!r}')
 
 
+def _load_postgresql(resources):
+    """Load sports and comment snapshots from one read-only PostgreSQL snapshot."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from persistencia import lectura
+    from persistencia.comentarios import load_current_comments_postgresql
+    from persistencia.postgresql import crear_motor_postgresql
+
+    motor = crear_motor_postgresql()
+    resources.callback(motor.dispose)
+    scope = Path(os.environ.get('SPORTS_DATA_SCOPE', str(ROOT / 'ambito.json')))
+    try:
+        with motor.connect() as connection:
+            connection = connection.execution_options(isolation_level='REPEATABLE READ')
+            with connection.begin():
+                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+                database, role, read_only, can_read_alembic = connection.exec_driver_sql("""
+                    SELECT current_database(), current_user, current_setting('transaction_read_only'),
+                           has_table_privilege(current_user, 'public.alembic_version', 'SELECT')
+                """).one()
+                if (database != 'sports_data' or role != 'sports_data_app' or read_only != 'on'
+                        or can_read_alembic):
+                    from persistencia.lectura import BaseNoUtilizable
+                    raise BaseNoUtilizable('La conexión no cumple el perfil de lectura de Sports Data')
+                datos = lectura.cargar_desde_postgresql(connection, scope)
+                comentarios = load_current_comments_postgresql(connection)
+        return datos, comentarios
+    except SQLAlchemyError as error:
+        # Driver exceptions may contain connection details; keep startup errors credential-free.
+        from persistencia.lectura import BaseNoUtilizable
+        code = getattr(getattr(error, 'orig', None), 'sqlstate', None)
+        detail = f' (SQLSTATE {code})' if code else ''
+        raise BaseNoUtilizable(f'No se pudo cargar Sports Data desde PostgreSQL{detail}') from None
+
+
 def _load_comments(database):
     from persistencia.comentarios import load_current_comments
     return load_current_comments(database)
@@ -100,6 +138,8 @@ def _load_control(resources):
     workers = (os.environ.get('SPORTS_DATA_WORKERS'), os.environ.get('WEB_CONCURRENCY'))
     if any(value is not None and value != '1' for value in workers):
         raise ValueError('El modo control de sports-data solo admite un worker')
+    if os.environ.get('SPORTS_DATA_STORAGE', 'json') == 'postgresql':
+        raise ValueError('SPORTS_DATA_STORAGE=postgresql requiere SPORTS_DATA_CONTROL=0; no se puede mezclar con el coordinador SQLite')
     if os.environ.get('SPORTS_DATA_STORAGE', 'json') != 'sql':
         raise ValueError('El modo control requiere SPORTS_DATA_STORAGE=sql')
     database = os.environ.get('SPORTS_DATA_DB')
@@ -329,6 +369,8 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
     """Build an app, optionally with a preloaded dataset for isolated tests."""
     control_mode = _control_enabled() if control_mode is None else control_mode
     enrichment_enabled = _enrichment_enabled()
+    if control_mode and os.environ.get('SPORTS_DATA_STORAGE', 'json') == 'postgresql':
+        raise ValueError('SPORTS_DATA_STORAGE=postgresql requiere SPORTS_DATA_CONTROL=0; no se puede mezclar con el coordinador SQLite')
     if control_mode and data is not None:
         raise ValueError('El modo control necesita la generación de SQLite, no datos precargados')
 
@@ -345,9 +387,16 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
                  application.state.updates,
                  application.state.control_token) = _load_control(resources)
             else:
-                application.state.data = data if data is not None else _load_data(resources)
-                database = os.environ.get('SPORTS_DATA_DB') if os.environ.get('SPORTS_DATA_STORAGE', 'json') == 'sql' else None
-                application.state.comments = _load_comments(Path(database)) if database and data is None else {}
+                storage = os.environ.get('SPORTS_DATA_STORAGE', 'json')
+                if data is not None:
+                    application.state.data = data
+                    application.state.comments = {}
+                elif storage == 'postgresql':
+                    application.state.data, application.state.comments = _load_postgresql(resources)
+                else:
+                    application.state.data = _load_data(resources)
+                    database = os.environ.get('SPORTS_DATA_DB') if storage == 'sql' else None
+                    application.state.comments = _load_comments(Path(database)) if database else {}
             application.state.photo_import_token = player_photos.import_secret(control_mode)
             yield
 

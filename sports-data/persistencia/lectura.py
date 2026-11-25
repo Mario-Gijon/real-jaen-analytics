@@ -1,4 +1,4 @@
-"""Lectura de la API desde la base SQLite (fase 3, docs/persistencia-sqlite.md 5.1).
+"""Lectura de la API desde SQLite y, provisionalmente, desde PostgreSQL de desarrollo.
 
 La base se abre solo en lectura (`mode=ro`: nunca se crea ni se modifica), se comprueba que su revisión de esquema es
 la de este código, que tiene una carga inicial confirmada y que el estado vigente usa las versiones de reglas del
@@ -83,3 +83,46 @@ def cargar_desde_base(ruta, ambito):
         return api.componer(datos, api.leer_ambito(ambito), sustituciones)
     except ValueError as e:
         raise BaseNoUtilizable(str(e)) from e
+
+
+def cargar_desde_postgresql(conexion, ambito):
+    """Reconstruye la generación servida desde pg0001 sin consultar alembic_version.
+
+    El llamador mantiene una transacción REPEATABLE READ READ ONLY abierta también al cargar comentarios.
+    La firma de esquema se comprueba con metadatos accesibles al rol de lectura, nunca con las credenciales de
+    migración ni con la tabla de control Alembic.
+    """
+    firma_esperada = {
+        ('observation', 'fetched_instant'),
+        ('narrative_comment_capture', 'source_path'),
+        ('narrative_comment_selection', 'selected_spanish_sha256'),
+        ('narrative_comment_selection', 'last_successful_source_path'),
+    }
+    filas = conexion.exec_driver_sql("""
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND ((table_name = 'observation' AND column_name = 'fetched_instant')
+            OR (table_name = 'narrative_comment_capture' AND column_name = 'source_path')
+            OR (table_name = 'narrative_comment_selection' AND column_name IN
+                ('selected_spanish_sha256', 'last_successful_source_path')))
+    """).fetchall()
+    if {(tabla, columna) for tabla, columna in filas} != firma_esperada:
+        raise BaseNoUtilizable('El esquema PostgreSQL no corresponde a la revisión de lectura pg0001')
+
+    try:
+        reconstruccion.informe_de_carga(conexion)
+        desfasadas = reglas_desfasadas(conexion)
+        if desfasadas:
+            raise BaseNoUtilizable('El estado PostgreSQL usa reglas que no son las de este código')
+        reconstruida = reconstruccion.salida_desde_base(conexion)
+        sustituciones = sustituciones_guardadas(conexion)
+        datos = {n: reconstruida[n] for n in DATOS}
+        datos['originales'] = api.indexar(reconstruida['originales'])
+        try:
+            return api.componer(datos, api.leer_ambito(ambito), sustituciones)
+        except ValueError as e:
+            raise BaseNoUtilizable(str(e)) from e
+    except SQLAlchemyError:
+        # No propagar mensajes del driver: algunos incluyen datos de conexión.
+        raise BaseNoUtilizable('No se pudo reconstruir la generación desde PostgreSQL') from None

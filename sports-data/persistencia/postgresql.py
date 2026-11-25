@@ -11,6 +11,10 @@ BASES_SPORTS_DATA = {
     'SPORTS_DATA_DATABASE_URL': 'sports_data',
     'SPORTS_DATA_MIGRATION_DATABASE_URL': 'sports_data',
 }
+ROLES_SPORTS_DATA = {
+    'SPORTS_DATA_DATABASE_URL': 'sports_data_app',
+    'SPORTS_DATA_MIGRATION_DATABASE_URL': 'neondb_owner',
+}
 
 
 def url_postgresql(variable: str):
@@ -31,6 +35,8 @@ def url_postgresql(variable: str):
         raise RuntimeError(f'{variable} debe usar PostgreSQL con Psycopg 3')
     if url.database != base_esperada:
         raise RuntimeError(f'{variable} debe apuntar a la base {base_esperada}')
+    if url.username != ROLES_SPORTS_DATA[variable]:
+        raise RuntimeError(f'{variable} debe usar el rol {ROLES_SPORTS_DATA[variable]}')
     if url.host and '-pooler.' in url.host:
         raise RuntimeError(f'{variable} debe usar el endpoint directo de Neon')
 
@@ -48,7 +54,7 @@ def url_postgresql(variable: str):
 
 
 def crear_motor_postgresql():
-    """Motor futuro de ejecución: pool pequeño, sin keepalives ni actividad en segundo plano."""
+    """Motor PostgreSQL compartido por la lectura de Sports Data durante la vida de la app."""
     return create_engine(
         url_postgresql('SPORTS_DATA_DATABASE_URL'),
         pool_size=2,
@@ -57,5 +63,6 @@ def crear_motor_postgresql():
         pool_recycle=300,
         pool_use_lifo=True,
         pool_pre_ping=True,
+        hide_parameters=True,
         connect_args={'connect_timeout': 10},
     )

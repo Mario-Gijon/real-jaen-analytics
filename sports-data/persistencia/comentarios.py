@@ -485,6 +485,136 @@ def load_current_comments(base: Path) -> dict[str, dict]:
     return output
 
 
+def load_current_comments_postgresql(connection) -> dict[str, dict]:
+    """Load the selected Spanish captures and their comments with one PostgreSQL query.
+
+    The same proof rules as the SQLite reader apply: only the Spanish endpoint recorded on the capture, or a hash
+    explicitly bound to a successful Spanish request, can establish provenance. The lateral lookup recovers the
+    newest Spanish capture for every unverified selection in one server round trip; selected comment rows are joined
+    in that same query to avoid per-match and per-comment network calls.
+    """
+    rows = connection.exec_driver_sql("""
+        WITH selected AS (
+            SELECT selection.match_id, external.external_id,
+                   selection.selected_spanish_sha256, selection.last_successful_source_path,
+                   selection.last_attempt_state, selection.last_attempt_at, selection.last_http_status,
+                   selection.last_error_code, capture.id AS selected_capture_id,
+                   capture.provider AS selected_provider, capture.source_event_id AS selected_event_id,
+                   capture.source_path AS selected_source_path,
+                   capture.availability AS selected_availability,
+                   capture.captured_at AS selected_captured_at,
+                   capture.response_sha256 AS selected_response_sha256,
+                   '/event/' || external.external_id || '/comments/es-la' AS expected_path,
+                   COALESCE(
+                       capture.provider = 'sofascore'
+                       AND capture.source_event_id = external.external_id
+                       AND (capture.source_path = '/event/' || external.external_id || '/comments/es-la'
+                            OR (selection.selected_spanish_sha256 IS NOT NULL
+                                AND selection.selected_spanish_sha256 = capture.response_sha256
+                                AND selection.last_successful_source_path =
+                                    '/event/' || external.external_id || '/comments/es-la')),
+                       FALSE
+                   ) AS selected_is_spanish
+            FROM narrative_comment_selection AS selection
+            JOIN match_external_id AS external ON external.entity_id = selection.match_id
+            LEFT JOIN narrative_comment_capture AS capture
+              ON capture.id = selection.capture_id AND capture.match_id = selection.match_id
+            WHERE external.provider = 'sofascore' AND external.namespace = ''
+              AND external.status IN ('origin', 'verified')
+        ), resolved AS (
+            SELECT selected.*,
+                   CASE WHEN selected_is_spanish THEN selected_capture_id
+                        WHEN spanish.id IS NOT NULL THEN spanish.id
+                        ELSE NULL END AS resolved_capture_id,
+                   CASE WHEN selected_is_spanish THEN selected_availability
+                        WHEN spanish.id IS NOT NULL THEN spanish.availability
+                        WHEN last_attempt_state = 'empty'
+                             AND last_successful_source_path = expected_path THEN 'empty'
+                        ELSE 'not_collected' END AS resolved_availability,
+                   CASE WHEN selected_is_spanish THEN selected_captured_at
+                        WHEN spanish.id IS NOT NULL THEN spanish.captured_at
+                        WHEN last_attempt_state = 'empty'
+                             AND last_successful_source_path = expected_path THEN last_attempt_at
+                        ELSE NULL END AS resolved_captured_at,
+                   CASE WHEN selected_is_spanish THEN selected_response_sha256
+                        WHEN spanish.id IS NOT NULL THEN spanish.response_sha256
+                        ELSE NULL END AS resolved_response_sha256,
+                   CASE WHEN selected_is_spanish THEN COALESCE(selected_source_path, expected_path)
+                        WHEN spanish.id IS NOT NULL THEN spanish.source_path
+                        WHEN last_attempt_state = 'empty'
+                             AND last_successful_source_path = expected_path THEN expected_path
+                        ELSE NULL END AS resolved_source_path,
+                   (selected_is_spanish OR spanish.id IS NOT NULL OR
+                    (last_attempt_state = 'empty' AND last_successful_source_path = expected_path))
+                       AS spanish_complete,
+                   CASE WHEN last_attempt_state IN ('available', 'empty')
+                              AND last_successful_source_path IS DISTINCT FROM expected_path
+                        THEN 'not_collected' ELSE last_attempt_state END AS public_last_attempt_state
+            FROM selected
+            LEFT JOIN LATERAL (
+                SELECT candidate.id, candidate.availability, candidate.captured_at,
+                       candidate.response_sha256, candidate.source_path
+                FROM narrative_comment_capture AS candidate
+                WHERE candidate.match_id = selected.match_id
+                  AND candidate.provider = 'sofascore'
+                  AND candidate.source_event_id = selected.external_id
+                  AND candidate.source_path = selected.expected_path
+                  AND NOT selected.selected_is_spanish
+                ORDER BY candidate.captured_at DESC, candidate.id DESC
+                LIMIT 1
+            ) AS spanish ON TRUE
+        )
+        SELECT resolved.external_id, resolved.resolved_availability, resolved.resolved_captured_at,
+               resolved.resolved_response_sha256, resolved.resolved_source_path, resolved.spanish_complete,
+               resolved.public_last_attempt_state, resolved.last_attempt_at, resolved.last_http_status,
+               resolved.last_error_code, narrative.source_comment_id, narrative.source_position,
+               narrative.text AS comment_text, narrative.type AS comment_type, narrative.minute,
+               narrative.period_name, narrative.is_home, narrative.home_score, narrative.away_score,
+               narrative.incident_id, narrative.participants_json
+        FROM resolved
+        LEFT JOIN narrative_comment AS narrative
+          ON narrative.capture_id = resolved.resolved_capture_id
+         AND resolved.resolved_availability = 'available'
+        ORDER BY resolved.external_id, narrative.source_position
+    """).mappings().all()
+
+    output = {}
+    for row in rows:
+        event_id = str(row['external_id'])
+        public_id = PUBLIC_MATCH_PREFIX + event_id
+        snapshot = output.get(public_id)
+        if snapshot is None:
+            snapshot = {
+                'availability': row['resolved_availability'],
+                'sourcePath': row['resolved_source_path'],
+                'spanishComplete': bool(row['spanish_complete']),
+                'capturedAt': row['resolved_captured_at'],
+                'responseSha256': row['resolved_response_sha256'],
+                'lastAttempt': {
+                    'availability': row['public_last_attempt_state'],
+                    'occurredAt': row['last_attempt_at'],
+                    'httpStatus': row['last_http_status'],
+                    'errorCode': row['last_error_code'],
+                },
+                'comments': [],
+            }
+            output[public_id] = snapshot
+
+        if row['source_comment_id'] is not None:
+            home_score, away_score = row['home_score'], row['away_score']
+            score = ({'home': home_score, 'away': away_score}
+                     if home_score is not None or away_score is not None else None)
+            snapshot['comments'].append({
+                'id': row['source_comment_id'], 'position': row['source_position'],
+                'text': row['comment_text'], 'type': row['comment_type'], 'minute': row['minute'],
+                'periodName': row['period_name'],
+                'isHome': bool(row['is_home']) if row['is_home'] is not None else None,
+                'score': score, 'incidentId': row['incident_id'],
+                'participants': _public_participants(json.loads(row['participants_json'])),
+            })
+    return output
+
+
 def comments_schema_ready(base: Path) -> bool:
     """True only when capture provenance and selected-capture Spanish proof are present."""
     base = Path(base).resolve()

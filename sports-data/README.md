@@ -6,9 +6,30 @@ El servicio escucha en 8002 y guarda su base, registros de actualización y proc
 
 Las instrucciones de ejecución con Compose están en el [README raíz](../README.md). Las pruebas unitarias e integración de consulta están en `tests/`; pueden ejecutarse desde esta carpeta con los requisitos Python instalados. Las operaciones de base y migración siguen siendo explícitas.
 
+## Lectura temporal desde PostgreSQL de desarrollo
+
+Para arrancar Sports Data leyendo directamente `sports_data` en Neon, instala los requisitos SQL, carga únicamente la
+variable de ejecución desde `../.env.neon` y deshabilita el coordinador de actualizaciones:
+
+```sh
+.venv/bin/pip install -r requirements-fastapi.txt -r requirements-sql.txt
+while IFS='=' read -r key value; do
+  case "$key" in
+    SPORTS_DATA_DATABASE_URL) export "$key=$value" ;;
+  esac
+done < ../.env.neon
+SPORTS_DATA_STORAGE=postgresql SPORTS_DATA_CONTROL=0 \
+  .venv/bin/uvicorn app:app --host 127.0.0.1 --port 8002
+```
+
+El modo reconstruye los datos y comentarios narrativos al arrancar, dentro de una transacción `REPEATABLE READ READ
+ONLY`, y conserva la generación en memoria hasta detener la aplicación. No permite combinar PostgreSQL con el coordinador
+SQLite ni habilita actualizaciones. La instalación habitual conserva su modo actual y las fotografías siguen usando el
+almacenamiento local.
+
 ## Esquema PostgreSQL de desarrollo
 
-La aplicación conserva SQLite. El esquema PostgreSQL de desarrollo tiene una historia Alembic separada y una revisión inicial equivalente a SQLite 0008. Para ejecutarla, desde `sports-data`, cargue sin evaluar el archivo `.env.neon` como código de shell y use solo la URL administrativa:
+El esquema PostgreSQL de desarrollo tiene una historia Alembic separada y una revisión inicial equivalente a SQLite 0008. Para aplicarla, desde `sports-data`, cargue sin evaluar el archivo `.env.neon` como código de shell y use solo la URL administrativa:
 
 ```sh
 python -m venv .venv
@@ -21,7 +42,7 @@ done < ../.env.neon
 .venv/bin/alembic -c alembic-postgresql.ini upgrade head
 ```
 
-La configuración rechaza otro destino que no sea `sports_data` en PostgreSQL 18 con `neondb_owner`, y exige que una base sin versión Alembic esté vacía. Usa el endpoint directo de Neon, `verify-full` y el bundle de CA del sistema. El snapshot convierte las banderas SQLite en `BOOLEAN` nativo y mantiene los campos JSON como texto, con validación JSON del servidor. El rol `sports_data_app` recibe DML solo en tablas deportivas, `SELECT` en `call_up_vigente` y uso de secuencias; no puede crear objetos de esquema ni leer la tabla de control Alembic. La app aún no cambia a PostgreSQL.
+La configuración rechaza otro destino que no sea `sports_data` en PostgreSQL 18 con `neondb_owner`, y exige que una base sin versión Alembic esté vacía. Usa el endpoint directo de Neon, `verify-full` y el bundle de CA del sistema. El snapshot convierte las banderas SQLite en `BOOLEAN` nativo y mantiene los campos JSON como texto, con validación JSON del servidor. El rol `sports_data_app` recibe DML solo en tablas deportivas, `SELECT` en `call_up_vigente` y uso de secuencias; no puede crear objetos de esquema ni leer la tabla de control Alembic. El modo de consulta PostgreSQL no consulta esa tabla.
 
 ## Transferencia de datos a Neon
 
