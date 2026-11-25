@@ -1,0 +1,31 @@
+# PostgreSQL de desarrollo en Neon
+
+## Proyecto
+
+- Proyecto: `real-jaen-analytics-dev` (`red-leaf-83438333`).
+- Región: AWS Europe Central 1 (Frankfurt), `aws-eu-central-1`.
+- PostgreSQL 18, plan gratuito.
+- La rama predeterminada existente se renombró de `production` a `development`.
+- Se conserva la base existente `neondb`.
+
+## Bases y roles
+
+| Base | Rol de ejecución | Acceso |
+| --- | --- | --- |
+| `sports_data` | `sports_data_app` | Lectura y escritura limitada a esta base. |
+| `video_service` | `video_service_app` | Lectura y escritura limitada a esta base. |
+
+Los roles de ejecución se crearon como roles con acceso `read_write`, sin pertenencia a `neon_superuser`. Se revocó `CONNECT` a `PUBLIC` en las dos bases de servicio y se concedió a cada rol de ejecución solo en la base que le corresponde. Se conserva el rol administrativo existente `neondb_owner` para las futuras migraciones de esquema.
+
+## Conexiones locales
+
+Las cuatro cadenas son conexiones directas, no agrupadas, con TLS (`sslmode=require`). Se guardan localmente en `.env.neon`, que está excluido de Git y tiene permisos `600`:
+
+- `SPORTS_DATA_DATABASE_URL`
+- `VIDEO_SERVICE_DATABASE_URL`
+- `SPORTS_DATA_MIGRATION_DATABASE_URL`
+- `VIDEO_SERVICE_MIGRATION_DATABASE_URL`
+
+Las dos variables `*_MIGRATION_DATABASE_URL` apuntan a su base correspondiente con el rol administrativo `neondb_owner`; las variables de ejecución usan las credenciales de los roles de servicio. No guardar valores de estas variables en documentación, commits ni registros.
+
+Este hito prepara únicamente la infraestructura remota. No crea tablas de negocio, importa datos ni cambia la persistencia de la aplicación o Docker Compose.
