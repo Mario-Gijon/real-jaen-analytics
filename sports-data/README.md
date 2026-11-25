@@ -22,3 +22,21 @@ done < ../.env.neon
 ```
 
 La configuración rechaza otro destino que no sea `sports_data` en PostgreSQL 18 con `neondb_owner`, y exige que una base sin versión Alembic esté vacía. Usa el endpoint directo de Neon, `verify-full` y el bundle de CA del sistema. El snapshot convierte las banderas SQLite en `BOOLEAN` nativo y mantiene los campos JSON como texto, con validación JSON del servidor. El rol `sports_data_app` recibe DML solo en tablas deportivas, `SELECT` en `call_up_vigente` y uso de secuencias; no puede crear objetos de esquema ni leer la tabla de control Alembic. La app aún no cambia a PostgreSQL.
+
+## Transferencia de datos a Neon
+
+Usa una copia SQLite consistente y explícita, no una base activa. El importador abre el origen en solo lectura, exige la revisión 0008 y el inventario de 40 tablas, y valida el proyecto/rama Neon fijados, `pg0001` y que todas las tablas destino estén vacías. No borra ni sobrescribe un destino con datos.
+
+Desde `sports-data`, carga la URL administrativa y ejecuta:
+
+```sh
+while IFS='=' read -r key value; do
+  case "$key" in
+    SPORTS_DATA_MIGRATION_DATABASE_URL) export "$key=$value" ;;
+  esac
+done < ../.env.neon
+.venv/bin/python -m scripts.migrate_sqlite_to_postgresql \
+  "/ruta/a/la-copia-consistente.sqlite" --authorize-external-hosting
+```
+
+El comando requiere autorización explícita de alojamiento externo, importa por lotes con Psycopg `COPY`, conserva las restricciones y ejecuta toda la carga en una transacción. Compara los recuentos y las huellas de todas las filas, y ajusta las secuencias al máximo ID. Si se necesita repetirla, el destino debe ser una base vacía con `pg0001` y un endpoint de desarrollo previamente verificado; el script se detiene ante un destino poblado y nunca lo reinicia.

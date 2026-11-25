@@ -30,4 +30,4 @@ Las dos variables `*_MIGRATION_DATABASE_URL` apuntan a su base correspondiente c
 
 ## Esquema Sports Data
 
-La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, está aplicada en `sports_data` de la rama `development`. La base sigue vacía de datos de negocio. La aplicación continúa usando SQLite; `video_service` no se ha migrado. Las instrucciones para preparar el entorno Python y ejecutar la migración están en [README de Sports Data](../sports-data/README.md#esquema-postgresql-de-desarrollo).
+La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, está aplicada en `sports_data` de la rama `development`. El Hito 02 transfirió desde una copia completa de desarrollo validada 430.773 filas en las 40 tablas de negocio. No se transfirieron fotografías ni datos de Video Service. La aplicación continúa usando SQLite. Las instrucciones para repetir la transferencia sobre un destino vacío están en [README de Sports Data](../sports-data/README.md#transferencia-de-datos-a-neon).
