@@ -2,7 +2,7 @@
 
 Se ejecuta desde el script administrativo de backup dentro de un contenedor efímero, con /state en solo lectura.
 Solo usa la biblioteca estándar. El almacén vive en /state/player-photos; el tar conserva ese nombre y omite únicamente
-`tmp/`, que es área de trabajo. Nunca modifica /state ni contiene funciones de restauración.
+`tmp/`, que es área de trabajo. La restauración se valida en un área temporal y no sobrescribe /state/player-photos.
 """
 from __future__ import annotations
 
@@ -103,11 +103,13 @@ def _extract_checked(archive_path: Path, destination: Path) -> Path:
             names = set()
             for member in members:
                 path = PurePosixPath(member.name)
+                normalized = tuple(part for part in path.parts if part not in ('', '.'))
                 if (not (member.isfile() or member.isdir()) or path.is_absolute() or '\\' in member.name
-                        or '..' in path.parts or not path.parts or path.parts[0] != TOP or member.name in names):
+                        or '..' in path.parts or not normalized or normalized[0] != TOP
+                        or normalized in names or any(ord(char) < 32 for char in member.name)):
                     raise BackupError(f'Entrada no admitida en el archivo de fotografías: {member.name!r}')
-                names.add(member.name)
-            if f'{TOP}/{DATABASE}' not in names:
+                names.add(normalized)
+            if (TOP, DATABASE) not in names:
                 raise BackupError('El archivo de fotografías no contiene fotos.sqlite')
             for member in members:
                 target = destination.joinpath(*PurePosixPath(member.name).parts)
@@ -126,6 +128,50 @@ def _extract_checked(archive_path: Path, destination: Path) -> Path:
             raise
         raise BackupError(f'El archivo de fotografías está dañado o incompleto: {error}') from None
     return destination / TOP
+
+
+def restaurar(state: Path, archive_path: Path, manifest_path: Path) -> dict:
+    """Restore the complete photo store to /state/player-photos without replacing existing data."""
+    state = state.resolve(strict=True)
+    target = state / TOP
+    stage = state / '.player-photos.restore-incomplete'
+    if target.exists() or target.is_symlink() or stage.exists() or stage.is_symlink():
+        raise BackupError('El almacén o el área de restauración de fotografías ya existe; no se sobrescribe')
+    try:
+        document = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BackupError(f'No se puede leer manifest.json: {error}') from None
+    expected = document.get('fotos') if isinstance(document, dict) else None
+    if not isinstance(expected, dict) or expected.get('formato') != FORMAT or expected.get('incluidas') is not True:
+        raise BackupError('El manifiesto no declara una colección de fotografías incluida')
+    stage.mkdir(mode=0o700)
+    try:
+        restored = _extract_checked(archive_path, stage)
+        actual = _summary(restored)
+        if actual != expected:
+            raise BackupError('El almacén extraído no coincide con el resumen fotos del manifiesto')
+        restored.rename(target)
+        stage.rmdir()
+        return actual
+    except BaseException:
+        # Keep the partial staging directory and the outer restore marker for manual diagnosis/recovery.
+        raise
+
+
+def validar_respaldo(archive_path: Path, manifest_path: Path) -> dict:
+    """Validate photo archive contents and hashes in disposable scratch space, without touching a service volume."""
+    try:
+        document = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BackupError(f'No se puede leer manifest.json: {error}') from None
+    expected = document.get('fotos') if isinstance(document, dict) else None
+    if not isinstance(expected, dict) or expected.get('formato') != FORMAT or expected.get('incluidas') is not True:
+        raise BackupError('El manifiesto no declara una colección de fotografías incluida')
+    with tempfile.TemporaryDirectory(prefix='rja-photos-validate-') as scratch:
+        actual = _summary(_extract_checked(archive_path, Path(scratch)))
+    if actual != expected:
+        raise BackupError('fotos.tar no coincide con el resumen del manifiesto')
+    return actual
 
 
 def respaldar(state: Path, out: Path) -> dict:
@@ -189,9 +235,21 @@ def main(argv=None) -> int:
     backup = sub.add_parser('respaldar')
     backup.add_argument('--state', type=Path, required=True)
     backup.add_argument('--out', type=Path, required=True)
+    restore = sub.add_parser('restaurar')
+    restore.add_argument('--state', type=Path, required=True)
+    restore.add_argument('--tar', type=Path, required=True)
+    restore.add_argument('--manifest', type=Path, required=True)
+    validate = sub.add_parser('validar')
+    validate.add_argument('--tar', type=Path, required=True)
+    validate.add_argument('--manifest', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        result = respaldar(args.state, args.out)
+        if args.orden == 'respaldar':
+            result = respaldar(args.state, args.out)
+        elif args.orden == 'restaurar':
+            result = restaurar(args.state, args.tar, args.manifest)
+        else:
+            result = validar_respaldo(args.tar, args.manifest)
     except (BackupError, OSError) as error:
         print(f'Fotografías: {error}', file=sys.stderr)
         return 1

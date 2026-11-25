@@ -33,11 +33,13 @@ def config(project='real-jaen-analytics-dev', prefix='rja-dev', image='local/rea
                 {'type': 'bind', 'source': '/repo/acquisition/src/acquisition', 'target': '/opt/app/acquisition',
                  'read_only': True},
             ]},
-            'video-service': {'environment': {'VIDEO_SERVICE_MANIFEST': 'videos.json'}, 'volumes': [
+            'video-service': {'image': 'local/real-jaen-analytics/video-service:dev',
+                              'environment': {'VIDEO_SERVICE_MANIFEST': 'videos.json'}, 'volumes': [
                 volume('video-state', '/state'),
                 {'type': 'bind', 'source': video_catalog, 'target': '/app/data', 'read_only': True},
             ]},
-            'dashboard': {'volumes': [volume('dashboard-next', '/app/.next')]},
+            'dashboard': {'ports': [{'target': 3000, 'published': '33201', 'host_ip': '127.0.0.1'}],
+                          'volumes': [volume('dashboard-next', '/app/.next')]},
         },
         'volumes': {key: {'name': f'{prefix}-{key}'} for key in
                     ('sports-state', 'acquisition-profiles', 'acquisition-jobs', 'video-state', 'dashboard-next')},
@@ -50,6 +52,8 @@ class Resolve(unittest.TestCase):
         self.assertEqual(helper.resolve(config()), {
             'project': 'real-jaen-analytics-dev',
             'sports_data_image': 'local/real-jaen-analytics/sports-data:dev',
+            'acquisition_image': 'local/real-jaen-analytics/acquisition:dev',
+            'video_service_image': 'local/real-jaen-analytics/video-service:dev',
             'sports_state': 'rja-dev-sports-state',
             'acquisition_jobs': 'rja-dev-acquisition-jobs',
             'acquisition_profiles': 'rja-dev-acquisition-profiles',
@@ -57,6 +61,10 @@ class Resolve(unittest.TestCase):
             'imports': '/srv/imports',
             'video_catalog_dir': '/srv/video-catalog',
             'video_manifest': 'videos.json',
+            'dashboard_bind': '127.0.0.1',
+            'dashboard_port': '33201',
+            'volume_names': 'rja-dev-acquisition-jobs,rja-dev-acquisition-profiles,rja-dev-dashboard-next,rja-dev-sports-state,rja-dev-video-state',
+            'network_names': 'rja-dev-dashboard-edge',
         })
 
     def test_custom_prefix_and_project(self):

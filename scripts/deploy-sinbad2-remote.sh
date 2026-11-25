@@ -24,6 +24,12 @@ secrets_base="$root/shared/secrets"
 imports="$root/shared/imports"
 catalog="$root/shared/video-catalog"
 state_dir="$root/shared/deploy-state"
+# A restore marker is created before the first destination volume. Check before any directory, release, symlink or
+# container mutation so an interrupted restore cannot be mistaken for a deployable installation.
+restore_marker="$imports/.real-jaen-restore-incomplete"
+if [ -e "$restore_marker" ] || [ -L "$restore_marker" ]; then
+  fail 'an incomplete restore is recorded in shared/imports; inspect the listed target volumes and recover it manually before deploying'
+fi
 last_good="$state_dir/last-good"
 deployment_finalized=0
 has_previous=0
@@ -194,7 +200,12 @@ mkdir -p "$root/releases" "$root/shared" "$config_base/versions" "$secrets_base/
 chmod 700 "$root" "$root/shared" "$config_base" "$secrets_base" \
   "$config_base/versions" "$secrets_base/versions" "$root/shared/incoming" "$state_dir"
 ensure_uid_read_directory "$imports"
-ensure_uid_read_directory "$catalog"
+if [ "$mode" = bootstrap ]; then
+  [ ! -e "$catalog" ] && [ ! -L "$catalog" ] \
+    || fail 'bootstrap video catalog destination already exists; no catalog files were changed'
+else
+  ensure_uid_read_directory "$catalog"
+fi
 
 [ -d "$release" ] && [ ! -L "$release" ] || fail 'code release directory is missing'
 [ -f "$release/compose.prod.yaml" ] || fail 'production Compose file is missing from the release'
@@ -464,31 +475,34 @@ if [ "$mode" = bootstrap ]; then
     >/dev/null 2>&1 || fail 'bootstrap backup is not readable by UID 10001; no volume was restored'
 fi
 
-docker run --rm --network none --user 10001:10001 -v "$catalog:/app/data:ro" \
-  --entrypoint python "$video_image" -B -c \
-  "import os; os.listdir('/app/data')" \
-  >/dev/null 2>&1 || fail 'shared/video-catalog is not readable and traversable by UID 10001'
-
 manifest="$catalog/videos.json"
-if [ -e "$manifest" ] || [ -L "$manifest" ]; then
-  [ -f "$manifest" ] && [ ! -L "$manifest" ] \
-    || fail 'existing video catalog manifest is not a regular file; existing catalog data was left untouched'
+if [ "$mode" = bootstrap ]; then
+  # The fresh image contains the example catalog. Validate it without creating the external restore destination.
+  docker run --rm --network none --user 10001:10001 --entrypoint python "$video_image" -B -c \
+    "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
+    >/dev/null 2>&1 || fail 'the image example video catalog is invalid for a new bootstrap'
 else
-  first_entry=$(find "$catalog" -mindepth 1 -print -quit)
-  [ -z "$first_entry" ] || fail 'video catalog has files but no videos.json; existing catalog data was left untouched'
-  temporary="$catalog/.videos.json-$release_id"
-  [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || fail 'temporary video manifest path already exists'
-  cp "$release/video-service/data/videos.example.json" "$temporary"
-  chmod 444 "$temporary"
-  mv "$temporary" "$manifest"
+  docker run --rm --network none --user 10001:10001 -v "$catalog:/app/data:ro" \
+    --entrypoint python "$video_image" -B -c "import os; os.listdir('/app/data')" \
+    >/dev/null 2>&1 || fail 'shared/video-catalog is not readable and traversable by UID 10001'
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+      || fail 'existing video catalog manifest is not a regular file; existing catalog data was left untouched'
+  else
+    first_entry=$(find "$catalog" -mindepth 1 -print -quit)
+    [ -z "$first_entry" ] || fail 'video catalog has files but no videos.json; existing catalog data was left untouched'
+    temporary="$catalog/.videos.json-$release_id"
+    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || fail 'temporary video manifest path already exists'
+    cp "$release/video-service/data/videos.example.json" "$temporary"
+    chmod 444 "$temporary"
+    mv "$temporary" "$manifest"
+  fi
+  # VideoCatalog.load reads the manifest and its calibration files; it does not need state.
+  docker run --rm --network none --user 10001:10001 -v "$catalog:/app/data:ro" \
+    --entrypoint python "$video_image" -B -c \
+    "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
+    >/dev/null 2>&1 || fail 'video catalog is invalid or unreadable by UID 10001; existing catalog data was left untouched'
 fi
-
-# VideoCatalog.load reads the manifest and its calibration files; it does not need state.
-docker run --rm --network none --user 10001:10001 \
-  -v "$catalog:/app/data:ro" \
-  --entrypoint python "$video_image" -B -c \
-  "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
-  >/dev/null 2>&1 || fail 'video catalog is invalid or unreadable by UID 10001; existing catalog data was left untouched'
 
 if [ "$mode" = bootstrap ]; then
   for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume"; do
@@ -497,7 +511,8 @@ if [ "$mode" = bootstrap ]; then
     fi
   done
   if ! (cd "$release" && ENV_FILE="$env_file" COMPOSE_FILE=compose.prod.yaml \
-      RJ_IMAGE_TAG="$commit_sha" sh dashboard/scripts/restaurar-instalacion.sh "$backup_dir"); then
+      RJ_IMAGE_TAG="$commit_sha" RJ_RESTORE_VIDEO_CATALOG_DIR="$catalog" \
+      sh dashboard/scripts/restaurar-instalacion.sh "$backup_dir"); then
     fail 'bootstrap restore failed; volumes were not removed. Inspect every target volume before any retry'
   fi
   for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume"; do

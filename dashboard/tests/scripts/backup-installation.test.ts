@@ -44,9 +44,13 @@ case "$*" in
     exit 0 ;;
   *instalacion_compose.py*)
     printf '%s\\n' "project=$project" "sports_data_image=\${FAKE_IMAGE:-local/real-jaen-analytics/sports-data:prod}" \\
+      "acquisition_image=local/real-jaen-analytics/acquisition:prod" "video_service_image=local/real-jaen-analytics/video-service:prod" \\
       "sports_state=$prefix-sports-state" "acquisition_jobs=$prefix-acquisition-jobs" \\
       "acquisition_profiles=$prefix-acquisition-profiles" "video_state=$prefix-video-state" "imports=/srv/imports" \\
-      "video_catalog_dir=$video_catalog_dir" "video_manifest=videos.json"
+      "video_catalog_dir=$video_catalog_dir" "video_manifest=videos.json" \\
+      "volume_names=$prefix-acquisition-jobs,$prefix-acquisition-profiles,$prefix-sports-state,$prefix-video-state" \\
+      "network_names=$prefix-dashboard-edge,$prefix-sports-data-internal,$prefix-video-internal" \\
+      "dashboard_bind=127.0.0.1" "dashboard_port=8120"
     exit 0 ;;
   "volume inspect "*)
     for a in "$@"; do volume=$a; done

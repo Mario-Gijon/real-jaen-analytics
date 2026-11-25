@@ -4,6 +4,9 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import json
+import sqlite3
+from contextlib import closing
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -72,6 +75,25 @@ class PlayerPhotosBackup(unittest.TestCase):
         self.assertFalse(summary['incluidas'])
         self.assertFalse((self.state / 'player-photos').exists())
         self.assertFalse((self.out / 'fotos.tar').exists())
+
+    def test_restores_index_and_blobs_from_v2_summary_without_overwriting(self):
+        source = self.build_store()
+        summary = backup.respaldar(self.state, self.out)
+        manifest = self.out / 'manifest.json'
+        manifest.write_text(json.dumps({'formato_respaldo': 2, 'fotos': summary}), encoding='utf-8')
+        destination_state = self.root / 'restored-state'
+        destination_state.mkdir()
+
+        restored = backup.validar_respaldo(self.out / 'fotos.tar', manifest)
+        self.assertEqual(restored, summary)
+        self.assertEqual(backup.restaurar(destination_state, self.out / 'fotos.tar', manifest), summary)
+        restored_store = destination_state / 'player-photos'
+        with closing(sqlite3.connect(restored_store / 'fotos.sqlite')) as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM blob').fetchone()[0], 2)
+        self.assertEqual(sorted(p.name for p in (restored_store / 'blobs').iterdir()),
+                         sorted(p.name for p in source.blobs.iterdir()))
+        with self.assertRaisesRegex(backup.BackupError, 'ya existe'):
+            backup.restaurar(destination_state, self.out / 'fotos.tar', manifest)
 
 
 if __name__ == '__main__':

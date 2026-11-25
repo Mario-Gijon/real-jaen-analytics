@@ -77,6 +77,13 @@ def _control_enabled():
     return value == '1'
 
 
+def require_complete_restore(marker=None):
+    """Refuse service startup while an administrator has an unfinished installation restore."""
+    marker = Path(marker or os.environ.get('RJ_RESTORE_MARKER_FILE', '/imports/.real-jaen-restore-incomplete'))
+    if marker.exists() or marker.is_symlink():
+        raise RuntimeError(f'Restauración incompleta detectada ({marker}); no se inicia Sports Data.')
+
+
 def _enrichment_enabled():
     value = os.environ.get('SPORTS_DATA_ENRICHMENT_ENABLED', '0')
     if value not in ('0', '1'):
@@ -327,6 +334,7 @@ def create_app(data=None, *, control_mode=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        require_complete_restore()
         with ExitStack() as resources:
             application.state.control_mode = control_mode
             application.state.photo_root = photo_root()

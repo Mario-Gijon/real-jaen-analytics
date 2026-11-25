@@ -1,9 +1,9 @@
 # Funciones de respaldo-instalacion.sh (POSIX sh, se cargan con `.`).
 # Requieren ROOT_DIR y la función dc() (docker compose con el --env-file y los archivos de la instalación).
 
-# Nombres efectivos de la instalación, de la configuración que Compose resuelve (archivo, --env-file, entorno y valores
-# por defecto), nunca supuestos: PROJECT, SPORTS_DATA_IMAGE, STATE_VOLUME, JOBS_VOLUME, PROFILE_VOLUME, VIDEO_VOLUME e
-# IMPORT_DIR (carpeta del anfitrión montada en /imports). La salida de `config` se analiza con
+# Nombres efectivos de la instalación, de la configuración que Compose resuelve (archivos, --env-file, entorno y
+# valores por defecto), nunca supuestos: proyecto, imágenes, volúmenes, redes, puerto y directorios externos. La salida
+# de `config` se analiza con
 # sports-data/scripts/instalacion_compose.py en un contenedor efímero sin red de la imagen de Sports Data, sin volúmenes.
 resolver_instalacion() {
   _helper="$ROOT_DIR/sports-data/scripts/instalacion_compose.py"
@@ -19,6 +19,8 @@ resolver_instalacion() {
   _value() { printf '%s\n' "$_resolved" | sed -n "s/^$1=//p"; }
   PROJECT=$(_value project)
   SPORTS_DATA_IMAGE=$(_value sports_data_image)
+  ACQUISITION_IMAGE=$(_value acquisition_image)
+  VIDEO_SERVICE_IMAGE=$(_value video_service_image)
   STATE_VOLUME=$(_value sports_state)
   JOBS_VOLUME=$(_value acquisition_jobs)
   PROFILE_VOLUME=$(_value acquisition_profiles)
@@ -26,8 +28,13 @@ resolver_instalacion() {
   IMPORT_DIR=$(_value imports)
   VIDEO_CATALOG_DIR=$(_value video_catalog_dir)
   VIDEO_MANIFEST=$(_value video_manifest)
-  for _v in "$PROJECT" "$SPORTS_DATA_IMAGE" "$STATE_VOLUME" "$JOBS_VOLUME" "$PROFILE_VOLUME" "$VIDEO_VOLUME" \
-    "$IMPORT_DIR" "$VIDEO_CATALOG_DIR" "$VIDEO_MANIFEST"; do
+  VOLUME_NAMES=$(_value volume_names)
+  NETWORK_NAMES=$(_value network_names)
+  DASHBOARD_BIND=$(_value dashboard_bind)
+  DASHBOARD_PORT=$(_value dashboard_port)
+  for _v in "$PROJECT" "$SPORTS_DATA_IMAGE" "$ACQUISITION_IMAGE" "$VIDEO_SERVICE_IMAGE" "$STATE_VOLUME" \
+    "$JOBS_VOLUME" "$PROFILE_VOLUME" "$VIDEO_VOLUME" "$IMPORT_DIR" "$VIDEO_CATALOG_DIR" "$VIDEO_MANIFEST" \
+    "$VOLUME_NAMES" "$NETWORK_NAMES" "$DASHBOARD_BIND" "$DASHBOARD_PORT"; do
     test -n "$_v" || { echo "No se pudieron determinar los nombres de la instalación" >&2; exit 1; }
   done
   test "$SPORTS_DATA_IMAGE" = "$_image" || { echo "Imagen de sports-data incoherente: $SPORTS_DATA_IMAGE / $_image" >&2; exit 1; }

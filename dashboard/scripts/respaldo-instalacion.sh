@@ -39,6 +39,11 @@ test -f "$ROOT_DIR/$VIDEO_HELPER" || { echo "No existe $ROOT_DIR/$VIDEO_HELPER" 
 dc() (cd "$ROOT_DIR" && COMPOSE_FILE="$COMPOSE_FILES" docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" "$@")
 . "$SCRIPT_DIR/instalacion-compose.sh"
 resolver_instalacion
+# This external marker also covers interruption before the first destination volume exists.
+if [ -e "$IMPORT_DIR/.real-jaen-restore-incomplete" ] || [ -L "$IMPORT_DIR/.real-jaen-restore-incomplete" ]; then
+  echo "Hay una restauración incompleta registrada en $IMPORT_DIR/.real-jaen-restore-incomplete; no se genera backup." >&2
+  exit 1
+fi
 # Do not let a direct docker bind mount create a missing external catalog implicitly.
 case "$VIDEO_MANIFEST" in /*|*\\*|../*|*/../*|*/..) echo "VIDEO_SERVICE_MANIFEST no es una ruta relativa segura" >&2; exit 1 ;; esac
 test -d "$VIDEO_CATALOG_DIR" && test -r "$VIDEO_CATALOG_DIR" || {

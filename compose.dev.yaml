@@ -20,6 +20,9 @@ services:
         state = pathlib.Path('/state')
         database = state / 'real-jaen.sqlite'
         seed = pathlib.Path('/run/rja-seed')
+        restore_marker = pathlib.Path('/imports/.real-jaen-restore-incomplete')
+        if restore_marker.exists() or restore_marker.is_symlink():
+            raise RuntimeError('Hay una restauración incompleta; no se inicia ni se siembra Sports Data.')
         def verify(path):
             connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
             try:
@@ -161,6 +164,9 @@ services:
         state = pathlib.Path('/state')
         database = state / 'video-service.sqlite'
         seed = pathlib.Path('/run/rja-seed')
+        restore_marker = state / '.real-jaen-restore-incomplete'
+        if restore_marker.exists() or restore_marker.is_symlink():
+            raise RuntimeError('Hay una restauración incompleta; no se inicia ni se siembra Video Service.')
         def verify(path):
             connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
             try:

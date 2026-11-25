@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import sys
 
 PROJECT = re.compile(r'[a-z0-9][a-z0-9_-]*')  # Docker Compose project names
@@ -57,10 +58,12 @@ def resolve(config: dict) -> dict[str, str]:
         return found[0]
 
     result = {'project': project}
-    image = service('sports-data').get('image')
-    if not isinstance(image, str) or not image or any(c.isspace() for c in image):
-        raise ConfigError(f'Imagen de sports-data no válida: {image!r}')
-    result['sports_data_image'] = image
+    for name, key in (('sports-data', 'sports_data_image'), ('acquisition', 'acquisition_image'),
+                      ('video-service', 'video_service_image')):
+        image = service(name).get('image')
+        if not isinstance(image, str) or not image or any(c.isspace() for c in image):
+            raise ConfigError(f'Imagen de {name} no válida: {image!r}')
+        result[key] = image
     for name, target, key in DATA_MOUNTS:
         m = mount(name, target)
         if m.get('type') != 'volume' or m.get('source') != key:
@@ -92,6 +95,41 @@ def resolve(config: dict) -> dict[str, str]:
         raise ConfigError(f'Nombre de manifiesto de vídeo no válido: {manifest!r}')
     result['video_catalog_dir'] = catalog_source
     result['video_manifest'] = manifest
+    dashboard_ports = [port for port in service('dashboard').get('ports') or []
+                       if isinstance(port, dict) and port.get('target') == 3000
+                       and port.get('protocol', 'tcp') == 'tcp']
+    if len(dashboard_ports) != 1:
+        raise ConfigError('dashboard debe publicar exactamente un puerto TCP hacia 3000')
+    port = dashboard_ports[0]
+    try:
+        published = int(port.get('published'))
+    except (TypeError, ValueError):
+        raise ConfigError(f'Puerto público de Dashboard no válido: {port.get("published")!r}') from None
+    host_ip = port.get('host_ip') or '0.0.0.0'
+    if not 1 <= published <= 65535 or not isinstance(host_ip, str) or not host_ip or '\n' in host_ip:
+        raise ConfigError('La dirección o el puerto público de Dashboard no son válidos')
+    result['dashboard_bind'] = host_ip
+    result['dashboard_port'] = str(published)
+
+    all_volumes = []
+    for logical, definition in volumes.items():
+        name = definition.get('name') if isinstance(definition, dict) else None
+        if not isinstance(name, str) or not VOLUME.fullmatch(name):
+            raise ConfigError(f'Nombre de volumen no válido para {logical}: {name!r}')
+        all_volumes.append(name)
+    if len(set(all_volumes)) != len(all_volumes):
+        raise ConfigError(f'Compose reutiliza nombres de volúmenes: {all_volumes}')
+    result['volume_names'] = ','.join(sorted(all_volumes))
+
+    all_networks = []
+    for logical, definition in (config.get('networks') or {}).items():
+        name = definition.get('name') if isinstance(definition, dict) else None
+        if not isinstance(name, str) or not PROJECT.fullmatch(name):
+            raise ConfigError(f'Nombre de red no válido para {logical}: {name!r}')
+        all_networks.append(name)
+    if not all_networks or len(set(all_networks)) != len(all_networks):
+        raise ConfigError(f'Compose no declara redes únicas: {all_networks}')
+    result['network_names'] = ','.join(sorted(all_networks))
     return result
 
 
@@ -101,6 +139,17 @@ def main(argv=None) -> int:
     except (ConfigError, ValueError) as error:
         print(f'Configuración de Compose: {error}', file=sys.stderr)
         return 1
+    if '--check-dashboard-port' in (argv if argv is not None else sys.argv[1:]):
+        try:
+            addresses = socket.getaddrinfo(resolved['dashboard_bind'], int(resolved['dashboard_port']),
+                                           type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+            for family, socktype, protocol, _, address in addresses:
+                with socket.socket(family, socktype, protocol) as listener:
+                    listener.bind(address)
+        except OSError as error:
+            print(f'Puerto de Dashboard no disponible ({resolved["dashboard_bind"]}:'
+                  f'{resolved["dashboard_port"]}): {error}', file=sys.stderr)
+            return 1
     sys.stdout.write(''.join(f'{key}={value}\n' for key, value in resolved.items()))
     return 0
 

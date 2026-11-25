@@ -31,6 +31,9 @@ class VideoStateStore:
         self.calibrations_dir = self.state_dir / "calibrations"
 
     def initialize(self) -> None:
+        restore_marker = self.state_dir / '.real-jaen-restore-incomplete'
+        if restore_marker.exists() or restore_marker.is_symlink():
+            raise RuntimeError(f'Restauración incompleta detectada ({restore_marker}); no se inicia Video Service.')
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.calibrations_dir.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:

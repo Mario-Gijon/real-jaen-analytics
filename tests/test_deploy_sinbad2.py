@@ -110,6 +110,7 @@ FAKE_DOCKER = r"""#!/usr/bin/env python3
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 args = sys.argv[1:]
@@ -127,6 +128,41 @@ state.setdefault("implicit_volume_creations", [])
 
 def save():
     state_path.write_text(json.dumps(state), encoding="utf-8")
+
+def resolved_compose_config():
+    prefix = "rja-sinbad2-prod"
+    shared = Path(os.environ["RJA_TEST_REMOTE_HOME"]) / "deploy_real-jaen-analytics" / "shared"
+    volumes = {
+        "sports-state": "rja-sinbad2-sports-state",
+        "acquisition-profiles": "rja-sinbad2-acquisition-profiles",
+        "acquisition-jobs": "rja-sinbad2-acquisition-jobs",
+        "video-state": "rja-sinbad2-video-state",
+    }
+    def vol(name, target):
+        return {"type": "volume", "source": name, "target": target}
+    def image(service):
+        return f"local/real-jaen-analytics/{service}:{os.environ.get('RJ_IMAGE_TAG', 'prod')}"
+    return {
+        "name": "real-jaen-analytics-sinbad2-prod",
+        "services": {
+            "sports-data": {"image": image("sports-data"), "volumes": [
+                vol("sports-state", "/state"),
+                {"type": "bind", "source": str(shared / "imports"), "target": "/imports", "read_only": True},
+            ]},
+            "acquisition": {"image": image("acquisition"), "volumes": [
+                vol("acquisition-jobs", "/acquisition-jobs"), vol("acquisition-profiles", "/profiles"),
+            ]},
+            "video-service": {"image": image("video-service"), "environment": {"VIDEO_SERVICE_MANIFEST": "videos.json"}, "volumes": [
+                vol("video-state", "/state"),
+                {"type": "bind", "source": str(shared / "video-catalog"), "target": "/app/data", "read_only": True},
+            ]},
+            "dashboard": {"ports": [{"target": 3000, "published": "8090", "host_ip": "127.0.0.1"}]},
+        },
+        "volumes": {key: {"name": value} for key, value in volumes.items()},
+        "networks": {name: {"name": f"{prefix}-{name}"} for name in (
+            "dashboard-edge", "sports-data-internal", "video-internal", "acquisition-control",
+            "acquisition-egress", "video-egress")},
+    }
 
 def add_implicit_volume(name, trigger):
     if name and name not in state["volumes"]:
@@ -230,9 +266,29 @@ elif args and args[0] == "compose":
         if state["deployed"]:
             print("container-" + args[-1])
     elif command == "run":
-        raise SystemExit(1 if os.environ.get("RJA_TEST_FAIL_RESTORE") == "1" else 0)
+        if any("instalacion_compose.py" in arg for arg in args):
+            helper_mount = next((args[i + 1].split(":", 1)[0] for i, arg in enumerate(args[:-1])
+                                if arg == "-v" and "instalacion_compose.py" in args[i + 1]), None)
+            if helper_mount is None:
+                raise SystemExit(92)
+            resolved = subprocess.run([sys.executable, helper_mount], input=sys.stdin.read(), text=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            sys.stdout.write(resolved.stdout)
+            sys.stderr.write(resolved.stderr)
+            raise SystemExit(resolved.returncode)
+        if (os.environ.get("RJA_TEST_FAIL_RESTORE") == "1" and len(state["volumes"]) == 4
+                and "scripts.initialize_snapshot" in args):
+            raise SystemExit(1)
+        if not check_host_mounts_for_uid_10001():
+            raise SystemExit(1)
+        if any("SELECT COUNT(*) FROM job" in x for x in args):
+            print(os.environ.get("RJA_TEST_ACTIVE_JOBS", "0"))
     elif command == "config":
-        pass
+        if "--images" in command_args:
+            print(f"local/real-jaen-analytics/sports-data:{os.environ.get('RJ_IMAGE_TAG', 'prod')}")
+        elif "--format" in command_args:
+            json.dump(resolved_compose_config(), sys.stdout)
+            sys.stdout.write("\n")
     else:
         print("unexpected fake compose invocation", file=sys.stderr)
         raise SystemExit(93)
@@ -251,6 +307,10 @@ elif args[:2] == ["network", "disconnect"]:
 elif args[:2] == ["network", "connect"]:
     state["network_detached"] = False
     save()
+elif args[:2] == ["network", "inspect"]:
+    raise SystemExit(1)
+elif args and args[0] == "ps":
+    pass
 elif args and args[0] in ("info", "run", "image"):
     if args[0] == "run":
         for index, argument in enumerate(args[:-1]):
@@ -259,6 +319,33 @@ elif args and args[0] in ("info", "run", "image"):
                 if source and not source.startswith("/") and source not in (".", "..") \
                         and not source.startswith(("./", "../")):
                     add_implicit_volume(source, "docker run -v")
+        if any("instalacion_compose.py" in arg for arg in args):
+            helper_mount = next((args[i + 1].split(":", 1)[0] for i, arg in enumerate(args[:-1])
+                                if arg == "-v" and "instalacion_compose.py" in args[i + 1]), None)
+            if helper_mount is None:
+                raise SystemExit(92)
+            resolved = subprocess.run([sys.executable, helper_mount], input=sys.stdin.read(), text=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            sys.stdout.write(resolved.stdout)
+            sys.stderr.write(resolved.stderr)
+            raise SystemExit(resolved.returncode)
+        if (os.environ.get("RJA_TEST_FAIL_RESTORE") == "1" and len(state["volumes"]) == 4
+                and "scripts.initialize_snapshot" in args):
+            raise SystemExit(1)
+        if any("video-catalog-respaldo.py" in arg for arg in args) and "restaurar" in args:
+            mount = next((args[i + 1] for i, arg in enumerate(args[:-1])
+                          if arg == "--mount" and "target=/catalog-parent" in args[i + 1]), None)
+            target = args[args.index("--target") + 1] if "--target" in args else None
+            if mount is None or target is None:
+                raise SystemExit(92)
+            parent = Path(next(part.removeprefix("source=") for part in mount.split(",")
+                               if part.startswith("source=")))
+            restored_catalog = parent / Path(target).name
+            restored_catalog.mkdir()
+            manifest = restored_catalog / "videos.json"
+            manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
+            manifest.chmod(0o444)
+            restored_catalog.chmod(0o555)
         if not check_host_mounts_for_uid_10001():
             raise SystemExit(1)
         if os.environ.get("RJA_TEST_FAIL_CATALOG") == "1" and any("VideoCatalog.load" in x for x in args):
@@ -292,6 +379,15 @@ class DeploySinbad2Tests(unittest.TestCase):
         self.write_file(self.bin_dir / "docker", FAKE_DOCKER, 0o755)
         self.write_file(self.bin_dir / "mv", FAKE_MV, 0o755)
         self.write_file(self.bin_dir / "rm", FAKE_RM, 0o755)
+        real_python = shutil.which("python3") or "/usr/bin/python3"
+        self.write_file(self.bin_dir / "python3", f'''#!{real_python}
+import os, runpy, sys
+if "--check-dashboard-port" in sys.argv:
+    sys.argv.remove("--check-dashboard-port")
+    runpy.run_path(sys.argv[1], run_name="__main__")
+else:
+    os.execv({real_python!r}, [{real_python!r}, *sys.argv[1:]])
+''', 0o755)
         self.make_file_variables()
         self.key = self.files / "deploy_key"
         subprocess.run(
@@ -448,6 +544,11 @@ class DeploySinbad2Tests(unittest.TestCase):
         )
         for name in names:
             (backup / name).write_text(f"mock backup payload: {name}\n", encoding="utf-8")
+        (backup / "manifest.json").write_text(json.dumps({
+            "formato_respaldo": 2,
+            "fotos": {"formato": 1, "incluidas": False},
+            "catalogo_video": {"formato": 1, "incluida": True, "manifiesto": "videos.json"},
+        }), encoding="utf-8")
         entries = []
         for name in names:
             digest = hashlib.sha256((backup / name).read_bytes()).hexdigest()
@@ -489,6 +590,19 @@ class DeploySinbad2Tests(unittest.TestCase):
         logged_arguments = self.logs.read_text(encoding="utf-8")
         for secret in SECRETS.values():
             self.assertNotIn(secret, logged_arguments, "private value appeared in a Docker command")
+
+    def test_incomplete_restore_marker_blocks_remote_deploy_before_docker_changes(self) -> None:
+        imports = self.remote_home / "deploy_real-jaen-analytics/shared/imports"
+        imports.mkdir(parents=True)
+        marker = imports / ".real-jaen-restore-incomplete"
+        marker.write_text("project=restore-test\nvolumes=rja-restore-sports\n", encoding="utf-8")
+
+        result = self.invoke()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("incomplete restore is recorded", result.stderr)
+        self.assertTrue(marker.is_file())
+        self.assertEqual(self.docker_calls(), [], "deploy must stop before any Docker command")
 
     def test_ssh_private_key_variable_text_is_supported_without_logging_it(self) -> None:
         env = self.environment()
@@ -727,18 +841,41 @@ class DeploySinbad2Tests(unittest.TestCase):
         root = self.remote_home / "deploy_real-jaen-analytics"
         imports = root / "shared/imports"
         catalog = root / "shared/video-catalog"
-        for directory in (imports, catalog):
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
-            self.assertTrue(directory.stat().st_mode & 0o005 == 0o005)
+        self.assertEqual(imports.stat().st_mode & 0o777, 0o755)
+        self.assertTrue(imports.stat().st_mode & 0o005 == 0o005)
+        self.assertFalse(catalog.exists(), "bootstrap must leave the restoration target absent")
 
         backup = self.add_verified_backup()
         second = self.invoke("bootstrap", self.environment(pipeline_id=102, job_id=502))
         self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
         self.assertEqual(backup.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(catalog.stat().st_mode & 0o777, 0o555)
         self.assertEqual((catalog / "videos.json").stat().st_mode & 0o777, 0o444)
         for path in backup.iterdir():
             self.assertTrue(path.stat().st_mode & 0o004, f"UID 10001 cannot read {path.name}")
         self.assertTrue(any("initial-backup" in argument for call in self.docker_calls() for argument in call))
+
+    def test_bootstrap_refuses_existing_external_video_catalog_without_modifying_it(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_VOLUMES"] = ""
+        self.add_verified_backup()
+        catalog = self.remote_home / "deploy_real-jaen-analytics/shared/video-catalog"
+        catalog.mkdir(parents=True)
+        manifest = catalog / "videos.json"
+        manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
+        manifest.chmod(0o444)
+        before = manifest.read_bytes()
+
+        result = self.invoke("bootstrap", env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bootstrap video catalog destination already exists", result.stderr)
+        self.assertEqual(manifest.read_bytes(), before)
+        self.assertEqual(manifest.stat().st_mode & 0o777, 0o444)
+        calls = self.docker_calls()
+        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
+        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
 
     def test_existing_shared_directories_without_uid_access_fail_without_chmod_or_up(self) -> None:
         first = self.invoke()
@@ -807,17 +944,18 @@ class DeploySinbad2Tests(unittest.TestCase):
             created,
             [
                 "rja-sinbad2-sports-state",
+                "rja-sinbad2-video-state",
                 "rja-sinbad2-acquisition-jobs",
                 "rja-sinbad2-acquisition-profiles",
-                "rja-sinbad2-video-state",
             ],
         )
         tar_restores = [call for call in calls if call and call[0] == "run" and "--entrypoint" in call
                         and call[call.index("--entrypoint") + 1] == "tar"]
-        self.assertEqual(len(tar_restores), 2)
-        self.assertTrue(any(any("acquisition-jobs.tar" in arg for arg in call) for call in tar_restores))
-        self.assertTrue(any(any("video-service-state.tar" in arg for arg in call) for call in tar_restores))
-        self.assertTrue(any(self.compose_call(call, "run") for call in calls))
+        self.assertEqual(tar_restores, [], "restore should use its validated extractor, not ad-hoc tar commands")
+        self.assertTrue(any("acquisition-jobs.tar" in arg for call in calls for arg in call))
+        self.assertTrue(any("video-service-state.tar" in arg for call in calls for arg in call))
+        self.assertFalse(any(self.compose_call(call, "run") for call in calls))
+        self.assertFalse(json.loads(self.state.read_text(encoding="utf-8"))["implicit_volume_creations"])
         self.assertFalse(any("down" in call for call in calls))
         self.assertFalse(any(call[:2] == ["volume", "rm"] for call in calls))
         final_state = json.loads(self.state.read_text(encoding="utf-8"))

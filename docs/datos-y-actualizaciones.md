@@ -41,5 +41,5 @@ Los scripts descritos en [despliegue](despliegue.md) separan expresamente estas 
 
 - `respaldo-instalacion.sh` crea una copia consistente de la SQLite y de sus registros de actualización, además del historial de trabajos de Acquisition y el estado/calibraciones persistentes de Video Service. Verifica integridad y generación y genera `SHA256SUMS`.
 - El respaldo no contiene secretos ni cookies/perfil del navegador. La restauración inicializa un perfil nuevo.
-- El catálogo externo de vídeos (`RJ_VIDEO_CATALOG_DIR`) no forma parte del archivo de respaldo y debe respaldarse por separado para conservar sus referencias y calibraciones existentes.
-- `restaurar-instalacion.sh` valida las sumas y la generación, se niega a utilizar volúmenes ya existentes y no arranca servicios. Se reserva para la primera carga o una recuperación explícita; no se ejecuta en cada publicación de código.
+- El backup v2 incluye `video-catalog.tar`, que conserva el manifiesto configurado y las calibraciones que referencia; no incluye los vídeos originales ni el resto del directorio externo.
+- `restaurar-instalacion.sh` valida el paquete v2, fotos/blobs, catálogo de vídeo y generación, se niega a utilizar recursos Compose existentes y no arranca servicios. Se reserva para una instalación nueva o recuperación aislada; no se ejecuta en cada publicación de código. Las versiones antiguas que no registran los datos externos se rechazan para evitar pérdidas silenciosas.

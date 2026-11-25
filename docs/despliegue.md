@@ -142,7 +142,62 @@ El formato actual es la versión `2` del manifiesto e incluye `real-jaen.sqlite`
 
 No se incluyen secretos ni archivos de configuración con credenciales, el volumen de perfil de Acquisition y sus cookies, la caché `.next`, el resto de archivos de `VIDEO_SERVICE_DATA_DIR`, las colecciones originales de fotos ni los vídeos originales externos. Para una restauración habrá que aportar por separado la configuración, secretos, directorios externos de importaciones, colección original de fotos y archivos de vídeo. Las calibraciones creadas por trabajos se conservan en `video-service-state.tar`; el manifiesto y las calibraciones registradas se incluyen en `video-catalog.tar`.
 
-La restauración del formato v2 está pendiente de la siguiente iteración. No uses todavía `restaurar-instalacion.sh` con estos respaldos: su versión actual no restaura `/state/player-photos`.
+La restauración admite el formato v2 completo y resuelve el proyecto, imágenes, puertos, redes, volúmenes y rutas externas desde la configuración efectiva de Compose. Antes de crear volúmenes, valida manifiesto, inventario, SHA-256, SQLite y todos los archivos tar. Se niega si hay contenedores del proyecto, cualquier volumen o red con los nombres efectivos, un montaje activo que se solape con `imports` o el catálogo externo, o si el puerto publicado por Dashboard ya está ocupado. Los backups anteriores a v2 se rechazan porque no acreditan la colección fotográfica ni el catálogo externo; genera un backup v2 para evitar perder datos silenciosamente.
+
+La restauración exige un destino de catálogo de vídeo nuevo, elegido explícitamente con `RJ_RESTORE_VIDEO_CATALOG_DIR`, que coincida con `VIDEO_SERVICE_DATA_DIR`/`RJ_DEV_VIDEO_CATALOG_DIR` resuelto por Compose. No altera un directorio de catálogo existente. En el bootstrap de producción, el manifiesto de ejemplo se valida dentro de la imagen y no se crea en esa ruta: el catálogo v2 recuperado ocupa el destino nuevo. Los vídeos originales no se incluyen: solo se recuperan el manifiesto y las calibraciones referenciadas.
+
+Antes de crear el primer volumen, el script crea `imports/.real-jaen-restore-incomplete` con el proyecto, los volúmenes y el destino externo. Escribe además guardas dentro de los estados de Sports Data y Video Service. Si algo falla o se interrumpe, conserva el marcador, los volúmenes parciales y cualquier área de extracción para inspección; no borra datos automáticamente. Sports Data, Video Service, los preflights de backup y el despliegue normal se niegan a continuar mientras detecten la restauración incompleta. Solo tras validar la base y la generación aceptada por el coordinador, los trabajos SQLite, las fotos/blobs, el catálogo real con `VideoCatalog.load` y un perfil de Acquisition recién inicializado se retiran las guardas. El script nunca arranca los servicios.
+
+### Ensayo aislado del backup v2 actual
+
+Este ejemplo conserva intactos el backup original, los volúmenes y las carpetas de la instalación de desarrollo. Prepara un nuevo proyecto y prefijo de volúmenes, copia el backup a un directorio de importación aislado y da acceso de lectura solo a esa copia para UID `10001`. El overlay local existente fija el montaje de imports; se genera una copia temporal del overlay con ese único origen dirigido al ensayo. El directorio de semillas queda vacío: como las bases restauradas ya existen, los entrypoints de desarrollo solo las validan y no copian semillas encima.
+
+```sh
+set -eu
+backup="$HOME/.config/real-jaen-analytics/backups/20261124-231513"
+restore_root="$HOME/.config/real-jaen-analytics/restore-test"
+imports="$restore_root/imports"
+catalog="$restore_root/video-catalog-parent/catalog"
+original_overlay="$HOME/.config/real-jaen-analytics/compose.existing-state.yaml"
+overlay="$restore_root/compose.existing-state.yaml"
+test -d "$backup" && test -f "$original_overlay"
+test ! -e "$restore_root" || { echo "Ya existe $restore_root; inspecciona el ensayo anterior" >&2; exit 1; }
+mkdir -p "$imports" "$restore_root/seed/sports" "$restore_root/seed/video" \
+  "$restore_root/video-catalog-parent" "$restore_root/photo-collections"
+chmod 755 "$imports"
+cp -a "$backup" "$imports/backup-v2"
+chmod -R a+rX "$imports/backup-v2"
+sed "s#${HOME}/.config/real-jaen-analytics/imports#${imports}#g" \
+  "$original_overlay" > "$overlay"
+grep -Fq "$imports:/imports:ro" "$overlay"
+test ! -e "$catalog" && test ! -L "$catalog"
+python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',33401)); s.close()"
+
+export ENV_FILE="$HOME/.config/real-jaen-analytics/dev.env"
+export COMPOSE_FILES="compose.dev.yaml:$overlay:compose.photos.yaml"
+export RJ_DEV_PROJECT_NAME=real-jaen-analytics-restore-test
+export RJ_DEV_VOLUME_PREFIX=rja-restore-test
+export RJ_DEV_DASHBOARD_PORT=33401
+export RJ_DEV_IMPORT_DIR="$imports"
+export RJ_DEV_SEED_DIR="$restore_root/seed"
+export RJ_DEV_VIDEO_CATALOG_DIR="$catalog"
+export RJ_PHOTO_COLLECTIONS_DIR="$restore_root/photo-collections"
+export RJ_RESTORE_VIDEO_CATALOG_DIR="$catalog"
+
+sh dashboard/scripts/restaurar-instalacion.sh "$imports/backup-v2"
+```
+
+Usa `dev.env` solo para secretos de desarrollo. Si alguna imagen local resuelta por Compose no está construida para el código de este checkout, constrúyela con las mismas variables exportadas antes de restaurar. La restauración no crea redes ni el volumen de caché de Next; Compose los crea al iniciar el ensayo. Tras revisar el mensaje de éxito, se puede iniciar manualmente el proyecto aislado y esperar healthchecks:
+
+```sh
+COMPOSE_FILE="$COMPOSE_FILES" docker compose --project-directory "$PWD" --env-file "$ENV_FILE" \
+  up -d --build --wait
+COMPOSE_FILE="$COMPOSE_FILES" docker compose --project-directory "$PWD" --env-file "$ENV_FILE" ps
+```
+
+`restaurar-instalacion.sh` comprueba también el puerto `33401`; la prueba de bind anterior permite detectar el conflicto antes de invocarla. Mantén las rutas y secretos de desarrollo originales fuera de los directorios de imports, catálogo, semillas y colecciones del ensayo.
+
+Si la restauración falla o se interrumpe, no quites el marcador ni repitas sobre los mismos nombres. Léelo para obtener el proyecto, los cuatro volúmenes y la ruta externa; inspecciona esos recursos y conserva los logs. Los datos parciales quedan protegidos. Para un nuevo intento, prepara otro directorio externo, otro proyecto y otro prefijo de volúmenes; no borres los parciales hasta que hayas comprobado y preservado lo que contienen. La configuración de producción usa el mismo procedimiento con sus archivos Compose y `ENV_FILE` efectivos, pero requiere volúmenes y rutas externos nuevos.
 
 En SINBAD², ejecútalo desde una release para que Compose use el mismo SHA de imágenes que la instalación activa y entrega la ruta privada de configuración explícitamente:
 
