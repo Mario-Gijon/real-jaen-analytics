@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from datetime import datetime, timezone
+import logging
 import math
 import os
 from pathlib import Path
@@ -25,8 +26,45 @@ from persistencia.comentarios import load_current_comments, match_comments_respo
 from persistencia.enrichment_snapshot import EnrichmentSnapshot, EnrichmentSnapshotRegistry
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+def _medir_fase_publicacion(publication_id, phase, action):
+    """Log monotonic phase durations without payloads, paths, SQL or exception messages."""
+    started = time.monotonic()
+    outcome = 'ok'
+    try:
+        return action()
+    except BaseException as error:
+        outcome = type(error).__name__
+        raise
+    finally:
+        LOGGER.info('postgresql_publication_phase publication_id=%s phase=%s duration_ms=%.1f outcome=%s',
+                    publication_id, phase, (time.monotonic() - started) * 1000, outcome)
+
+
 class CoordinacionRechazada(RuntimeError):
     pass
+
+
+def validar_propiedad_compartida(connection, trabajo_compartido, publication_id, *, bloquear):
+    """Validate the original owner and lease; take the row lock only at final confirmation."""
+    from sqlalchemy import text
+
+    owner = uuid.UUID(trabajo_compartido['owner_id'])
+    lock = ' FOR UPDATE' if bloquear else ''
+    row = connection.execute(text("""
+        SELECT owner_id, fencing_token, status, phase, cancel_requested,
+               lease_expires_at > clock_timestamp() AS lease_valid, publication_id
+        FROM sports_data_update_job WHERE job_id=:job_id
+    """ + lock), {'job_id': uuid.UUID(trabajo_compartido['job_id'])}).mappings().first()
+    if (row is None or row['status'] not in ('queued', 'running') or row['phase'] != 'publishing'
+            or row['owner_id'] != owner
+            or int(row['fencing_token']) != int(trabajo_compartido['fencing_token'])
+            or not row['lease_valid'] or row['cancel_requested']
+            or row['publication_id'] != uuid.UUID(publication_id)):
+        raise CoordinacionRechazada('La propiedad compartida del trabajo expiró o fue revocada')
+    return row
 
 
 INTERVALO_GENERACION_MINIMO = 5.0
@@ -544,8 +582,10 @@ class CoordinadorPostgreSQL(Coordinador):
     es_postgresql = True
     GENERACION_INICIAL = '00000000-0000-4000-8000-000000000001'
 
-    def __init__(self, motor, ambito, directorio, *, intervalo_generacion=None, _frontera=None):
+    def __init__(self, motor, ambito, directorio, *, heartbeat_motor=None,
+                 intervalo_generacion=None, _frontera=None):
         self.motor = motor
+        self.heartbeat_motor = heartbeat_motor or motor
         self.ambito = Path(ambito).resolve()
         self.directorio = Path(directorio).resolve()
         self.directorio.mkdir(parents=True, exist_ok=True)
@@ -881,15 +921,19 @@ class CoordinadorPostgreSQL(Coordinador):
     def _ejecutar(self, ident):
         from sqlalchemy import text
 
+        publication_started = time.monotonic()
         trabajo = self._leer(ident)
         nueva = None
         instalada = False
+        connection = None
+        transaction = None
         input_fingerprint = None
         try:
             trabajo.update(estado='running', fase='preparing')
             self._guardar(trabajo)
             self._frontera('before_import')
-            entradas, input_fingerprint = self._congelar_postgresql(trabajo)
+            entradas, input_fingerprint = _medir_fase_publicacion(
+                ident, 'input_prepare', lambda: self._congelar_postgresql(trabajo))
             trabajo['fase'] = 'publishing'
             self._guardar(trabajo)
             self._frontera('before_transaction')
@@ -903,16 +947,10 @@ class CoordinadorPostgreSQL(Coordinador):
                 if shared is not None:
                     owner = uuid.UUID(shared['owner_id'])
                     shared_id = uuid.UUID(shared['job_id'])
-                    shared_job = connection.execute(text("""
-                        SELECT owner_id, fencing_token, status, cancel_requested,
-                               lease_expires_at > clock_timestamp() AS lease_valid
-                        FROM sports_data_update_job WHERE job_id=:job_id FOR UPDATE
-                    """), {'job_id': shared_id}).mappings().first()
-                    if (shared_job is None or shared_job['status'] not in ('queued', 'running')
-                            or shared_job['owner_id'] != owner
-                            or int(shared_job['fencing_token']) != int(shared['fencing_token'])
-                            or not shared_job['lease_valid'] or shared_job['cancel_requested']):
-                        raise CoordinacionRechazada('La propiedad compartida del trabajo expiró o fue revocada')
+                    # This is a read only validation. Heartbeats and recovery must remain able to update the row
+                    # throughout the expensive import, enrichment and generation preparation stages.
+                    _medir_fase_publicacion(ident, 'owner_initial_check',
+                        lambda: validar_propiedad_compartida(connection, shared, ident, bloquear=False))
                 existing = connection.execute(text("""
                     SELECT publication_id, source_generation, result_generation, input_sha256,
                            published_at, run_status, result_json
@@ -929,6 +967,8 @@ class CoordinadorPostgreSQL(Coordinador):
                                   run_status=existing['run_status'])
                     generation_id = str(existing['result_generation'])
                     transaction.rollback()
+                    connection.close()
+                    connection = None
                     current = self.refrescar_generacion(force=True)
                     with self._puerta:
                         trabajo.update(estado='completed', fase='finished', generacion=generation_id,
@@ -955,36 +995,53 @@ class CoordinadorPostgreSQL(Coordinador):
                     raise CoordinacionRechazada('El esquema PostgreSQL de comentarios está incompleto')
 
                 comments = entradas.pop('comentarios', [])
-                informe = sincronizacion.importar_evidencia_postgresql(
-                    connection,
-                    exportaciones=entradas.get('exportaciones', []),
-                    calendarios=entradas.get('calendarios', []),
-                    fichas=entradas.get('fichas', []),
-                )
+                informe = _medir_fase_publicacion(ident, 'sports_import', lambda:
+                    sincronizacion.importar_evidencia_postgresql(
+                        connection,
+                        exportaciones=entradas.get('exportaciones', []),
+                        calendarios=entradas.get('calendarios', []),
+                        fichas=entradas.get('fichas', []),
+                    ))
                 if comments:
                     from persistencia.comentarios import import_group_bundle_postgresql
                     comentario = {'captured_ids': [], 'failed_ids': []}
-                    for response_file in comments:
-                        current = import_group_bundle_postgresql(connection, response_file)
-                        comentario['captured_ids'] = sorted(set(comentario['captured_ids']) | set(current['captured_ids']))
-                        comentario['failed_ids'] = sorted(set(comentario['failed_ids']) | set(current['failed_ids']))
+                    def importar_comentarios():
+                        for response_file in comments:
+                            current = import_group_bundle_postgresql(connection, response_file)
+                            comentario['captured_ids'] = sorted(set(comentario['captured_ids']) | set(current['captured_ids']))
+                            comentario['failed_ids'] = sorted(set(comentario['failed_ids']) | set(current['failed_ids']))
+                    _medir_fase_publicacion(ident, 'comments_import', importar_comentarios)
                     informe['comments_persisted'] = comentario
+                else:
+                    _medir_fase_publicacion(ident, 'comments_import', lambda: None)
                 from enrichment.store import (
                     ensure_selected_enrichments_complete_postgresql,
                     persist_selected_enrichments_postgresql,
                 )
-                enrichment_result = persist_selected_enrichments_postgresql(connection, 'rules-v1')
-                ensure_selected_enrichments_complete_postgresql(connection, 'rules-v1')
+                def enriquecer():
+                    result = persist_selected_enrichments_postgresql(connection, 'rules-v1')
+                    ensure_selected_enrichments_complete_postgresql(connection, 'rules-v1')
+                    return result
+                enrichment_result = _medir_fase_publicacion(ident, 'enrichment', enriquecer)
                 informe['enrichment_persisted'] = enrichment_result
-                sincronizacion.exigir_coherencia(connection)
+                _medir_fase_publicacion(ident, 'coherence', lambda: sincronizacion.exigir_coherencia(connection))
                 self._frontera('before_generation')
                 result_generation = str(uuid.uuid4())
                 result_generation_number = int(state['generation_number']) + 1
-                nueva = preparar_postgresql(connection, self.ambito, result_generation, result_generation_number)
+                nueva = _medir_fase_publicacion(
+                    ident, 'generation_build',
+                    lambda: preparar_postgresql(connection, self.ambito, result_generation, result_generation_number))
                 published_at = datetime.now(timezone.utc)
                 result = dict(informe, generation_id=result_generation, source_generation=source_generation,
                               published_at=published_at.isoformat(), run_status=informe['estado'])
-                connection.execute(text("""
+                if shared is not None:
+                    # Keep ownership row locking to this short final section. Recovery follows the same
+                    # advisory-lock order and skips locked rows, so it cannot race a confirming COMMIT.
+                    connection.exec_driver_sql("SET LOCAL lock_timeout = '2s'")
+                    _medir_fase_publicacion(
+                        ident, 'owner_final_check',
+                        lambda: validar_propiedad_compartida(connection, shared, ident, bloquear=True))
+                _medir_fase_publicacion(ident, 'publication_record', lambda: connection.execute(text("""
                     INSERT INTO sports_data_publication
                         (publication_id, source_generation, result_generation, input_sha256, published_at,
                          run_status, result_json)
@@ -993,35 +1050,36 @@ class CoordinadorPostgreSQL(Coordinador):
                 """), {'publication_id': ident, 'source_generation': source_generation,
                        'result_generation': result_generation, 'input_sha256': input_fingerprint,
                        'published_at': published_at, 'run_status': informe['estado'],
-                       'result_json': json.dumps(result, ensure_ascii=False, allow_nan=False)})
-                connection.execute(text("""
+                       'result_json': json.dumps(result, ensure_ascii=False, allow_nan=False)}))
+                _medir_fase_publicacion(ident, 'generation_record', lambda: connection.execute(text("""
                     UPDATE sports_data_publication_state
                     SET generation_id = :generation_id, generation_number = generation_number + 1,
                         code_sha256 = :code_sha256, scope_sha256 = :scope_sha256,
                         last_publication_id = :publication_id, updated_at = :published_at
                     WHERE singleton_id = 1
                 """), {'generation_id': result_generation, 'code_sha256': rules['codigo'],
-                       'scope_sha256': rules['ambito'], 'publication_id': ident, 'published_at': published_at})
+                       'scope_sha256': rules['ambito'], 'publication_id': ident, 'published_at': published_at}))
                 if shared is not None:
-                    confirmed = connection.execute(text("""
+                    confirmed = _medir_fase_publicacion(ident, 'shared_job_confirmation', lambda: connection.execute(text("""
                         UPDATE sports_data_update_job SET publication_id=:publication_id,
                             last_publication_id=:publication_id, published=true,
                             published_at=:published_at, updated_at=clock_timestamp()
                         WHERE job_id=:job_id AND owner_id=:owner_id AND fencing_token=:fencing_token
-                          AND status IN ('queued','running')
+                          AND status IN ('queued','running') AND phase='publishing'
+                          AND cancel_requested=false AND lease_expires_at > clock_timestamp()
+                          AND publication_id=:publication_id
                         RETURNING job_id
                     """), {'publication_id': uuid.UUID(ident), 'published_at': published_at,
                            'job_id': shared_id, 'owner_id': owner,
-                           'fencing_token': int(shared['fencing_token'])}).first()
+                           'fencing_token': int(shared['fencing_token'])}).first())
                     if confirmed is None:
                         raise CoordinacionRechazada('La propiedad compartida cambió durante la publicación')
                 trabajo.update(generacion=result_generation, resultado=result, esperada=source_generation)
-                self._guardar(trabajo)
                 self._frontera('before_commit')
                 with self._puerta:
                     self._frontera('before_confirmation')
                     try:
-                        transaction.commit()
+                        _medir_fase_publicacion(ident, 'commit', transaction.commit)
                         self._frontera('committed')
                     except Exception:
                         # A failed/uncertain COMMIT must block captures before the gate is released.
@@ -1038,14 +1096,22 @@ class CoordinadorPostgreSQL(Coordinador):
                     trabajo.update(estado='completed', fase='finished')
                     trabajo.update(generacion_vigente=result_generation,
                                    numero_generacion_vigente=result_generation_number)
-                    self._guardar(trabajo, dict(codigo=rules['codigo'], ambito=rules['ambito'],
-                                                generacion=result_generation,
-                                                numero_generacion=result_generation_number))
-                    self._frontera('swapped')
-            finally:
-                if transaction.is_active:
-                    transaction.rollback()
+                # The SQL publication, generation and shared-job reference are already durable. Release the
+                # database connection before the local journal write; durable SQL reconciliation handles a crash
+                # between these two stores.
                 connection.close()
+                connection = None
+                _medir_fase_publicacion(
+                    ident, 'local_journal',
+                    lambda: self._guardar(trabajo, dict(codigo=rules['codigo'], ambito=rules['ambito'],
+                                                         generacion=result_generation,
+                                                         numero_generacion=result_generation_number)))
+                self._frontera('swapped')
+            finally:
+                if transaction is not None and transaction.is_active:
+                    transaction.rollback()
+                if connection is not None:
+                    connection.close()
         except Exception as error:
             # COMMIT errors can be uncertain. A fresh connection to pg0002 is authoritative.
             try:
@@ -1081,6 +1147,9 @@ class CoordinadorPostgreSQL(Coordinador):
         finally:
             if nueva is not None and not instalada:
                 self._liberar_generacion(nueva)
+            LOGGER.info('postgresql_publication_total publication_id=%s duration_ms=%.1f state=%s',
+                        ident, (time.monotonic() - publication_started) * 1000,
+                        trabajo.get('estado', 'unknown'))
 
     def close(self):
         super().close()

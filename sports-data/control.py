@@ -17,6 +17,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import threading
+import time
 import uuid
 
 PILOT = 'sofascore-pilot-16599363-v1'
@@ -103,6 +104,7 @@ class Actualizaciones:
         self.instance_id = str(uuid.uuid4())
         self.jobs = None
         self.lease_seconds = self.heartbeat_seconds = None
+        self.recovery_interval_seconds = 15.0
         self._heartbeats = {}
         self._lost_ownership = {}
         self._cancel_sent = set()
@@ -112,7 +114,10 @@ class Actualizaciones:
         if self.postgresql:
             from persistencia.trabajos_postgresql import SharedUpdateJobs, lease_configuration
             self.lease_seconds, self.heartbeat_seconds = lease_configuration()
-            self.jobs = SharedUpdateJobs(coordinador.motor, self.instance_id, self.lease_seconds)
+            self.recovery_interval_seconds = max(1.0, min(15.0, self.heartbeat_seconds))
+            self.jobs = SharedUpdateJobs(
+                coordinador.motor, self.instance_id, self.lease_seconds,
+                heartbeat_engine=getattr(coordinador, 'heartbeat_motor', None))
             self.jobs.check_schema()
         else:
             self.root.mkdir(exist_ok=True)
@@ -143,7 +148,6 @@ class Actualizaciones:
 
     def get(self, ident):
         if self.postgresql:
-            self._recover_shared()
             return self.jobs.get(ident)
         rows = self._rows('WHERE id=?', (ident,))
         if not rows:
@@ -212,28 +216,23 @@ class Actualizaciones:
     def _heartbeat_loop(self, ident, token, stop, lost):
         while not stop.wait(self.heartbeat_seconds):
             try:
-                item = self.jobs.get(ident)
-            except KeyError:
-                return
-            except Exception:
-                continue
-            if item['status'] not in ACTIVE or item.get('owner_id') != self.instance_id \
-                    or item.get('fencing_token') != token:
-                if item['status'] in ACTIVE and item.get('owner_id') == self.instance_id:
-                    token = item.get('fencing_token')
-                else:
-                    return
-            if item.get('cancel_requested') and item.get('acquisition_id'):
-                self._cancel_owner_acquisition(item['acquisition_id'])
-            try:
-                if not self.jobs.heartbeat(ident, token):
-                    lost.set()
-                    if item.get('acquisition_id'):
-                        self._cancel_acquisition(item['acquisition_id'])
-                    return
+                renewal = self.jobs.renew_lease(ident, token)
             except Exception:
                 # Retry transient connection errors; callbacks also fail closed before each next action.
                 continue
+            if renewal is None:
+                # Never adopt a replacement fencing token. A successor owns any recovered job.
+                lost.set()
+                try:
+                    item = self.jobs.get(ident)
+                except Exception:
+                    item = None
+                if (item is not None and item.get('owner_id') == self.instance_id
+                        and item.get('fencing_token') == token and item.get('acquisition_id')):
+                    self._cancel_owner_acquisition(item['acquisition_id'])
+                return
+            if renewal['cancel_requested'] and renewal['acquisition_id']:
+                self._cancel_owner_acquisition(renewal['acquisition_id'])
 
     def _recover_shared(self):
         if not self.postgresql:
@@ -423,13 +422,16 @@ class Actualizaciones:
 
     def _reconcile_loop(self):
         if self.postgresql:
+            next_recovery = time.monotonic() + self.recovery_interval_seconds
             while not self.stop_reconciler.is_set():
-                if not self._pending_publications:
-                    self._reconcile_signal.wait()
-                    self._reconcile_signal.clear()
-                    continue
                 self._reconcile_signal.wait(PUBLICATION_RECONCILE_SECONDS)
                 self._reconcile_signal.clear()
+                if self.stop_reconciler.is_set():
+                    break
+                now_monotonic = time.monotonic()
+                if now_monotonic >= next_recovery:
+                    self._recover_shared()
+                    next_recovery = now_monotonic + self.recovery_interval_seconds
                 for ident in tuple(self._pending_publications):
                     try:
                         item = self.jobs.get(ident)
@@ -910,7 +912,6 @@ class Actualizaciones:
 
     def actual(self):
         if self.postgresql:
-            self._recover_shared()
             active = self.jobs.active()
             last = self.jobs.latest_finished()
             latest = self.jobs.latest_published()
@@ -932,9 +933,8 @@ class Actualizaciones:
     def _scope(self):
         if self.recipe != GROUP:
             return SCOPES[self.recipe]
-        refrescar = getattr(self.c, 'refrescar_generacion', None)
-        if refrescar is not None:
-            refrescar(force=True)
+        # capturar() respects the coordinator's cross-installation refresh interval. A status
+        # poll must not force a PostgreSQL generation check on every request.
         generation=self.c.capturar()
         cached=self._scope_cache
         if cached is not None and cached[0]==generation.id:

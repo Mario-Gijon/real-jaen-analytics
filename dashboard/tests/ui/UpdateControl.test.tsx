@@ -1,9 +1,11 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render as renderComponent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import type { UpdateJob, UpdateStatus } from "@/contract";
 import { OperatorView } from "@/features/updates/OperatorView";
 import { UpdateControl } from "@/features/updates/UpdateControl";
+import { UpdatesProvider } from "@/features/updates/use-updates";
 
 const SCOPE = { kind: "pilot" as const, label: "Actualización piloto: calendario de la jornada 1 y un partido", round: 1,
   actionLabel: "Actualizar piloto", description: "Consulta el calendario de la jornada 1 y un partido. No actualiza el resto de la jornada ni de la temporada: los demás partidos se conservan tal como están publicados.",
@@ -13,6 +15,7 @@ const job = (over: Partial<UpdateJob> = {}): UpdateJob => ({
   published: false, requestedAt: "2026-10-28T17:00:00Z", finishedAt: null, pollAfterSeconds: 1, error: null, result: null, ...over });
 const operatorStatus = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({
   available: true, scope: SCOPE, lastPublished: null, activeJob: null, lastJob: null, lastCoverage: null, ...over });
+const render = (children: ReactNode) => renderComponent(<UpdatesProvider>{children}</UpdatesProvider>);
 
 type Handler = (url: string, init?: RequestInit) => { status?: number; body?: unknown };
 function api(handler: Handler, canUpdate = true) {
@@ -89,6 +92,37 @@ describe("UpdateControl (top bar)", () => {
     expect(sent).toHaveLength(1);
     expect(new Headers(sent[0][1]!.headers).get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
     expect(screen.getAllByText("Consultando datos…").length).toBeGreaterThan(0);
+  });
+
+  it("shares one status reader between the top bar and operator screen", async () => {
+    const active = job({ pollAfterSeconds: 30 });
+    const fetch = api(() => ({ body: operatorStatus({ activeJob: active }) }));
+    render(<><UpdateControl /><OperatorView /></>);
+    await screen.findAllByRole("button", { name: "Cancelar" });
+    await waitFor(() => {
+      expect(fetch.mock.calls.filter(([url]) => String(url) === "/api/v1/updates/current")).toHaveLength(1);
+    });
+    expect(fetch.mock.calls.filter(([url]) => String(url) === `/api/v1/updates/${active.id}`)).toHaveLength(0);
+  });
+
+  it("retries a failed job poll and clears the transient error on success", async () => {
+    let polls = 0;
+    const completed = job({ status: "completed", phase: "finished", published: true, cancellable: false,
+      finishedAt: "2026-10-28T17:02:00Z",
+      result: { publishedAt: "2026-10-28T17:02:00Z", reusedBundle: false, coverage: null } });
+    api((url) => {
+      if (url.startsWith(`/api/v1/updates/${completed.id}`)) {
+        polls += 1;
+        return polls === 1 ? { status: 503, body: { error: "temporary" } } : { body: completed };
+      }
+      return { body: operatorStatus(polls < 2 ? { activeJob: job() } : { lastJob: completed }) };
+    });
+    render(<OperatorView />);
+    await screen.findByRole("button", { name: "Cancelar" });
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Recargar datos" }, { timeout: 5000 })).toBeVisible();
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("follows the job to its publication and offers to reload the data", async () => {
@@ -196,7 +230,7 @@ describe("Group 2 scope", () => {
     expect(screen.getByText(/Solicitud recibida el 28\/10, 18:00/)).toBeVisible();
     expect(screen.getByText(/posible sustitución de/)).toBeVisible();
     expect(screen.getByRole("button", { name: "Actualizar Grupo 2" })).toBeEnabled();
-    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true);  // no data API calls
+    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true); // no data API calls
   });
 
   it("separates unavailable narrative from actual errors and keeps 404s non-fatal", async () => {

@@ -48,6 +48,12 @@ class RollingScope(unittest.TestCase):
         class Coordinator:
             generation = SimpleNamespace(id='generation-11')
 
+            def __init__(self):
+                self.forced_refreshes = []
+
+            def refrescar_generacion(self, *, force=False):
+                self.forced_refreshes.append(force)
+
             def capturar(self):
                 return self.generation
 
@@ -71,11 +77,99 @@ class RollingScope(unittest.TestCase):
             first = updates._scope()
         self.assertEqual((first['reference_round'], first['recent_rounds']), (11, [9, 10, 11]))
         self.assertIn('jornadas 9, 10, 11', first['description'])
+        self.assertEqual(coordinator.forced_refreshes, [])
 
         coordinator.generation = SimpleNamespace(id='generation-12')
         with mock.patch('persistencia.bundle.inventory', return_value=baseline(12)):
             second = updates._scope()
         self.assertEqual((second['reference_round'], second['recent_rounds']), (12, [10, 11, 12]))
+        self.assertEqual(coordinator.forced_refreshes, [])
+
+
+class PostgreSQLStatusReads(unittest.TestCase):
+    def test_status_and_job_get_do_not_run_shared_recovery(self):
+        from types import SimpleNamespace
+        from control import Actualizaciones
+
+        updates = object.__new__(Actualizaciones)
+        updates.postgresql = True
+        updates.jobs = SimpleNamespace(
+            get=mock.Mock(return_value={'id': 'job'}),
+            active=mock.Mock(return_value=None),
+            latest_finished=mock.Mock(return_value=None),
+            latest_published=mock.Mock(return_value=None),
+        )
+        updates.cliente = SimpleNamespace(disponible=mock.Mock(return_value=True))
+        updates.c = SimpleNamespace()
+        updates._scope = mock.Mock(return_value={'kind': 'pilot'})
+        updates.public = mock.Mock(side_effect=lambda item: item)
+        updates._recover_shared = mock.Mock()
+
+        self.assertEqual(updates.get('job'), {'id': 'job'})
+        current = updates.actual()
+
+        self.assertTrue(current['available'])
+        self.assertEqual(current['scope'], {'kind': 'pilot'})
+        updates._recover_shared.assert_not_called()
+
+    def test_heartbeat_stops_on_lost_token_and_never_adopts_a_successors_token(self):
+        from types import SimpleNamespace
+        from control import Actualizaciones
+
+        class StopAfterOneRenewal:
+            calls = 0
+
+            def wait(self, _seconds):
+                self.calls += 1
+                return self.calls > 1
+
+        updates = object.__new__(Actualizaciones)
+        updates.heartbeat_seconds = 0.01
+        updates.instance_id = 'this-owner'
+        updates.jobs = SimpleNamespace(
+            renew_lease=mock.Mock(return_value=None),
+            get=mock.Mock(return_value={'owner_id': 'successor', 'fencing_token': 8,
+                                        'acquisition_id': 'successor-acquisition'}),
+        )
+        updates.guard = threading.RLock()
+        updates._cancel_sent = set()
+        updates._cancel_acquisition = mock.Mock()
+        lost = mock.Mock()
+
+        updates._heartbeat_loop('job', 7, StopAfterOneRenewal(), lost)
+
+        updates.jobs.renew_lease.assert_called_once_with('job', 7)
+        lost.set.assert_called_once_with()
+        updates._cancel_acquisition.assert_not_called()
+
+    def test_expired_owner_cancels_only_its_own_acquisition_without_adopting_a_token(self):
+        from types import SimpleNamespace
+        from control import Actualizaciones
+
+        class StopAfterOneRenewal:
+            calls = 0
+
+            def wait(self, _seconds):
+                self.calls += 1
+                return self.calls > 1
+
+        updates = object.__new__(Actualizaciones)
+        updates.heartbeat_seconds = 0.01
+        updates.instance_id = 'original-owner'
+        updates.jobs = SimpleNamespace(
+            renew_lease=mock.Mock(return_value=None),
+            get=mock.Mock(return_value={'owner_id': 'original-owner', 'fencing_token': 7,
+                                        'acquisition_id': 'original-acquisition'}),
+        )
+        updates.guard = threading.RLock()
+        updates._cancel_sent = set()
+        updates._cancel_acquisition = mock.Mock()
+        lost = mock.Mock()
+
+        updates._heartbeat_loop('job', 7, StopAfterOneRenewal(), lost)
+
+        updates.jobs.renew_lease.assert_called_once_with('job', 7)
+        updates._cancel_acquisition.assert_called_once_with('original-acquisition')
 
 
 class FakeCliente:

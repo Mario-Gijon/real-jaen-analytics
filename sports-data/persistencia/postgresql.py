@@ -113,16 +113,25 @@ def url_postgresql(variable: str) -> URL:
     return url.set(drivername='postgresql+psycopg', query=options)
 
 
-def crear_motor_postgresql():
-    """Motor PostgreSQL de ejecución con pool limitado y parámetros ocultos."""
+def _crear_motor_postgresql(*, pool_size, max_overflow, pool_timeout):
     return create_engine(
         url_postgresql('SPORTS_DATA_DATABASE_URL'),
-        pool_size=2,
-        max_overflow=0,
-        pool_timeout=10,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
         pool_recycle=300,
         pool_use_lifo=True,
         pool_pre_ping=True,
         hide_parameters=True,
         connect_args={'connect_timeout': 10},
     )
+
+
+def crear_motor_postgresql():
+    """Main bounded pool: at most five connections per Sports Data process."""
+    return _crear_motor_postgresql(pool_size=4, max_overflow=1, pool_timeout=2)
+
+
+def crear_motor_heartbeat_postgresql():
+    """A reserved single-connection pool keeps lease renewals independent of publication work."""
+    return _crear_motor_postgresql(pool_size=1, max_overflow=0, pool_timeout=1)

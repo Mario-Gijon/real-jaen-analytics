@@ -70,8 +70,9 @@ class LeaseLost(RuntimeError):
 class SharedUpdateJobs:
     """Small transaction-oriented repository; no transaction spans acquisition or local file work."""
 
-    def __init__(self, engine, owner_id, lease_seconds=60):
+    def __init__(self, engine, owner_id, lease_seconds=60, *, heartbeat_engine=None):
         self.engine = engine
+        self.heartbeat_engine = heartbeat_engine or engine
         self.owner_id = _uuid(owner_id)
         self.lease_seconds = float(lease_seconds)
 
@@ -243,16 +244,25 @@ class SharedUpdateJobs:
                 raise LeaseLost('Propiedad del trabajo perdida')
 
     def heartbeat(self, ident, token):
-        with self.engine.begin() as connection:
+        return self.renew_lease(ident, token) is not None
+
+    def renew_lease(self, ident, token):
+        """Renew on the reserved heartbeat pool and return only cancellation metadata."""
+        with self.heartbeat_engine.begin() as connection:
+            connection.exec_driver_sql("SET LOCAL lock_timeout = '2s'")
+            connection.exec_driver_sql("SET LOCAL statement_timeout = '5s'")
             row = connection.execute(text("""
                 UPDATE sports_data_update_job SET heartbeat_at=clock_timestamp(), updated_at=clock_timestamp(),
                     lease_expires_at=clock_timestamp() + make_interval(secs => CAST(:lease AS double precision))
                 WHERE job_id=:id AND owner_id=:owner AND fencing_token=:token
                   AND status IN ('queued','running') AND lease_expires_at > clock_timestamp()
-                RETURNING job_id
+                RETURNING cancel_requested, acquisition_id
             """), {'lease': self.lease_seconds, 'id': _uuid(ident), 'owner': self.owner_id,
-                   'token': int(token)}).first()
-        return row is not None
+                   'token': int(token)}).mappings().first()
+        if row is None:
+            return None
+        return dict(cancel_requested=bool(row['cancel_requested']),
+                    acquisition_id=str(row['acquisition_id']) if row['acquisition_id'] else None)
 
     def request_cancel(self, ident):
         with self.engine.begin() as connection:
@@ -274,7 +284,7 @@ class SharedUpdateJobs:
             return item
 
     def recover_expired(self):
-        """Reconcile expired owners; only untouched queued jobs can be safely transferred."""
+        """Reconcile expired owners without waiting behind a live sports publication."""
         with self.engine.connect() as connection:
             expired = connection.execute(text("""
                 SELECT 1 FROM sports_data_update_job
@@ -284,11 +294,18 @@ class SharedUpdateJobs:
             return []
         reclaimed = []
         with self.engine.begin() as connection:
+            connection.exec_driver_sql("SET LOCAL lock_timeout = '250ms'")
+            connection.exec_driver_sql("SET LOCAL statement_timeout = '2s'")
+            # Writers take the sports advisory lock before they touch shared job state. Recovery uses
+            # the same order, but never waits: an in-flight COMMIT owns this lock until it is durable.
+            from persistencia.sincronizacion import intentar_bloquear_escritura_postgresql
+            if not intentar_bloquear_escritura_postgresql(connection):
+                return []
             self._lock_counter(connection)
             rows = connection.execute(text("""
                 SELECT * FROM sports_data_update_job
                 WHERE status IN ('queued','running') AND lease_expires_at <= clock_timestamp()
-                ORDER BY requested_at FOR UPDATE
+                ORDER BY requested_at FOR UPDATE SKIP LOCKED
             """)).mappings().all()
             for row in rows:
                 item = _decode(row)

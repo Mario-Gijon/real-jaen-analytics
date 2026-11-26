@@ -145,11 +145,13 @@ def _load_control(resources):
         workdir = os.environ.get('SPORTS_DATA_WORKDIR')
         if not workdir:
             raise ValueError('SPORTS_DATA_WORKDIR es obligatorio en control PostgreSQL')
-        from persistencia.postgresql import crear_motor_postgresql
+        from persistencia.postgresql import crear_motor_heartbeat_postgresql, crear_motor_postgresql
 
         motor = crear_motor_postgresql()
         resources.callback(motor.dispose)
-        coordinator = CoordinadorPostgreSQL(motor, scope, workdir)
+        heartbeat_motor = crear_motor_heartbeat_postgresql()
+        resources.callback(heartbeat_motor.dispose)
+        coordinator = CoordinadorPostgreSQL(motor, scope, workdir, heartbeat_motor=heartbeat_motor)
     else:
         database = os.environ.get('SPORTS_DATA_DB')
         if not database:

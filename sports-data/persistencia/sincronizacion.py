@@ -716,6 +716,16 @@ def bloquear_escritura_postgresql(conexion):
                      {'namespace': PG_LOCK_NAMESPACE, 'lock_id': PG_LOCK_SPORTS_IMPORT})
 
 
+def intentar_bloquear_escritura_postgresql(conexion):
+    """Try the shared sports-writer lock without waiting, for background recovery only."""
+    if conexion.dialect.name != 'postgresql':
+        raise ValueError('El bloqueo de importación requiere una conexión PostgreSQL')
+    if not conexion.in_transaction():
+        raise ValueError('La transacción PostgreSQL debe estar abierta y gestionada por quien llama')
+    return bool(conexion.execute(text('SELECT pg_try_advisory_xact_lock(:namespace, :lock_id)'),
+                                 {'namespace': PG_LOCK_NAMESPACE, 'lock_id': PG_LOCK_SPORTS_IMPORT}).scalar_one())
+
+
 def importar_evidencia_postgresql(conexion, exportaciones=(), calendarios=(), fichas=(), entradas=(), comando=None):
     """Apply an incremental sports import in the caller's PostgreSQL transaction.
 

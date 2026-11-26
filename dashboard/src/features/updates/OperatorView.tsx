@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { Button } from "@/ui/Button";
 import { PageHeader } from "@/ui/PageHeader";
@@ -15,7 +16,9 @@ import css from "./Updates.module.css";
  * Whatever happens, the last valid data stay published.
  */
 export function OperatorView() {
-  const { status, job, busy, problem, publishedNow, start, cancel, reload } = useUpdates();
+  const { status, statusFresh, job, busy, problem, publishedNow, start, cancel, reload, registerStatusReader } = useUpdates();
+
+  useEffect(() => registerStatusReader(), [registerStatusReader]);
 
   if (status === null) {
     return <>
@@ -42,6 +45,9 @@ export function OperatorView() {
         <p className={css.muted} role="status">
           La actualización no está disponible ahora. Puedes seguir consultando los datos publicados; el estado se comprobará de nuevo automáticamente.
         </p>
+      ) : null}
+      {!statusFresh ? (
+        <p className={css.muted} role="status">Se muestra el último estado confirmado; la comprobación más reciente no respondió.</p>
       ) : null}
       {scope ? (
         <section className={css.section} aria-labelledby="alcance">
@@ -93,7 +99,7 @@ export function OperatorView() {
               {job?.cancelRequested ? "Cancelando…" : job?.cancellable ? "Cancelar" : "Ya no se puede cancelar"}
             </Button>
           ) : (
-            <Button disabled={busy || !status.available} onClick={start} variant="primary">
+            <Button disabled={busy || !status.available || !statusFresh} onClick={start} variant="primary">
               {status.available ? scope.actionLabel : "No disponible"}
             </Button>
           )}
