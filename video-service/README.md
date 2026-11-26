@@ -7,7 +7,7 @@ Microservicio Python/FastAPI independiente de `api/` y `dashboard/`. Sirve calib
 - Las peticiones de consulta no ejecutan OCR, FFmpeg, Tesseract ni calibraciones. Solo `POST /api/v1/video-jobs` inicia un procesamiento en segundo plano.
 - Los MP4 y las calibraciones de cada instalación son datos operativos; no se versionan. El catálogo de ejemplo está vacío y permite instalar el servicio sin subir asociaciones ni resultados de calibración.
 - Los trabajos nuevos aceptan enlaces públicos HTTPS de YouTube reconocidos, no usan cookies y limitan vídeo, tamaño, duración, tiempo de descarga y trabajos activos. El MP4 se crea bajo un directorio temporal del servicio y se elimina antes de publicar la nueva asociación.
-- El estado operativo vive en una SQLite propia de Video Service y las nuevas calibraciones en el mismo volumen persistente. No se comparte ni se abre la base SQLite deportiva.
+- El modo predeterminado conserva el estado operativo y las calibraciones nuevas en una SQLite propia de Video Service. El modo PostgreSQL guarda estado y calibraciones en `video_service`; ambos modos son independientes y ninguno abre la SQLite deportiva.
 - No se infieren partidos a partir de nombres. Cada `video_id` se enlaza con una `match_ref` opaca y estable en el manifiesto operativo, que se mantiene fuera de Git.
 - Una baja desde el dashboard crea una marca persistente que evita que vuelva a aparecer una asociación estática al reiniciar o reconstruir.
 - Las escrituras de usuario pasan por el BFF autenticado de Next.js; Video Service solo se expone dentro de la red privada de Compose.
@@ -54,10 +54,15 @@ Por defecto escucha solo en `127.0.0.1:8010`. Configuración:
 |---|---|---|
 | `VIDEO_SERVICE_HOST` | `127.0.0.1` | Interfaz de escucha; en un contenedor se configurará normalmente como `0.0.0.0`. |
 | `VIDEO_SERVICE_PORT` | `8010` | Puerto HTTP. |
-| `VIDEO_SERVICE_DATA_DIR` | `video-service/data` | Directorio de solo lectura con el manifiesto operativo y las calibraciones de la instalación. |
-| `VIDEO_SERVICE_MANIFEST` | `videos.json` | Nombre relativo al directorio de datos. No admite rutas absolutas ni `..`. |
-| `VIDEO_SERVICE_STATE_DIR` | `video-service/storage/state` | SQLite y calibraciones creadas por trabajos. Montar en almacenamiento persistente. |
+| `VIDEO_SERVICE_DATA_DIR` | `video-service/data` | En SQLite, directorio de solo lectura con el manifiesto y calibraciones de la instalación; PostgreSQL lo ignora. |
+| `VIDEO_SERVICE_MANIFEST` | `videos.json` | En SQLite, nombre relativo al directorio de datos. No admite rutas absolutas ni `..`; PostgreSQL lo ignora. |
+| `VIDEO_SERVICE_STATE_DIR` | `video-service/storage/state` | En SQLite, almacén persistente de estado y calibraciones; PostgreSQL no lo abre. |
 | `VIDEO_SERVICE_TEMP_DIR` | `video-service/storage/tmp` | Archivos temporales de trabajo; dentro de Compose se monta en memoria bajo `/tmp/video-service`. |
+| `VIDEO_SERVICE_STORAGE` | `sqlite` | `sqlite` conserva el modo habitual; `postgresql` usa `VIDEO_SERVICE_DATABASE_URL` sin abrir SQLite ni leer el manifiesto local. |
+| `VIDEO_SERVICE_DATABASE_URL` | — | URL directa a `video_service`, usando el rol de ejecución `video_service_app`; las conexiones remotas requieren TLS verificado. |
+| `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL` | — | Debe valer `1` solo para conexiones de prueba a loopback local. |
+| `VIDEO_SERVICE_JOB_LEASE_SECONDS` | `60` | Duración del lease PostgreSQL; entero positivo. |
+| `VIDEO_SERVICE_JOB_HEARTBEAT_SECONDS` | `15` | Renovación del lease; entero positivo y menor que la duración del lease. |
 
 Se puede copiar `.env.example` para documentar valores locales; la aplicación no carga archivos `.env` automáticamente. Los valores se proporcionan al proceso desde el entorno.
 
@@ -107,7 +112,7 @@ Inicia un trabajo y responde `202` con su identificador. El BFF envía `match_re
 
 ### `GET /api/v1/video-jobs/{job_id}` y `GET /api/v1/matches/{match_ref}/video-job`
 
-Permiten consultar un trabajo concreto o recuperar el más reciente del partido. Estados: `pending`, `downloading`, `calibrating`, `saving`, `completed` y `failed`. Al reiniciar el servicio, los trabajos que no habían terminado se marcan como fallidos; no se declara una calibración completada sin haber guardado su JSON y la asociación.
+Permiten consultar un trabajo concreto o recuperar el más reciente del partido. Estados: `pending`, `downloading`, `calibrating`, `saving`, `completed` y `failed`. En SQLite se conserva la recuperación actual al reiniciar. En PostgreSQL solo se marcan como fallidos los trabajos con lease vencido; otra instalación no interrumpe un lease vigente.
 
 ### `DELETE /api/v1/matches/{match_ref}/video`
 
@@ -119,11 +124,11 @@ Los trabajos fallidos conservan un `error_code` estable: `video_unavailable`, `n
 
 ### Límites y limpieza de trabajos
 
-- Hasta dos trabajos activos registrados y un único calibrador/descargador ejecutándose a la vez.
+- Hasta dos trabajos activos registrados globalmente en PostgreSQL y un único calibrador/descargador ejecutándose por instalación.
 - Descarga MP4 de hasta 2,5 GB, duración de vídeo hasta 3 horas y hasta 1 hora de tiempo de descarga.
 - Antes de descargar se exige espacio libre para el máximo de descarga más 512 MiB. El tmpfs de Compose tiene 4 GiB.
 - Se admite un único vídeo por URL; no se carga configuración local de `yt-dlp`, cookies, listas de reproducción ni URLs arbitrarias.
-- El trabajo tiene un subdirectorio `job-{uuid}`. Antes de completar se comprueba su eliminación. Al arrancar, se marcan trabajos interrumpidos y se limpian únicamente subdirectorios temporales con UUID y temporales de escritura incompletos del directorio persistente de calibraciones.
+- El trabajo tiene un subdirectorio `job-{uuid}`. Antes de completar se comprueba su eliminación. SQLite limpia temporales UUID abandonados al arrancar. PostgreSQL no borra carpetas compartidas al iniciar: elimina solo el directorio del trabajo propio cuando termina. MP4, informes OCR y JSON intermedios nunca se guardan en PostgreSQL.
 
 Ejemplo sintético usando el fixture `sample-full-match` incluido para las pruebas:
 
@@ -170,15 +175,13 @@ Este ejemplo y las calibraciones de prueba son sintéticos; no representan retra
 
 `V5.1_PROVENANCE.json` registra hashes de las fuentes del motor V5.1 copiadas a este servicio. No incluye hashes, nombres de vídeos, IDs de partidos ni resultados de calibraciones operativas.
 
-## PostgreSQL preparado (Hito 07A)
+## PostgreSQL de Video Service (Hitos 07A y 07B)
 
-El Hito 07A añade un esquema PostgreSQL independiente para la futura base `video_service`, una revisión Alembic `vg0001`, un importador explícito del estado SQLite/JSON y `PostgreSQLVideoCatalogReader`. El catálogo estático se guarda por separado de las asociaciones creadas por trabajos; los documentos de calibración, metadatos y eventos deportivos se guardan como JSONB. Las referencias `match_ref` siguen siendo opacas y no hay claves foráneas hacia Sports Data. Las desactivaciones con `active_video_id = null` y las asociaciones históricas se conservan.
+`vg0001` crea el esquema independiente y `vg0002` añade orden estable, heartbeat, secuencias de fencing y permisos mínimos de escritura. El catálogo estático permanece de solo lectura para `video_service_app`; las referencias de partido son opacas y no hay claves foráneas hacia Sports Data. Las calibraciones nuevas se guardan como JSONB junto con la asociación, el override y el estado completado del trabajo en una transacción.
 
-La aplicación FastAPI de este hito sigue usando SQLite. No actives el lector PostgreSQL en el arranque ni inicies trabajos sobre PostgreSQL hasta completar el Hito 07B. El rol habitual `video_service_app` tiene permisos de solo lectura; las migraciones y la importación usan `VIDEO_SERVICE_MIGRATION_DATABASE_URL` con credenciales administrativas separadas.
+Para ejecutar PostgreSQL, configura `VIDEO_SERVICE_STORAGE=postgresql` y `VIDEO_SERVICE_DATABASE_URL` con credenciales de `video_service_app`. El arranque verifica el esquema, pero nunca ejecuta migraciones ni abre SQLite, carga `videos.json` o lee calibraciones persistentes locales. `VIDEO_SERVICE_MIGRATION_DATABASE_URL` se reserva para migraciones explícitas e importación inicial con credenciales administrativas separadas. Las conexiones remotas exigen TLS con validación completa de certificado y hostname. Para un PostgreSQL local de ensayo, declara `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL=1`; solo se admite loopback.
 
-Configura `VIDEO_SERVICE_DATABASE_URL` y `VIDEO_SERVICE_MIGRATION_DATABASE_URL` en el entorno del proceso. Las conexiones remotas exigen TLS con validación completa del certificado y hostname. Para un PostgreSQL de ensayo en loopback, la opción local debe declararse explícitamente con `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL=1`; solo afecta a hosts loopback.
-
-Desde `video-service`, aplica el esquema antes de importar datos:
+Desde `video-service`, aplica explícitamente el esquema antes de importar datos:
 
 ```bash
 alembic -c alembic.ini upgrade head
@@ -187,7 +190,11 @@ python scripts/migrate_to_postgresql.py \
   --catalog-dir /ruta/al/catalogo-estatico
 ```
 
-El importador abre `video-service.sqlite` en modo de solo lectura, valida las calibraciones y el manifiesto, exige tablas PostgreSQL vacías y una fuente sin trabajos activos, y confirma todo en una sola transacción. No elimina ni modifica los archivos de origen y no se ejecuta al iniciar el servicio. La guía de variables y migraciones está en [`docs/postgresql-neon.md`](../docs/postgresql-neon.md).
+La importación inicial abre SQLite en modo de solo lectura, valida calibraciones y manifiesto, exige un destino vacío y una fuente sin trabajos activos, y confirma en una transacción. No elimina ni modifica el origen. No se ejecuta al iniciar el servicio. La guía ampliada está en [`docs/postgresql-neon.md`](../docs/postgresql-neon.md).
+
+Cada instalación PostgreSQL recibe un UUID de propietario. Los leases predeterminados duran 60 segundos y el heartbeat se renueva cada 15; los parámetros se configuran con `VIDEO_SERVICE_JOB_LEASE_SECONDS` y `VIDEO_SERVICE_JOB_HEARTBEAT_SECONDS`. Un bloqueo asesor coordina la capacidad global de dos trabajos, los duplicados, la publicación y la desactivación. Los fencing tokens impiden escrituras del propietario anterior. El arranque recupera solo leases vencidos; si no se puede determinar el resultado de un commit, conserva el estado para reconciliarlo y no declara fallida una publicación confirmada.
+
+El procesamiento conserva un worker por instalación. MP4, informes OCR y JSON intermedio permanecen en el directorio temporal local y se eliminan antes de publicar. No se transfieren archivos entre instalaciones ni se borran carpetas ajenas al arrancar. SQLite sigue siendo el modo predeterminado provisional. PostgreSQL se alojará posteriormente en SINBAD²; las validaciones del Hito 07B usan un contenedor PostgreSQL 18 local temporal, sin Neon.
 
 ## Pruebas
 
@@ -206,4 +213,4 @@ Las pruebas usan calibraciones sintéticas pequeñas y transporte HTTP ASGI. No 
 - En ambos entornos, Compose monta el catálogo externo en solo lectura bajo `/app/data`; desarrollo lo configura mediante `RJ_DEV_VIDEO_CATALOG_DIR` y producción mediante `RJ_VIDEO_CATALOG_DIR`. Los volúmenes `rja-dev-video-state` y `RJ_PROD_VIDEO_STATE_VOLUME` conservan el estado y las calibraciones que crea el servicio. Ningún volumen de Video Service se comparte con Sports Data.
 - El contrato neutral `video-sync.sports-events` v1 se valida y persiste junto al trabajo. El motor no requiere conexión a SQLite ni a ningún proveedor deportivo.
 - El dashboard autentica y protege los cambios mediante su BFF de mismo origen. La API de Video Service es interna y no implementa autenticación propia; no debe publicarse directamente.
-- La implementación no elimina vídeos remotos, no sube archivos locales y no usa IA. Los trabajos en cola que no han empezado se cancelan en el apagado; un proceso interrumpido se registra como fallido y sus temporales se limpian al reiniciar.
+- La implementación no elimina vídeos remotos, no sube archivos locales y no usa IA. En PostgreSQL, el cierre espera a los workers antes de cerrar el motor y mantiene los leases renovados mientras terminan. Una interrupción recupera solo leases vencidos. SQLite conserva la cancelación de trabajos en cola durante el apagado.

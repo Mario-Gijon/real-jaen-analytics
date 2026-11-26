@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from video_service.catalog import CatalogError, VideoCatalog, validate_calibration_document
 from video_service.postgresql import create_video_service_engine
+from video_service.youtube import youtube_video_id
 
 
 TABLES = (
@@ -198,6 +199,8 @@ def _load_static_catalog(catalog_dir: Path, manifest_name: str) -> tuple[list[di
         records.append({
             "video_id": record.video_id, "display_name": record.display_name, "match_ref": record.match_ref,
             "origin": record.origin, "source_url": record.source_url,
+            "youtube_video_id": (youtube_video_id(record.source_url)
+                                 if record.origin == "youtube" and record.source_url else None),
             "calibration_file": record.calibration_file, "calibration_id": calibration_id,
             "synchronization_status": record.synchronization_status,
         })
@@ -232,8 +235,8 @@ def migrate(engine: Engine, state_dir: Path, catalog_dir: Path,
     """).bindparams(bindparam("document", type_=JSONB))
     catalog_insert = text("""
         INSERT INTO video_service_catalog_video
-            (video_id,display_name,match_ref,origin,source_url,calibration_file,calibration_id,synchronization_status)
-        VALUES (:video_id,:display_name,:match_ref,:origin,:source_url,:calibration_file,:calibration_id,:synchronization_status)
+            (video_id,display_name,match_ref,origin,source_url,youtube_video_id,calibration_file,calibration_id,synchronization_status)
+        VALUES (:video_id,:display_name,:match_ref,:origin,:source_url,:youtube_video_id,:calibration_file,:calibration_id,:synchronization_status)
     """)
     association_insert = text("""
         INSERT INTO video_service_association

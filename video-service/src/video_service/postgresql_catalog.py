@@ -1,6 +1,7 @@
-"""Read-only PostgreSQL catalogue and job reader for the Hito 07A transition."""
+"""Coherent PostgreSQL catalogue and job reads for Video Service."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import bindparam, text
@@ -9,12 +10,11 @@ from sqlalchemy.dialects.postgresql import ARRAY, TEXT
 
 from .catalog import CatalogError, VideoRecord, validate_calibration_document
 from .postgresql import create_video_service_engine
-from .youtube import InvalidYouTubeUrl, youtube_video_id
 
 
 _STATIC = text("""
     SELECT video_id, display_name, match_ref, origin, source_url,
-           calibration_file, calibration_id, synchronization_status
+           calibration_file, calibration_id, synchronization_status, youtube_video_id
     FROM video_service_catalog_video
 """)
 _OVERRIDES = text("SELECT match_id, active_video_id FROM video_service_match_video_override")
@@ -53,25 +53,26 @@ class PostgreSQLVideoCatalogReader:
             "synchronization_status": row["synchronization_status"],
         }
 
-    def _record(self, row: Any) -> VideoRecord:
+    @contextmanager
+    def _snapshot(self):
+        with self.engine.connect() as raw_connection:
+            connection = raw_connection.execution_options(isolation_level="REPEATABLE READ")
+            with connection.begin():
+                connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                yield connection
+
+    def _record(self, row: Any, connection, *, include_calibration: bool = True) -> VideoRecord:
         document = None
         calibration_id = row["calibration_id"]
-        if calibration_id:
-            with self.engine.connect() as connection:
-                document = connection.execute(
-                    text("SELECT document FROM video_service_calibration WHERE calibration_id=:id"),
-                    {"id": calibration_id},
-                ).scalar_one_or_none()
+        if include_calibration and calibration_id:
+            document = connection.execute(text("""
+                SELECT document FROM video_service_calibration WHERE calibration_id=:id
+            """), {"id": calibration_id}).scalar_one_or_none()
             if document is None:
                 raise CatalogError("La calibración registrada no tiene documento persistido.")
             document = validate_calibration_document(document)
-        if row["synchronization_status"] == "calibrated" and (
-            document is None or document.get("status") != "calibrated"
-            or isinstance(document.get("version"), bool)
-            or not isinstance(document.get("version"), int)
-            or document["version"] < 1
-        ):
-            raise CatalogError("La calibración persistida no coincide con su estado registrado.")
+        if include_calibration:
+            self._validate_calibration_state(row, document)
         return VideoRecord(
             video_id=row["video_id"],
             display_name=row["display_name"],
@@ -83,23 +84,32 @@ class PostgreSQLVideoCatalogReader:
             calibration=document,
         )
 
-    def _visible_metadata(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _validate_calibration_state(row: Any, document: dict[str, Any] | None) -> None:
+        if row["synchronization_status"] == "calibrated" and (
+            document is None or document.get("status") != "calibrated"
+            or isinstance(document.get("version"), bool)
+            or not isinstance(document.get("version"), int)
+            or document["version"] < 1
+        ):
+            raise CatalogError("La calibración persistida no coincide con su estado registrado.")
+
+    def _visible_metadata(self, connection) -> list[dict[str, Any]]:
         """Fetch metadata in bounded queries; calibration documents are intentionally excluded."""
-        with self.engine.connect() as connection:
-            static_rows = [dict(row) for row in connection.execute(_STATIC).mappings()]
-            overrides = {
-                row["match_id"]: row["active_video_id"]
-                for row in connection.execute(_OVERRIDES).mappings()
-            }
-            active_ids = list(dict.fromkeys(value for value in overrides.values() if value is not None))
-            runtime_rows = {}
-            if active_ids:
-                result = connection.execute(text("""
-                    SELECT video_id, match_id, youtube_video_id, source_url,
-                           calibration_file, calibration_id, synchronization_status
-                    FROM video_service_association WHERE video_id = ANY(:ids)
-                """), {"ids": active_ids}).mappings()
-                runtime_rows = {row["video_id"]: dict(row) for row in result}
+        static_rows = [dict(row) for row in connection.execute(_STATIC).mappings()]
+        overrides = {
+            row["match_id"]: row["active_video_id"]
+            for row in connection.execute(_OVERRIDES).mappings()
+        }
+        active_ids = list(dict.fromkeys(value for value in overrides.values() if value is not None))
+        runtime_rows = {}
+        if active_ids:
+            result = connection.execute(text("""
+                SELECT video_id, match_id, youtube_video_id, source_url,
+                       calibration_file, calibration_id, synchronization_status
+                FROM video_service_association WHERE video_id = ANY(:ids)
+            """), {"ids": active_ids}).mappings()
+            runtime_rows = {row["video_id"]: dict(row) for row in result}
 
         static_matches = {row["match_ref"] for row in static_rows}
         visible: list[dict[str, Any]] = []
@@ -121,42 +131,41 @@ class PostgreSQLVideoCatalogReader:
             visible.append(self._runtime_row(runtime))
         return sorted(visible, key=lambda row: row["video_id"])
 
+    def list_metadata(self) -> list[VideoRecord]:
+        """Return API list fields without selecting JSONB calibration documents."""
+        with self._snapshot() as connection:
+            rows = self._visible_metadata(connection)
+            return [self._record(row, connection, include_calibration=False) for row in rows]
+
     def list(self) -> list[VideoRecord]:
-        rows = self._visible_metadata()
-        calibration_ids = list(dict.fromkeys(row["calibration_id"] for row in rows if row["calibration_id"]))
-        docs: dict[str, Any] = {}
-        if calibration_ids:
-            with self.engine.connect() as connection:
-                docs = {
-                    row["calibration_id"]: row["document"]
-                    for row in connection.execute(_CALIBRATIONS, {"calibration_ids": calibration_ids}).mappings()
-                }
-        records = []
-        for row in rows:
-            document = docs.get(row["calibration_id"]) if row["calibration_id"] else None
-            if row["calibration_id"] and document is None:
-                raise CatalogError("La calibración registrada no tiene documento persistido.")
-            if document is not None:
-                document = validate_calibration_document(document)
-            if row["synchronization_status"] == "calibrated" and (
-                document is None or document.get("status") != "calibrated"
-                or isinstance(document.get("version"), bool)
-                or not isinstance(document.get("version"), int)
-                or document["version"] < 1
-            ):
-                raise CatalogError("La calibración persistida no coincide con su estado registrado.")
-            records.append(VideoRecord(
-                video_id=row["video_id"], display_name=row["display_name"], match_ref=row["match_ref"],
-                origin=row["origin"], source_url=row["source_url"], calibration_file=row["calibration_file"],
-                synchronization_status=row["synchronization_status"], calibration=document,
-            ))
-        return records
+        with self._snapshot() as connection:
+            rows = self._visible_metadata(connection)
+            calibration_ids = list(dict.fromkeys(row["calibration_id"] for row in rows if row["calibration_id"]))
+            docs = {
+                row["calibration_id"]: row["document"]
+                for row in connection.execute(_CALIBRATIONS, {"calibration_ids": calibration_ids}).mappings()
+            } if calibration_ids else {}
+            records = []
+            for row in rows:
+                document = docs.get(row["calibration_id"]) if row["calibration_id"] else None
+                if row["calibration_id"] and document is None:
+                    raise CatalogError("La calibración registrada no tiene documento persistido.")
+                if document is not None:
+                    validate_calibration_document(document)
+                self._validate_calibration_state(row, document)
+                records.append(VideoRecord(
+                    video_id=row["video_id"], display_name=row["display_name"],
+                    match_ref=row["match_ref"], origin=row["origin"], source_url=row["source_url"],
+                    calibration_file=row["calibration_file"],
+                    synchronization_status=row["synchronization_status"], calibration=document,
+                ))
+            return records
 
     def get(self, video_id: str) -> VideoRecord | None:
-        with self.engine.connect() as connection:
+        with self._snapshot() as connection:
             static = connection.execute(text("""
                 SELECT video_id, display_name, match_ref, origin, source_url,
-                       calibration_file, calibration_id, synchronization_status
+                       calibration_file, calibration_id, synchronization_status, youtube_video_id
                 FROM video_service_catalog_video WHERE video_id=:video_id
             """), {"video_id": video_id}).mappings().first()
             if static is not None:
@@ -182,13 +191,14 @@ class PostgreSQLVideoCatalogReader:
                 if override is None or override["active_video_id"] != video_id:
                     return None
                 row = self._runtime_row(runtime)
-        return self._record(row)
+            record = self._record(row, connection)
+        return record
 
     def for_match(self, match_ref: str) -> VideoRecord | None:
-        with self.engine.connect() as connection:
+        with self._snapshot() as connection:
             static_rows = list(connection.execute(text("""
                 SELECT video_id, display_name, match_ref, origin, source_url,
-                       calibration_file, calibration_id, synchronization_status
+                       calibration_file, calibration_id, synchronization_status, youtube_video_id
                 FROM video_service_catalog_video WHERE match_ref=:match_ref ORDER BY video_id
             """), {"match_ref": match_ref}).mappings())
             override = connection.execute(text("""
@@ -205,24 +215,34 @@ class PostgreSQLVideoCatalogReader:
                 if runtime is None:
                     raise CatalogError("La asociación activa no tiene un registro persistente.")
                 row = self._runtime_row(runtime)
-        if static_row is not None:
-            return self._record(static_row)
-        if override is None:
-            return None
-        return self._record(row)
+            if static_row is not None:
+                return self._record(static_row, connection)
+            if override is None:
+                return None
+            return self._record(row, connection)
 
     association_for_match = for_match
 
     def for_youtube_id(self, expected_youtube_id: str) -> VideoRecord | None:
-        for row in self._visible_metadata():
-            if row["origin"] != "youtube" or not row["source_url"]:
-                continue
-            try:
-                if youtube_video_id(row["source_url"]) == expected_youtube_id:
-                    return self._record(row)
-            except InvalidYouTubeUrl:
-                continue
-        return None
+        with self._snapshot() as connection:
+            static = [dict(row) for row in connection.execute(text("""
+                SELECT video_id,display_name,match_ref,origin,source_url,calibration_file,
+                       calibration_id,synchronization_status,youtube_video_id
+                FROM video_service_catalog_video AS s
+                WHERE s.youtube_video_id=:youtube_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM video_service_match_video_override AS o WHERE o.match_id=s.match_ref
+                  )
+            """), {"youtube_id": expected_youtube_id}).mappings()]
+            runtime = [self._runtime_row(row) for row in connection.execute(text("""
+                SELECT a.video_id,a.match_id,a.youtube_video_id,a.source_url,a.calibration_file,
+                       a.calibration_id,a.synchronization_status
+                FROM video_service_association AS a
+                JOIN video_service_match_video_override AS o ON o.active_video_id=a.video_id
+                WHERE a.youtube_video_id=:youtube_id
+            """), {"youtube_id": expected_youtube_id}).mappings()]
+            rows = sorted(static + runtime, key=lambda row: row["video_id"])
+            return self._record(rows[0], connection) if rows else None
 
     def calibration(self, video_id: str) -> dict[str, Any] | None:
         record = self.get(video_id)
@@ -251,7 +271,7 @@ class PostgreSQLVideoCatalogReader:
                 SELECT job_id, match_id, youtube_video_id, status, message, error_code, created_at, updated_at
                 FROM video_service_job
                 WHERE match_id=:match_id AND status IN ('pending','downloading','calibrating','saving','failed')
-                ORDER BY created_at DESC, legacy_order DESC NULLS LAST, job_id DESC LIMIT 1
+                ORDER BY created_at DESC, created_order DESC, job_id DESC LIMIT 1
             """), {"match_id": match_ref}).mappings().first()
         return self._public_job(row) if row else None
 

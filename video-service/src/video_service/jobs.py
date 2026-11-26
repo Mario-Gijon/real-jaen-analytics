@@ -8,11 +8,15 @@ import logging
 from pathlib import Path
 import re
 import shutil
+from threading import Event, Lock, Thread
 from typing import Any, Callable
 import uuid
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from .catalog import _load_calibration
 from .downloader import DEFAULT_MAX_BYTES, DownloadError, download_youtube_video
+from .postgresql_state import CommitOutcomeUnknown, JobOwnershipLost
 from .state import VideoStateStore
 from .youtube import youtube_video_id
 
@@ -38,17 +42,49 @@ class VideoJobManager:
         self.max_bytes = max_bytes
         self.max_duration_seconds = max_duration_seconds
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-job")
+        self._fencing_tokens: dict[str, int] = {}
+        self._tokens_lock = Lock()
+        self._heartbeat_stop = Event()
+        self._heartbeat_thread: Thread | None = None
 
     def prepare(self) -> None:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        if getattr(self.store, "is_postgresql", False):
+            try:
+                self.store.recover_interrupted_jobs()
+            except SQLAlchemyError as exc:
+                logger.warning("Video PostgreSQL unavailable during recovery error_type=%s", type(exc).__name__)
+            self._heartbeat_thread = Thread(target=self._heartbeat_loop, name="video-job-heartbeat", daemon=True)
+            self._heartbeat_thread.start()
+            return
         self.store.recover_interrupted_jobs()
         self.store.cleanup_calibration_temps()
         self.cleanup_orphans()
 
     def close(self) -> None:
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        if getattr(self.store, "is_postgresql", False):
+            # Keep the shared engine alive until every owned task has stopped
+            # writing; queued jobs remain protected by their renewed leases.
+            self.executor.shutdown(wait=True, cancel_futures=False)
+            if self._heartbeat_thread is not None:
+                self._heartbeat_stop.set()
+                self._heartbeat_thread.join()
+        else:
+            # Preserve SQLite's existing shutdown behavior.
+            self.executor.shutdown(wait=False, cancel_futures=True)
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(self.store.heartbeat_seconds):
+            try:
+                self.store.renew_leases()
+            except Exception as exc:
+                logger.warning("Video job heartbeat failed error_type=%s", type(exc).__name__)
 
     def cleanup_orphans(self) -> None:
+        if getattr(self.store, "is_postgresql", False):
+            # The same temp root may be mounted by another live installation;
+            # PostgreSQL mode only removes the directory owned by its worker.
+            return
         root = self.temp_dir.resolve()
         if not root.is_dir():
             return
@@ -66,13 +102,13 @@ class VideoJobManager:
         # in a share link are not needed for download or persistent metadata.
         source_url = f"https://www.youtube.com/watch?v={video_id}"
         job_id = str(uuid.uuid4())
-        self.store.create_job(job_id, match_ref, video_id, source_url, sports_events,
-                              max_active_jobs=max_active_jobs)
+        public_job, fencing_token = self.store.create_job(
+            job_id, match_ref, video_id, source_url, sports_events, max_active_jobs=max_active_jobs)
+        if fencing_token is not None:
+            with self._tokens_lock:
+                self._fencing_tokens[job_id] = fencing_token
         self.executor.submit(self._process, job_id)
-        result = self.store.get_job(job_id)
-        if result is None:
-            raise RuntimeError("No se pudo recuperar el trabajo recién creado.")
-        return result
+        return public_job
 
     def _load_calibrator(self):
         if self.calibrator is not None:
@@ -105,11 +141,43 @@ class VideoJobManager:
             raise OSError("No se pudo limpiar el directorio temporal del trabajo.")
 
     def _progress(self, job_id: str, status: str, message: str) -> None:
-        self.store.update_job(job_id, status=status, message=message)
+        token = self._fencing_token(job_id)
+        if getattr(self.store, "is_postgresql", False):
+            if token is None or not self.store.is_owned(job_id, token):
+                raise JobOwnershipLost("El lease del trabajo ya no pertenece a esta instalación.")
+            self.store.update_job(job_id, status=status, message=message, fencing_token=token)
+        else:
+            self.store.update_job(job_id, status=status, message=message)
+
+    def _ensure_owned(self, job_id: str) -> None:
+        if getattr(self.store, "is_postgresql", False):
+            token = self._fencing_token(job_id)
+            if token is None or not self.store.is_owned(job_id, token):
+                raise JobOwnershipLost("El lease del trabajo ya no pertenece a esta instalación.")
+
+    def _fencing_token(self, job_id: str) -> int | None:
+        with self._tokens_lock:
+            return self._fencing_tokens.get(job_id)
+
+    def _mark_failed(self, job_id: str, *, message: str, error_code: str) -> None:
+        try:
+            token = self._fencing_token(job_id)
+            if getattr(self.store, "is_postgresql", False):
+                if token is None:
+                    return
+                self.store.update_job(job_id, status="failed", message=message,
+                                      error_code=error_code, fencing_token=token)
+            else:
+                self.store.update_job(job_id, status="failed", message=message, error_code=error_code)
+        except JobOwnershipLost:
+            return
+        except Exception as exc:
+            logger.warning("Could not persist failed video job job=%s error_type=%s", job_id, type(exc).__name__)
 
     def _process(self, job_id: str) -> None:
         work_dir = self._work_dir(job_id)
         try:
+            self._ensure_owned(job_id)
             persisted_input = self.store.processing_input(job_id)
             if persisted_input is None:
                 raise ValueError("El trabajo no contiene su entrada persistida.")
@@ -118,6 +186,7 @@ class VideoJobManager:
             sports_events = persisted_input["sports_events"]
             youtube_id = youtube_video_id(source_url)
             self._progress(job_id, "downloading", "Descargando la versión actual del vídeo de YouTube.")
+            self._ensure_owned(job_id)
             self.temp_dir.mkdir(parents=True, exist_ok=True)
             if shutil.disk_usage(self.temp_dir).free < self.max_bytes + MIN_FREE_SPACE_MARGIN_BYTES:
                 raise DownloadError(
@@ -133,6 +202,7 @@ class VideoJobManager:
             if size <= 0 or size > self.max_bytes:
                 raise DownloadError("El archivo descargado está vacío o supera el tamaño máximo permitido.")
 
+            self._ensure_owned(job_id)
             video_info = self._load_probe()(resolved_video)
             duration = video_info.get("duration_seconds")
             if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
@@ -144,6 +214,7 @@ class VideoJobManager:
             events_status = "used" if sports_events is not None and sports_events.get("events") else "not_available"
             calibration_path = work_dir / "calibration.json"
             report_dir = work_dir / "ocr-report"
+            self._ensure_owned(job_id)
             report = self._load_calibrator()(
                 resolved_video,
                 output_path=calibration_path,
@@ -163,6 +234,7 @@ class VideoJobManager:
             if persisted_report.get("status") != report.get("status"):
                 raise ValueError("El informe devuelto y el JSON OCR no coinciden.")
 
+            self._ensure_owned(job_id)
             self._progress(job_id, "saving", "Verificando y guardando la calibración persistente.")
             processed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             persisted_report.setdefault("video", {})["path"] = None
@@ -191,6 +263,7 @@ class VideoJobManager:
             # Validate the sanitized persisted form with the same loader the
             # public catalogue uses, before publishing any active association.
             persisted_report = _load_calibration(work_dir, "calibration.json", 0)
+            self._ensure_owned(job_id)
             video_id = f"youtube-{job_id}"
             sync_status = "calibrated" if persisted_report.get("status") == "calibrated" else "uncertain"
             evidence_message = ("Se incorporaron los eventos deportivos recibidos como apoyo a la calibración."
@@ -224,32 +297,38 @@ class VideoJobManager:
                 synchronization_status=sync_status,
                 metadata=metadata,
                 message=message,
+                **({"fencing_token": self._fencing_token(job_id)}
+                   if getattr(self.store, "is_postgresql", False) else {}),
             )
+        except JobOwnershipLost:
+            logger.info("Discarded unowned video job result job=%s", job_id)
+        except CommitOutcomeUnknown:
+            logger.warning("Video publication outcome unknown job=%s", job_id)
         except DownloadError as exc:
             logger.warning("Video download failed job=%s category=%s exception=%s exit_code=%s",
                            job_id, exc.error_code, exc.technical_type or "VideoServiceDownloadError", exc.exit_code)
-            self.store.update_job(job_id, status="failed", message=str(exc), error_code=exc.error_code)
+            self._mark_failed(job_id, message=str(exc), error_code=exc.error_code)
         except OSError as exc:
             logger.warning("Video storage failed job=%s exception=%s errno=%s",
                            job_id, type(exc).__name__, exc.errno)
-            self.store.update_job(
+            self._mark_failed(
                 job_id,
-                status="failed",
                 message="Video Service no pudo escribir en su almacenamiento temporal. Comprueba el espacio y los permisos.",
                 error_code="storage_error",
             )
-        except Exception:
-            logger.exception("Video processing failed for job %s", job_id)
-            self.store.update_job(
+        except Exception as exc:
+            logger.error("Video processing failed job=%s error_type=%s", job_id, type(exc).__name__)
+            self._mark_failed(
                 job_id,
-                status="failed",
                 message="El procesamiento OCR no pudo completarse. Comprueba el vídeo e inténtalo de nuevo.",
                 error_code="processing_failed",
             )
         finally:
+            with self._tokens_lock:
+                self._fencing_tokens.pop(job_id, None)
             try:
                 self._remove_work_dir(work_dir, job_id)
             except OSError:
                 # The persistent job remains truthful; startup cleanup retries
                 # only these UUID-owned job folders.
-                logger.exception("Could not clean temporary files for job %s", job_id)
+                logger.error("Could not clean temporary files for job %s", job_id)

@@ -118,7 +118,8 @@ class VideoStateStore:
                 child.unlink(missing_ok=True)
 
     def create_job(self, job_id: str, match_ref: str, youtube_video_id: str, source_url: str,
-                   sports_events: dict[str, Any] | None, *, max_active_jobs: int = 2) -> None:
+                   sports_events: dict[str, Any] | None, *, max_active_jobs: int = 2
+                   ) -> tuple[dict[str, Any], None]:
         now = utc_now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -137,6 +138,8 @@ class VideoStateStore:
                       json.dumps(sports_events, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
                       if sports_events is not None else None))
                 connection.commit()
+                row = connection.execute("SELECT * FROM video_job WHERE job_id=?", (job_id,)).fetchone()
+                return self._public_job(row), None
             except sqlite3.IntegrityError as exc:
                 connection.rollback()
                 active = connection.execute("""
