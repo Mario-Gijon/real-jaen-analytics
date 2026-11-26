@@ -21,6 +21,9 @@ RUN apt-get update \
 
 COPY --chown=10001:10001 src ./src
 COPY --chown=10001:10001 data ./data
+COPY --chown=10001:10001 alembic.ini ./alembic.ini
+COPY --chown=10001:10001 migrations ./migrations
+COPY --chown=10001:10001 scripts ./scripts
 RUN if [ ! -f ./data/videos.json ]; then cp ./data/videos.example.json ./data/videos.json; fi
 
 USER 10001:10001

@@ -21,8 +21,8 @@ def run_migrations_online() -> None:
                 "SELECT current_database(), current_user, current_setting('server_version_num')::integer, "
                 "to_regclass('public.alembic_version') IS NOT NULL"
             )).one()
-            if database != 'sports_data' or role != 'neondb_owner' or version < 180000:
-                raise RuntimeError('La migración PostgreSQL solo admite sports_data, PostgreSQL 18 y neondb_owner')
+            if database != 'sports_data' or role != 'sports_data_owner' or not 180000 <= version < 190000:
+                raise RuntimeError('La migración requiere sports_data, PostgreSQL 18 y sports_data_owner')
             if not ya_inicializada:
                 objetos = conexion.execute(text(
                     "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "

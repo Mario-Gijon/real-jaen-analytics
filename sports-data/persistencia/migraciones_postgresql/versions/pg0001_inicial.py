@@ -882,19 +882,19 @@ def upgrade() -> None:
     op.execute('GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO sports_data_app')
     op.execute('REVOKE ALL PRIVILEGES ON TABLE public.alembic_version FROM sports_data_app')
     op.execute(
-        'ALTER DEFAULT PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public '
+        'ALTER DEFAULT PRIVILEGES FOR ROLE sports_data_owner IN SCHEMA public '
         'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sports_data_app'
     )
     op.execute(
-        'ALTER DEFAULT PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public '
+        'ALTER DEFAULT PRIVILEGES FOR ROLE sports_data_owner IN SCHEMA public '
         'GRANT USAGE ON SEQUENCES TO sports_data_app'
     )
 
 
 def downgrade() -> None:
-    op.execute('ALTER DEFAULT PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public '
+    op.execute('ALTER DEFAULT PRIVILEGES FOR ROLE sports_data_owner IN SCHEMA public '
                'REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM sports_data_app')
-    op.execute('ALTER DEFAULT PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public '
+    op.execute('ALTER DEFAULT PRIVILEGES FOR ROLE sports_data_owner IN SCHEMA public '
                'REVOKE USAGE ON SEQUENCES FROM sports_data_app')
     op.execute('REVOKE USAGE ON SCHEMA public FROM sports_data_app')
     op.execute('DROP VIEW IF EXISTS public.call_up_vigente')

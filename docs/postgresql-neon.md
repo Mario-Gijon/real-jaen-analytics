@@ -1,5 +1,7 @@
 # PostgreSQL de desarrollo en Neon
 
+> **Documento histórico.** Neon ya no es la infraestructura objetivo. Se conserva como registro de los hitos previos y de la configuración creada entonces; Hito 08A no accedió al proyecto ni lo eliminó. La guía vigente es [PostgreSQL autogestionado](postgresql-self-hosted.md).
+
 ## Proyecto
 
 - Proyecto: `real-jaen-analytics-dev` (`red-leaf-83438333`).
@@ -30,7 +32,7 @@ Las dos variables `*_MIGRATION_DATABASE_URL` apuntan a su base correspondiente c
 
 ## Esquema Sports Data
 
-La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, está aplicada en `sports_data` de la rama `development`. El Hito 02 transfirió desde una copia completa de desarrollo validada 430.773 filas en las 40 tablas de negocio. No se transfirieron fotografías ni datos de Video Service. Las instrucciones para repetir la transferencia sobre un destino vacío están en [README de Sports Data](../sports-data/README.md#transferencia-de-datos-a-neon).
+La revisión PostgreSQL inicial `pg0001`, equivalente al esquema SQLite 0008, está aplicada en `sports_data` de la rama `development`. El Hito 02 transfirió desde una copia completa de desarrollo validada 430.773 filas en las 40 tablas de negocio. No se transfirieron fotografías ni datos de Video Service. El procedimiento actual para una instalación nueva está en la [guía de PostgreSQL autogestionado](postgresql-self-hosted.md#orden-de-importación).
 
 ## Lectura provisional de Sports Data
 

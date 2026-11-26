@@ -1,0 +1,115 @@
+name: ${PG_PROJECT_NAME:?Set PG_PROJECT_NAME in the external profile env file}
+
+services:
+  postgresql:
+    image: postgres:18-bookworm
+    entrypoint: [/usr/local/bin/rja-postgresql-entrypoint.sh]
+    command: [postgres]
+    restart: unless-stopped
+    shm_size: 256mb
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      PGDATA: /var/lib/postgresql/18/docker
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql
+      - type: bind
+        source: ./infra/postgresql/entrypoint.sh
+        target: /usr/local/bin/rja-postgresql-entrypoint.sh
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./infra/postgresql/init/10-create-service-roles.sh
+        target: /docker-entrypoint-initdb.d/10-create-service-roles.sh
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /run/postgresql-init-secrets
+    secrets:
+      - postgres_admin_password
+      - sports_data_owner_password
+      - sports_data_app_password
+      - video_service_owner_password
+      - video_service_app_password
+    networks: [postgresql-private]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -f "$${PGDATA}/.rja-bootstrap-complete" && pg_isready --username="$${POSTGRES_USER}" --dbname=postgres
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 12
+
+  migrate-sports-data:
+    profiles: [migrations]
+    build:
+      context: ./sports-data
+      dockerfile: Dockerfile
+    image: local/real-jaen-analytics/sports-data:${PG_TASK_IMAGE_TAG:-self-hosted-pg}
+    restart: "no"
+    user: "0:0"
+    entrypoint: [python, -B]
+    command: [-m, alembic, -c, alembic-postgresql.ini, upgrade, head]
+    environment:
+      SPORTS_DATA_MIGRATION_DATABASE_URL_FILE: /run/secrets/sports_data_migration_database_url
+      SPORTS_DATA_MIGRATION_ALLOWED_HOSTS: postgresql
+      POSTGRES_ALLOW_PRIVATE_DOCKER_NO_TLS: "1"
+      POSTGRES_PRIVATE_DOCKER_HOSTS: postgresql
+    secrets: [sports_data_migration_database_url]
+    networks: [postgresql-private]
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
+  migrate-video-service:
+    profiles: [migrations]
+    build:
+      context: ./video-service
+      dockerfile: Dockerfile
+    image: local/real-jaen-analytics/video-service:${PG_TASK_IMAGE_TAG:-self-hosted-pg}
+    restart: "no"
+    user: "0:0"
+    entrypoint: [python, -B]
+    command: [-m, alembic, -c, alembic.ini, upgrade, head]
+    environment:
+      VIDEO_SERVICE_MIGRATION_DATABASE_URL_FILE: /run/secrets/video_service_migration_database_url
+      VIDEO_SERVICE_MIGRATION_ALLOWED_HOSTS: postgresql
+      POSTGRES_ALLOW_PRIVATE_DOCKER_NO_TLS: "1"
+      POSTGRES_PRIVATE_DOCKER_HOSTS: postgresql
+    secrets: [video_service_migration_database_url]
+    networks: [postgresql-private]
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
+networks:
+  postgresql-private:
+    name: ${PG_NETWORK_NAME:?Set a unique PG_NETWORK_NAME for DEV or PROD}
+    internal: true
+
+volumes:
+  postgres-data:
+    name: ${PG_VOLUME_NAME:?Set a unique PG_VOLUME_NAME for DEV or PROD}
+
+secrets:
+  postgres_admin_password:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/postgres_admin_password
+  sports_data_owner_password:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/sports_data_owner_password
+  sports_data_app_password:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/sports_data_app_password
+  video_service_owner_password:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/video_service_owner_password
+  video_service_app_password:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/video_service_app_password
+  sports_data_migration_database_url:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/sports_data_migration_database_url
+  video_service_migration_database_url:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/video_service_migration_database_url

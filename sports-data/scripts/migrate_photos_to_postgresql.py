@@ -161,6 +161,17 @@ def _insert_rows(connection, table: str, rows: list[dict], sql: str) -> None:
 
 def migrate(source_root: Path | str, engine: Engine) -> dict:
     """Copy a validated SQLite store atomically into an empty pg0005 destination."""
+    with engine.connect() as destination:
+        database, role, version, has_revision = destination.execute(text("""
+            SELECT current_database(), current_user, current_setting('server_version_num')::integer,
+                   to_regclass('public.alembic_version') IS NOT NULL
+        """)).one()
+        revision = (destination.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one_or_none()
+                    if has_revision else None)
+    if (database != 'sports_data' or role != 'sports_data_owner'
+            or not 180000 <= version < 190000 or revision != 'pg0005'):
+        raise MigrationError('El destino requiere sports_data, PostgreSQL 18, sports_data_owner y pg0005')
+
     root = Path(source_root).expanduser()
     source_data = _source_rows(root)
     source, meta, blobs, content, imports, photos, entries, loose, source_stat = source_data

@@ -12,6 +12,7 @@
 !fotos/
 !fotos/*.py
 !alembic.ini
+!alembic-postgresql.ini
 !requirements-sql.txt
 !requirements-fastapi.txt
 !requirements-dev.txt
@@ -21,10 +22,13 @@
 !persistencia/**
 !enrichment/
 !enrichment/*.py
+!scripts/
 !scripts/initialize_snapshot.py
 !scripts/check_container.py
 !scripts/adopt_coordinator_fingerprint.py
 !scripts/adopt_comments_coverage_fingerprint.py
+!scripts/migrate_sqlite_to_postgresql.py
+!scripts/migrate_photos_to_postgresql.py
 **/__pycache__
 **/*.pyc
 **/.env*

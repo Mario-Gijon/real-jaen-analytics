@@ -1,0 +1,4 @@
+services:
+  postgresql:
+    ports:
+      - "127.0.0.1:${PG_LOCAL_PORT:-55432}:5432"

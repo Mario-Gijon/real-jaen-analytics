@@ -1,4 +1,4 @@
-"""Import the Sports Data SQLite 0008 snapshot into the empty Neon pg0001 database."""
+"""Import a Sports Data SQLite 0008 snapshot into an authorized empty pg0001 database."""
 from __future__ import annotations
 
 import argparse
@@ -13,16 +13,16 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterator, Sequence
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import psycopg
 from psycopg import sql
 
 from persistencia.postgresql import url_postgresql
 
 
-NEON_PROJECT_ID = 'red-leaf-83438333'
-NEON_BRANCH = 'development'
-# Pinned to the direct endpoint verified for this project and branch in Hito 00.
-NEON_ENDPOINT_HOST = 'ep-soft-glade-bh8z74nm.c-10.eu-central-1.aws.neon.tech'
 TABLAS_ESPERADAS = (
     'call_up', 'call_up_change', 'call_up_stat', 'competition', 'competition_external_id',
     'content', 'discrepancy', 'discrepancy_observation', 'discrepancy_reason', 'discrepancy_value',
@@ -67,11 +67,10 @@ def _connect_postgres(url) -> psycopg.Connection:
         'dbname': url.database,
         'user': url.username,
         'password': url.password,
-        'sslmode': url.query['sslmode'],
-        'sslrootcert': url.query['sslrootcert'],
-        'channel_binding': url.query['channel_binding'],
         'connect_timeout': 10,
     }
+    params.update({key: value for key, value in url.query.items()
+                   if key in {'sslmode', 'sslrootcert', 'channel_binding'}})
     if url.port is not None:
         params['port'] = url.port
     return psycopg.connect(**params, autocommit=True)
@@ -447,21 +446,18 @@ def _preflight_source(path: Path) -> tuple[sqlite3.Connection, dict[str, int], d
     return connection, counts, columns, order, before
 
 
-def _preflight_destination(connection: psycopg.Connection, url) -> tuple[
+def _preflight_destination(connection: psycopg.Connection) -> tuple[
     dict[str, dict[str, str]], dict[str, set[str]], dict[str, tuple[str, ...]],
     list[SequenceInfo], dict[str, tuple[int, bool]],
 ]:
-    if url.host != NEON_ENDPOINT_HOST:
-        raise MigrationError(
-            f'El endpoint no coincide con el proyecto {NEON_PROJECT_ID}, rama {NEON_BRANCH} verificados'
-        )
     with connection.cursor() as cursor:
         database, role, version, revision = cursor.execute(
             "SELECT current_database(), current_user, current_setting('server_version_num')::integer, "
             "(SELECT version_num FROM public.alembic_version)"
         ).fetchone()
-        if database != 'sports_data' or role != 'neondb_owner' or version < 180000 or revision != 'pg0001':
-            raise MigrationError('El destino no es sports_data, PostgreSQL 18, neondb_owner y revisión pg0001')
+        if (database != 'sports_data' or role != 'sports_data_owner'
+                or not 180000 <= version < 190000 or revision != 'pg0001'):
+            raise MigrationError('El destino requiere sports_data, PostgreSQL 18, sports_data_owner y revisión pg0001')
 
         tables = {
             row[0] for row in cursor.execute(
@@ -546,16 +542,16 @@ def _read_postgres_table_hashes(
     return _verify_postgres_table(connection, table, columns, primary_key, pg_types)
 
 
-def migrate(source_path: Path, *, authorize_external: bool) -> dict[str, int]:
-    if not authorize_external:
-        raise MigrationError('Para una carga real se requiere --authorize-external-hosting')
+def migrate(source_path: Path, *, authorize_destination: bool) -> dict[str, int]:
+    if not authorize_destination:
+        raise MigrationError('Confirma el destino autorizado con --authorize-destination')
 
     source, source_counts, source_schema, table_order, source_before = _preflight_source(source_path)
     url = url_postgresql('SPORTS_DATA_MIGRATION_DATABASE_URL')
     try:
         with _connect_postgres(url) as destination:
             pg_types, pg_columns, pg_primary_keys, sequences, old_sequence_states = _preflight_destination(
-                destination, url
+                destination
             )
             for table in TABLAS_ESPERADAS:
                 sqlite_columns, sqlite_pk = source_schema[table]
@@ -617,13 +613,13 @@ def migrate(source_path: Path, *, authorize_external: bool) -> dict[str, int]:
 
             with destination.cursor() as cursor:
                 size_bytes = cursor.execute('SELECT pg_database_size(current_database())').fetchone()[0]
-            print(f'project={NEON_PROJECT_ID} branch={NEON_BRANCH} database=sports_data revision=pg0001')
+            print('destination=authorized database=sports_data revision=pg0001')
             print(f'tables={len(TABLAS_ESPERADAS)} rows={sum(source_counts.values())}')
             for table in ('team', 'player', 'match', 'narrative_comment', 'narrative_comment_enrichment'):
                 print(f'rows_{table}={source_counts[table]}')
             print(f'rows_narrative_comment_enrichment_participant={source_counts["narrative_comment_enrichment_participant"]}')
             print(f'sequences={len(sequences)} state=verified')
-            print(f'postgres_database_size_bytes={size_bytes} quota_1_gb_percent={100*size_bytes/1_000_000_000:.2f}')
+            print(f'postgres_database_size_bytes={size_bytes}')
             print('pk_values_and_row_hashes=verified foreign_keys=enforced sqlite_source_unchanged=true')
             return source_counts
     finally:
@@ -631,13 +627,13 @@ def migrate(source_path: Path, *, authorize_external: bool) -> dict[str, int]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Transfiere una SQLite 0008 a la Neon sports_data vacía.')
+    parser = argparse.ArgumentParser(description='Transfiere una SQLite 0008 a una sports_data pg0001 vacía.')
     parser.add_argument('source_sqlite', type=Path, help='Ruta explícita a la copia SQLite 0008 consistente')
-    parser.add_argument('--authorize-external-hosting', action='store_true',
-                        help='Confirma que los datos reales pueden alojarse en Neon dev')
+    parser.add_argument('--authorize-destination', action='store_true',
+                        help='Confirma el host de destino permitido en SPORTS_DATA_MIGRATION_ALLOWED_HOSTS')
     args = parser.parse_args()
     try:
-        migrate(args.source_sqlite, authorize_external=args.authorize_external_hosting)
+        migrate(args.source_sqlite, authorize_destination=args.authorize_destination)
     except MigrationError as error:
         print(f'Error: {error}', file=sys.stderr)
         return 2

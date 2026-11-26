@@ -60,7 +60,8 @@ Por defecto escucha solo en `127.0.0.1:8010`. Configuración:
 | `VIDEO_SERVICE_TEMP_DIR` | `video-service/storage/tmp` | Archivos temporales de trabajo; dentro de Compose se monta en memoria bajo `/tmp/video-service`. |
 | `VIDEO_SERVICE_STORAGE` | `sqlite` | `sqlite` conserva el modo habitual; `postgresql` usa `VIDEO_SERVICE_DATABASE_URL` sin abrir SQLite ni leer el manifiesto local. |
 | `VIDEO_SERVICE_DATABASE_URL` | — | URL directa a `video_service`, usando el rol de ejecución `video_service_app`; las conexiones remotas requieren TLS verificado. |
-| `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL` | — | Debe valer `1` solo para conexiones de prueba a loopback local. |
+| `POSTGRES_ALLOW_INSECURE_LOCAL` | — | Debe valer `1` solo para conexiones de prueba a loopback local. |
+| `POSTGRES_ALLOW_PRIVATE_DOCKER_NO_TLS` | — | Excepción interna que requiere `POSTGRES_PRIVATE_DOCKER_HOSTS=postgresql` y red Docker privada. |
 | `VIDEO_SERVICE_JOB_LEASE_SECONDS` | `60` | Duración del lease PostgreSQL; entero positivo. |
 | `VIDEO_SERVICE_JOB_HEARTBEAT_SECONDS` | `15` | Renovación del lease; entero positivo y menor que la duración del lease. |
 
@@ -179,7 +180,7 @@ Este ejemplo y las calibraciones de prueba son sintéticos; no representan retra
 
 `vg0001` crea el esquema independiente y `vg0002` añade orden estable, heartbeat, secuencias de fencing y permisos mínimos de escritura. El catálogo estático permanece de solo lectura para `video_service_app`; las referencias de partido son opacas y no hay claves foráneas hacia Sports Data. Las calibraciones nuevas se guardan como JSONB junto con la asociación, el override y el estado completado del trabajo en una transacción.
 
-Para ejecutar PostgreSQL, configura `VIDEO_SERVICE_STORAGE=postgresql` y `VIDEO_SERVICE_DATABASE_URL` con credenciales de `video_service_app`. El arranque verifica el esquema, pero nunca ejecuta migraciones ni abre SQLite, carga `videos.json` o lee calibraciones persistentes locales. `VIDEO_SERVICE_MIGRATION_DATABASE_URL` se reserva para migraciones explícitas e importación inicial con credenciales administrativas separadas. Las conexiones remotas exigen TLS con validación completa de certificado y hostname. Para un PostgreSQL local de ensayo, declara `VIDEO_SERVICE_ALLOW_INSECURE_LOCAL=1`; solo se admite loopback.
+Para ejecutar PostgreSQL, configura `VIDEO_SERVICE_STORAGE=postgresql` y `VIDEO_SERVICE_DATABASE_URL` con credenciales de `video_service_app`. El arranque verifica el esquema, pero nunca ejecuta migraciones ni abre SQLite, carga `videos.json` o lee calibraciones persistentes locales. `VIDEO_SERVICE_MIGRATION_DATABASE_URL` se reserva para migraciones explícitas e importación inicial con `video_service_owner`. Las conexiones remotas exigen TLS con validación completa de certificado y hostname. Para PostgreSQL local, la opción sin TLS se admite únicamente en loopback o en el alias `postgresql` de la red privada Docker con autorización explícita.
 
 Desde `video-service`, aplica explícitamente el esquema antes de importar datos:
 
@@ -190,11 +191,11 @@ python scripts/migrate_to_postgresql.py \
   --catalog-dir /ruta/al/catalogo-estatico
 ```
 
-La importación inicial abre SQLite en modo de solo lectura, valida calibraciones y manifiesto, exige un destino vacío y una fuente sin trabajos activos, y confirma en una transacción. No elimina ni modifica el origen. No se ejecuta al iniciar el servicio. La guía ampliada está en [`docs/postgresql-neon.md`](../docs/postgresql-neon.md).
+La importación inicial abre SQLite en modo de solo lectura, valida calibraciones y manifiesto, exige `video_service`, PostgreSQL 18, `video_service_owner`, un host autorizado, `vg0002`, un destino vacío y una fuente sin trabajos activos, y confirma en una transacción. No elimina ni modifica el origen. No se ejecuta al iniciar el servicio. Consulta la [guía principal de PostgreSQL autogestionado](../docs/postgresql-self-hosted.md).
 
 Cada instalación PostgreSQL recibe un UUID de propietario. Los leases predeterminados duran 60 segundos y el heartbeat se renueva cada 15; los parámetros se configuran con `VIDEO_SERVICE_JOB_LEASE_SECONDS` y `VIDEO_SERVICE_JOB_HEARTBEAT_SECONDS`. Un bloqueo asesor coordina la capacidad global de dos trabajos, los duplicados, la publicación y la desactivación. Los fencing tokens impiden escrituras del propietario anterior. El arranque recupera solo leases vencidos; si no se puede determinar el resultado de un commit, conserva el estado para reconciliarlo y no declara fallida una publicación confirmada.
 
-El procesamiento conserva un worker por instalación. MP4, informes OCR y JSON intermedio permanecen en el directorio temporal local y se eliminan antes de publicar. No se transfieren archivos entre instalaciones ni se borran carpetas ajenas al arrancar. SQLite sigue siendo el modo predeterminado provisional. PostgreSQL se alojará posteriormente en SINBAD²; las validaciones del Hito 07B usan un contenedor PostgreSQL 18 local temporal, sin Neon.
+El procesamiento conserva un worker por instalación. MP4, informes OCR y JSON intermedio permanecen en el directorio temporal local y se eliminan antes de publicar. No se transfieren archivos entre instalaciones ni se borran carpetas ajenas al arrancar. SQLite sigue siendo el modo predeterminado provisional. La infraestructura PostgreSQL autogestionada se prepara por separado en la [guía principal](../docs/postgresql-self-hosted.md); este hito no integra los servicios ni despliega en SINBAD².
 
 ## Pruebas
 

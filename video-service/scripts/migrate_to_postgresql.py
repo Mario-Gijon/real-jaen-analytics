@@ -213,8 +213,25 @@ def _json_equal(left: Any, right: Any) -> bool:
     return left == right
 
 
+def _verify_destination(engine: Engine) -> None:
+    with engine.connect() as connection:
+        database, role, version, has_revision = connection.execute(text("""
+            SELECT current_database(), current_user, current_setting('server_version_num')::integer,
+                   to_regclass('public.video_service_alembic_version') IS NOT NULL
+        """)).one()
+        revision = (connection.execute(text(
+            "SELECT version_num FROM public.video_service_alembic_version"
+        )).scalar_one_or_none() if has_revision else None)
+    if (database != "video_service" or role != "video_service_owner"
+            or not 180000 <= version < 190000 or revision != "vg0002"):
+        raise MigrationInputError(
+            "El destino requiere video_service, PostgreSQL 18, video_service_owner y revisión vg0002."
+        )
+
+
 def migrate(engine: Engine, state_dir: Path, catalog_dir: Path,
             manifest_name: str = "videos.json") -> dict[str, int]:
+    _verify_destination(engine)
     state = _load_state(state_dir)
     runtime_calibrations = _collect_runtime_calibrations(state)
     static_catalog, static_calibrations = _load_static_catalog(catalog_dir, manifest_name)
