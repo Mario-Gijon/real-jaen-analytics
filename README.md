@@ -13,6 +13,21 @@ docker compose --env-file .env.dev -f compose.dev.yaml up -d --build
 
 El archivo incluye `.env.dev`, las contraseñas de desarrollo y los datos iniciales. No contiene vídeos originales ni cookies. El Dashboard queda en `http://localhost:33201`. La primera ejecución carga los datos solo en volúmenes vacíos; la lectura inicial de Sports Data puede tardar varios minutos y Compose espera antes de iniciar Dashboard. Los volúmenes que ya contienen datos no se sustituyen. Después, los cambios persisten en Docker.
 
+### Desarrollo con PostgreSQL
+
+La instalación SQLite anterior sigue siendo el arranque habitual. Para una instalación separada con PostgreSQL 18 local, prepara los dos archivos env privados (`.env.dev` y `.env.postgresql.dev`), genera los secretos fuera del repositorio y aplica lectura por el grupo privado del servicio. En un volumen nuevo, ejecuta primero las migraciones/importaciones explícitas indicadas en la guía y arranca los cuatro servicios después de tener ambos esquemas preparados:
+
+```sh
+scripts/create-postgresql-secrets.sh "$HOME/.local/share/real-jaen-analytics/postgresql/dev"
+scripts/prepare-postgresql-app-secrets.sh \
+  "$HOME/.local/share/real-jaen-analytics/postgresql/dev" ./.rja-private/secrets
+docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+  -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+  up -d --build --wait
+```
+
+Las migraciones e importaciones iniciales son tareas explícitas. Consulta [PostgreSQL autogestionado](docs/postgresql-self-hosted.md) para el orden y las modalidades remota y de producción. No uses `down -v` si quieres conservar los datos.
+
 ## Producción
 
 La producción de SINBAD² se actualiza mediante GitLab CI/CD después de fusionar cambios en `main`. La administración prepara la configuración y los cuatro volúmenes persistentes; la pipeline normal falla de forma segura si la instalación no está lista y nunca ejecuta la restauración inicial. No ejecutes `docker compose up` desde una release sin seguir el procedimiento documentado. Apache sirve el Dashboard bajo `/real-jaen` y reenvía al puerto local `8090`.

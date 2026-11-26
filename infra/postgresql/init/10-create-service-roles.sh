@@ -51,6 +51,3 @@ REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
 \connect video_service
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
 SQL
-
-touch "$PGDATA/.rja-bootstrap-complete"
-chmod 600 "$PGDATA/.rja-bootstrap-complete"

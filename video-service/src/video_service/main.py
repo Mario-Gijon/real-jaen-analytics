@@ -106,6 +106,11 @@ def create_app(catalog: VideoCatalog | None = None, *, state_dir: Path | None = 
         current_store = store
         current_service = service
         current_engine = None
+        # PostgreSQL mode reads the legacy restore marker only; it never opens
+        # the SQLite database or calibration directory.
+        restore_marker = (state_dir or configured_state_dir()) / ".real-jaen-restore-incomplete"
+        if restore_marker.exists() or restore_marker.is_symlink():
+            raise RuntimeError("Hay una restauración incompleta; no se inicia Video Service.")
         if storage_mode == "sqlite":
             current_store.initialize()
             current_service.prepare()
@@ -129,11 +134,12 @@ def create_app(catalog: VideoCatalog | None = None, *, state_dir: Path | None = 
                 logger.warning("Video PostgreSQL configuration unavailable error_type=%s", type(exc).__name__)
                 if current_service is not None:
                     current_service.close()
+                if current_store is not None and getattr(current_store, "is_postgresql", False):
+                    current_store.reader.close()
+                    current_store.close()
                 if current_engine is not None:
                     current_engine.dispose()
-                current_store = None
-                current_service = None
-                current_engine = None
+                raise RuntimeError("No se pudo inicializar el almacenamiento PostgreSQL de Video Service.") from None
         app.state.video_state = current_store
         app.state.video_job_manager = current_service
         app.state.video_storage_mode = storage_mode

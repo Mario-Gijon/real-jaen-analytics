@@ -1,6 +1,6 @@
 # PostgreSQL autogestionado
 
-Esta es la guía vigente para preparar PostgreSQL 18 autogestionado. DEV y PROD usan proyectos Compose, volúmenes, redes y credenciales distintos. Esta configuración no modifica `compose.dev.yaml`, `compose.prod.yaml` ni el despliegue GitLab; la integración de las aplicaciones queda para el Hito 08B.
+Esta es la guía para PostgreSQL 18 autogestionado. DEV y PROD usan proyectos Compose, volúmenes, redes y credenciales distintos. La integración PostgreSQL es opt-in: el arranque habitual de `compose.dev.yaml` sigue usando SQLite, `compose.prod.yaml` y el despliegue GitLab siguen sin cambios, y el override de producción se reserva para un cambio de despliegue futuro.
 
 ## Bases y roles
 
@@ -75,7 +75,7 @@ docker compose --env-file /ruta/privada/postgresql/dev.env \
 
 Las tareas están bajo un perfil y no se ejecutan al arrancar PostgreSQL ni los microservicios. Los comandos equivalentes pueden invocarse después como tareas explícitas del mecanismo automatizado, una vez adaptado en el Hito 08C; ese mecanismo no se ha cambiado aquí.
 
-Las imágenes de aplicación ejecutan el servicio con UID `10001`. Al integrar sus secretos de ejecución en el Hito 08B, el archivo `*_DATABASE_URL_FILE` debe llegar legible por ese UID mediante el almacén de secretos del entorno. No montes las credenciales owner ni la contraseña administrativa en el servicio.
+Las imágenes de Sports Data, Acquisition y Video Service ejecutan con UID `10001`. El sistema de archivos temporal usado en Arch en este entorno no admite ACL POSIX, así que el procedimiento reproducible usa el grupo primario privado propietario de los secretos: ejecuta `scripts/prepare-postgresql-app-secrets.sh PG_SECRET_DIR APP_SECRET_DIR` (solo el primer argumento para el modo remoto), que comprueba que sea un grupo privado del usuario actual y deja en modo `0640` exclusivamente las dos URLs de ejecución y, si se pasa, `control-token`/`acquisition-token`. Configura `RJ_APP_SECRET_GID` con el GID numérico que imprime y vuelve a ejecutar el helper después de crear o rotar secretos. Los servicios reciben ese GID como grupo suplementario, pero cada contenedor monta solo su URL; URLs owner/admin siguen en `0600` y no se montan en las aplicaciones. No uses un grupo compartido ni hagas archivos legibles por otros.
 
 ## Orden de importación
 
@@ -121,6 +121,114 @@ La revisión `pg0001` solo cambia el rol al que aplica los privilegios predeterm
 
 Alembic no vuelve a ejecutar una revisión que la base ya registra. Por ello, cambiar el archivo no modifica una instalación que ya aplicó `pg0001`: sus privilegios predeterminados anteriores siguen ligados a `neondb_owner`. Neon no se ha tocado. Antes de migrar el propietario de una base ya existente habrá que planificar y revisar sus propietarios y privilegios por separado; no se debe asumir que esta edición los transforma.
 
+## Integración de los cuatro servicios (Hito 08B)
+
+Los overrides opt-in no cambian los archivos SQLite habituales. Compose 2.24 o posterior es necesario para `!override` y `!reset`; la configuración se verificó con Docker Compose 5.6.1.
+
+### DEV autónomo: aplicaciones y PostgreSQL local
+
+1. Copia `.env.dev.example` a `.env.dev` y `.env.postgresql.dev.example` a `.env.postgresql.dev`. Ajusta los nombres de proyecto, red y volumen para que sean únicos. `PG_SECRET_DIR` debe señalar un directorio privado fuera del repositorio. `RJ_DEV_SECRET_DIR` puede usar el directorio `.rja-private/secrets` ya ignorado por Git o una ruta privada externa. La ruta de importación se conserva montada en solo lectura para la protección de restauración incompleta. Las variables antiguas de semilla/catálogo aún deben estar definidas para que Compose pueda interpolar `compose.dev.yaml`, aunque el override elimina esos mounts.
+2. Prepara los tokens y las contraseñas de Dashboard en el directorio privado de desarrollo como para el modo SQLite. Crea los secretos de PostgreSQL y el acceso de solo lectura a los secretos que usan los procesos UID `10001`:
+
+   ```bash
+   scripts/create-postgresql-secrets.sh "$HOME/.local/share/real-jaen-analytics/postgresql/dev"
+   scripts/prepare-postgresql-app-secrets.sh \
+     "$HOME/.local/share/real-jaen-analytics/postgresql/dev" ./.rja-private/secrets
+   ```
+
+   Copia `RJ_APP_SECRET_GID` que imprime el helper a `.env.postgresql.dev`; el valor de ejemplo `1000` debe reemplazarse por el GID real de tu grupo privado.
+
+3. Arranca PostgreSQL y prepara las imágenes de las tareas de migración. En una instalación nueva, todavía no inicies las aplicaciones porque el esquema aún no existe:
+
+   ```bash
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     up -d --wait postgresql
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     --profile migrations build migrate-sports-data migrate-video-service
+   ```
+
+4. Inicializa el esquema y, solo cuando corresponda, importa una copia explícita desde el directorio externo montado en `/imports`. El destino deportivo debe estar primero en `pg0001`; después de importar, se aplica el resto de migraciones. El catálogo/calibraciones de Video Service se importa con su tarea owner explícita. Estos comandos no se ejecutan al iniciar los servicios:
+
+   ```bash
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     --profile migrations run --rm migrate-sports-data \
+     -m alembic -c alembic-postgresql.ini upgrade pg0001
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     --profile migrations run --rm -v /ruta/privada/imports:/imports:ro \
+     migrate-sports-data scripts/migrate_sqlite_to_postgresql.py \
+     /imports/real-jaen.sqlite --authorize-destination
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     --profile migrations run --rm migrate-sports-data
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     --profile migrations run --rm migrate-video-service -m alembic -c alembic.ini upgrade vg0002
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     --profile migrations run --rm \
+     -v /ruta/privada/video-catalog:/imports/catalog:ro \
+     migrate-video-service scripts/migrate_to_postgresql.py \
+     --catalog-dir /imports/catalog
+   ```
+
+   Si hay fotografías legacy, impórtalas únicamente después de `pg0005`, con una copia explícita de `fotos.sqlite` y `blobs/`, usando el comando de importación de fotos descrito arriba. Para el estado operativo de Video Service el comando de importación puede recibir además `--state-dir`; no es necesario para catálogo y calibraciones estáticas.
+
+5. Con ambos esquemas preparados y los datos iniciales cargados, arranca los cuatro servicios. El puerto del Dashboard debe estar libre; el puerto opcional de PostgreSQL no forma parte del perfil integrado:
+
+   ```bash
+   docker compose --env-file .env.dev --env-file .env.postgresql.dev \
+     -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+     up -d --build --wait
+   ```
+
+   Comprueba Dashboard en `http://127.0.0.1:${RJ_DEV_DASHBOARD_PORT}`. Para detener contenedores conservando los datos: `docker compose ... down` con los mismos archivos; no uses `down -v` salvo que quieras borrar los volúmenes de esa instalación.
+
+El override reemplaza el arranque de seed SQLite de Sports Data por un único worker y `SPORTS_DATA_WORKDIR=/state` en un volumen operativo separado. Conserva `/imports` solo en lectura y la comprobación `RJ_RESTORE_MARKER_FILE`; no monta `real-jaen.sqlite`, `fotos.sqlite` ni blobs. Video Service arranca directamente en PostgreSQL, no carga el catálogo estático ni monta estado SQLite/calibraciones JSON y mantiene un tmpfs propio para temporales. Sus fallos de conexión/esquema impiden el arranque y no producen fallback a SQLite. Acquisition conserva SQLite local de trabajos, perfil del navegador, contratos y control `ACQ_ENABLE_REAL`; no recibe URL PostgreSQL. Dashboard usa únicamente las APIs y no se conecta a PostgreSQL.
+
+### DEV con PostgreSQL remoto
+
+Usa esta modalidad solo cuando el administrador haya confirmado ruta privada, firewall, hostname/certificado TLS y acceso desde la máquina de desarrollo. No se presupone que SINBAD² permita esa conexión. Prepara `.env.dev` y `.env.postgresql.remote` a partir de los ejemplos. Crea fuera del repositorio los archivos `sports_data_database_url` y `video_service_database_url` con URLs de roles de aplicación, cada una para su base y con parámetros de TLS verificado; protege ambos inicialmente con modo `0600` y ejecuta `scripts/prepare-postgresql-app-secrets.sh "$RJ_REMOTE_DATABASE_SECRET_DIR"`. Copia el GID que imprime a `.env.postgresql.remote`. No pongas URLs owner ni admin en ese directorio.
+
+```bash
+docker compose --env-file .env.dev --env-file .env.postgresql.remote \
+  -f compose.dev.yaml -f compose.postgresql.remote.yaml \
+  up -d --build --wait
+```
+
+No incluyas `compose.postgresql.yaml`, no se levanta una base local. Solo Sports Data tiene una red de salida para su DB remota; Video Service usa su red de salida existente. La excepción Docker sin TLS se elimina en este perfil. No se incluyen tareas de migración y no se deben ejecutar migraciones/importadores contra un PostgreSQL compartido desde cada instalación local.
+
+### PROD preparado, no desplegado
+
+La combinación `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml` prepara Sports Data, Acquisition, Video Service, Dashboard y PostgreSQL en el mismo servidor. Usa el env protegido PROD, los nombres y secretos PROD separados, rutas de datos que preparen los administradores y el siguiente orden de archivos:
+
+```bash
+docker compose --env-file /ruta/segura/prod.env \
+  -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml \
+  config --services
+```
+
+El overlay conserva el Dashboard en `127.0.0.1:8090`, fija `NEXT_PUBLIC_BASE_PATH=/real-jaen` (también está compilado así en `dashboard/Dockerfile`), no publica PostgreSQL y no publica directamente los otros tres servicios. Solo Sports Data y Video Service se conectan a `postgresql-private`. Los nombres de volúmenes, red y secretos deben tener el prefijo/raíz PROD configurados en el env protegido y no reutilizar DEV. Esta modalidad es solo configuración revisable: no se levantó, desplegó ni cambió GitLab.
+
+### Healthcheck, puertos y límites
+
+El healthcheck de PostgreSQL requiere el marcador `.rja-bootstrap-complete` y `pg_isready`. El entrypoint escribe ese marcador solo después de que la imagen oficial haya salido del proceso de inicialización y el servidor definitivo acepte conexiones; lo borra al comenzar cada inicio. Así no cuenta el postmaster temporal que ejecuta los scripts de primer arranque.
+
+La publicación opcional por loopback (`compose.postgresql.local.yaml`) es para inspección desde el host; no se necesita para la comunicación entre contenedores. En el ensayo de 08B, Docker registró la declaración de publicación en `HostConfig.PortBindings`, pero no instaló un endpoint en `NetworkSettings.Ports`; una conexión TCP al puerto loopback elegido fue rechazada mientras `pg_isready` dentro del contenedor seguía respondiendo. La causa operativa apunta al daemon/runtime Docker de este entorno, no a PostgreSQL. Se mantiene la base en su red privada; no se abrió el puerto ni se modificó el aislamiento.
+
+### Validación local de 08B
+
+La validación integral utilizó un proyecto, volúmenes, red y secretos temporales propios con PostgreSQL 18, sin tocar la instalación habitual. Los cinco servicios (PostgreSQL, Sports Data, Acquisition, Video Service y Dashboard) terminaron saludables. Tras recrear los contenedores conservando los volúmenes, los esquemas seguían en `pg0005` y `vg0002`; persistían un comentario narrativo, un enriquecimiento, una fotografía, dos vídeos y dos calibraciones. El Dashboard superó inicio de sesión, sesión, fichas de equipo/jugador/partido, comentarios, enriquecimientos, recuperación HTTP de la fotografía, vídeo asociado, locate, sincronización y consulta del estado de actualizaciones.
+
+Una segunda instancia de Sports Data y Video Service, con volúmenes operativos separados, pudo leer el perfil de jugador con foto, el enriquecimiento compartido y el mismo catálogo/calibraciones, incluida sincronización y locate. Los roles app no pudieron conectar a la base ajena; cada servicio leyó solo su URL y no recibió URLs owner/admin. Acquisition no recibió secretos PostgreSQL. El Sports Data secundario validó también disponibilidad y el contrato de autenticación de Acquisition en modo de prueba: petición sin credencial `401` y petición autenticada a un recurso inexistente `404`.
+
+No se envió ninguna solicitud de actualización ni se hizo scraping. `ACQ_ENABLE_REAL=0`; se consultó el estado con la receta piloto oficial en modo fixture. El fixture deportivo contiene tres equipos, mientras que el perfil Group 2 exige el ámbito validado de veinte equipos, y no hay un paquete sellado de Acquisition apto para esta prueba. Por tanto, la ejecución completa de importación/publicación mediante un paquete sintético de Acquisition queda pendiente. Tampoco se descargaron vídeos ni se ejecutó OCR real.
+
+En el camino PostgreSQL, `/state` de Sports Data conservó únicamente `jobs.sqlite` como journal operativo local del coordinador; no aparecieron `real-jaen.sqlite`, `fotos.sqlite` ni blobs. Video Service no creó SQLite ni calibraciones JSON en `/state`; conserva su espacio temporal aislado. Acquisition mantiene legítimamente su SQLite local de trabajos y el perfil local del navegador.
+
 ## Estado de SINBAD²
 
-La configuración y las validaciones se prepararon en local y en GitHub. Quedan pendientes el acceso y las políticas de red de SINBAD², el aprovisionamiento de secretos en el entorno autorizado y la integración de los cuatro servicios con esta base en el Hito 08B. El despliegue automatizado permanece sin cambios hasta el Hito 08C.
+No se accedió ni se desplegó en SINBAD². Continúan pendientes la conectividad DEV compartida, el aprovisionamiento y entrega segura de secretos, el procedimiento de despliegue por release y la coordinación con los administradores. Los scripts y la configuración predeterminada de GitLab no se modifican en este hito.

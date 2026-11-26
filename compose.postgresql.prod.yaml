@@ -1,0 +1,87 @@
+# Opt-in single-host production integration. The ordinary GitLab Compose file
+# remains SQLite by default until a later deployment milestone.
+name: ${COMPOSE_PROJECT_NAME:-real-jaen-analytics-postgresql-prod}
+
+services:
+  postgresql:
+    networks: !override [postgresql-private]
+
+  sports-data:
+    entrypoint: !override [python, -B]
+    command: !override [-m, uvicorn, app:app, --host, 0.0.0.0, --port, "8002", --workers, "1"]
+    group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
+    environment:
+      SPORTS_DATA_STORAGE: postgresql
+      SPORTS_DATA_DB: !reset null
+      SPORTS_DATA_DATABASE_URL_FILE: /run/secrets/sports_data_database_url
+      SPORTS_DATA_WORKDIR: /state
+      SPORTS_DATA_CONTROL: "1"
+      SPORTS_DATA_ENRICHMENT_ENABLED: "1"
+      SPORTS_DATA_WORKERS: "1"
+      WEB_CONCURRENCY: "1"
+      POSTGRES_ALLOW_PRIVATE_DOCKER_NO_TLS: "1"
+      POSTGRES_PRIVATE_DOCKER_HOSTS: postgresql
+    volumes: !override
+      - type: volume
+        source: sports-operational-state
+        target: /state
+      - type: bind
+        source: ${RJ_IMPORT_DIR:?Set the external read-only import directory}
+        target: /imports
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${RJ_PROD_SECRET_DIR:?Set RJ_PROD_SECRET_DIR outside this repository}/control-token
+        target: /run/secrets/control-token
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${RJ_PROD_SECRET_DIR:?Set RJ_PROD_SECRET_DIR outside this repository}/acquisition-token
+        target: /run/secrets/acquisition-token
+        read_only: true
+        bind: {create_host_path: false}
+    secrets: !override [sports_data_database_url]
+    networks: [sports-data-internal, acquisition-control, postgresql-private]
+
+  acquisition:
+    group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
+
+  video-service:
+    entrypoint: !override [python, -B, -m, video_service]
+    command: !override []
+    group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
+    environment:
+      VIDEO_SERVICE_STORAGE: postgresql
+      VIDEO_SERVICE_DATABASE_URL_FILE: /run/secrets/video_service_database_url
+      VIDEO_SERVICE_DATA_DIR: !reset null
+      VIDEO_SERVICE_MANIFEST: !reset null
+      VIDEO_SERVICE_STATE_DIR: /state
+      POSTGRES_ALLOW_PRIVATE_DOCKER_NO_TLS: "1"
+      POSTGRES_PRIVATE_DOCKER_HOSTS: postgresql
+    volumes: !override
+      - type: volume
+        source: video-operational-state
+        target: /state
+    secrets: !override [video_service_database_url]
+    networks: [video-internal, video-egress, postgresql-private]
+
+  dashboard:
+    environment:
+      NEXT_PUBLIC_BASE_PATH: /real-jaen
+
+networks:
+  postgresql-private:
+    name: ${PG_NETWORK_NAME:?Set PG_NETWORK_NAME in the external profile env file}
+    internal: true
+
+volumes:
+  sports-operational-state:
+    name: ${RJ_PROD_NETWORK_PREFIX:-rja-prod}-sports-operational-state
+  video-operational-state:
+    name: ${RJ_PROD_NETWORK_PREFIX:-rja-prod}-video-operational-state
+
+secrets:
+  sports_data_database_url:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/sports_data_database_url
+  video_service_database_url:
+    file: ${PG_SECRET_DIR:?Set PG_SECRET_DIR outside the repository}/video_service_database_url
