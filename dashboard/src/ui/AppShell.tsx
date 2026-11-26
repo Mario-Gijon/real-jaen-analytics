@@ -10,8 +10,8 @@ import css from "./AppShell.module.css";
 /**
  * Analyst frame: Real Jaén identity, the two sections and the data-source
  * notice in one top bar (no sidebar for two entries), then the page content.
- * `actions`: an optional control at the right end of the bar (the update control); `session`: closing the
- * session. On the access screen only the identity is shown.
+ * `actions`: an optional account-bar control shown immediately before `session`. On the access screen only the
+ * identity is shown.
  */
 export function AppShell({ children, actions, session }: { children: ReactNode; actions?: ReactNode; session?: ReactNode }) {
   return (
@@ -37,14 +37,18 @@ export function AppShell({ children, actions, session }: { children: ReactNode; 
               </span>
             </Link>
             <HiddenOnAccess>
-              {session ? <div className={css.session}>{session}</div> : null}
+              {actions || session ? (
+                <div className={css.accountActions}>
+                  {actions}
+                  {session ? <div className={css.session}>{session}</div> : null}
+                </div>
+              ) : null}
             </HiddenOnAccess>
           </div>
           <HiddenOnAccess>
             <div className={css.navRow}>
               <MainNav />
               <SourceBadge />
-              {actions}
             </div>
           </HiddenOnAccess>
         </div>

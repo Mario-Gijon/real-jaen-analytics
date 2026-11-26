@@ -124,12 +124,18 @@
   margin-inline: auto;
 }
 
-/* The session control stays with the brand; the navigation gets its own row on phones. */
-.session {
+/* Account controls stay at the right edge, with the update link immediately before sign out. */
+.accountActions {
   display: flex;
+  align-items: center;
+  gap: var(--rj-space-2);
   flex: none;
   margin-left: auto;
   order: 10;
+}
+.session {
+  display: flex;
+  flex: none;
 }
 .session:empty {
   display: none;
@@ -148,7 +154,7 @@
     align-items: center;
     gap: 0 var(--rj-space-3);
   }
-  .session {
+  .accountActions {
     order: 0;
   }
   .inner {

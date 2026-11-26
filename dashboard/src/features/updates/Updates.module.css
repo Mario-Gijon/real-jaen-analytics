@@ -38,6 +38,22 @@
 .activityDot[data-active="true"] {
   visibility: visible;
 }
+@media (max-width: 640px) {
+  .navUpdates {
+    justify-content: center;
+    width: 36px;
+    min-height: 36px;
+    padding: 0;
+  }
+  .navLabel {
+    display: none;
+  }
+  .activityDot {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+  }
+}
 
 .summary {
   display: grid;

@@ -27,12 +27,13 @@ export function UpdateControl() {
   return (
     <Link
       aria-current={pathname === "/operador" ? "page" : undefined}
-      aria-label={running ? "Actualizaciones, actualización en curso" : "Actualizaciones"}
+      aria-label={running ? "Actualizar, actualización en curso" : "Actualizar"}
       className={css.navUpdates}
       href="/operador"
+      title="Actualizar"
     >
       <RefreshCw aria-hidden="true" size={16} />
-      <span>Actualizaciones</span>
+      <span className={css.navLabel}>Actualizar</span>
       <span aria-hidden="true" className={css.activityDot} data-active={running || undefined} />
     </Link>
   );
