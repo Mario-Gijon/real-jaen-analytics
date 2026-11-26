@@ -1,88 +1,265 @@
-/* Top bar: one state line and one action, at the right end of the bar. */
-.bar {
-  display: flex;
+.navUpdates {
+  position: relative;
+  display: inline-flex;
+  flex: none;
   align-items: center;
-  gap: var(--rj-space-3);
-  min-width: 0;
-  margin-left: auto;
-}
-.barState {
-  max-width: 260px;
-  overflow: hidden;
+  gap: var(--rj-space-2);
+  min-height: var(--rj-control-height);
+  padding: 0 var(--rj-space-3);
   border-radius: var(--rj-radius-sm);
   color: rgb(255 255 255 / 0.86);
-  font-size: var(--rj-text-xs);
+  font-size: var(--rj-text-sm);
   font-weight: 700;
   text-decoration: none;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  transition: background-color var(--rj-motion-fast), color var(--rj-motion-fast);
 }
-.barState:hover {
+.navUpdates:hover,
+.navUpdates[aria-current="page"] {
+  background: rgb(255 255 255 / 0.12);
   color: var(--rj-text-inverse);
-  text-decoration: underline;
 }
-.barState:focus-visible {
+.navUpdates[aria-current="page"] {
+  box-shadow: inset 0 -3px var(--rj-gold-600);
+}
+.navUpdates:focus-visible {
   outline: 3px solid var(--rj-gold-300);
   outline-offset: 2px;
 }
-/* Progress announcements for assistive technology, also on phones where the line is hidden. */
-.announce {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-/* On the purple bar the action uses the gold of the brand, not the purple primary. */
-.barButton {
-  flex-shrink: 0;
-  border-color: rgb(232 200 103 / 0.7);
+.activityDot {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--rj-purple-900);
+  border-radius: 50%;
   background: var(--rj-gold-300);
-  color: var(--rj-purple-900);
+  box-shadow: 0 0 0 2px rgb(232 200 103 / 0.2);
+  visibility: hidden;
 }
-.barButton:hover:not(:disabled) {
-  background: var(--rj-gold-50);
-}
-.barButton:focus-visible {
-  outline-color: var(--rj-gold-300);
-}
-.barProblem {
-  max-width: 220px;
-  color: var(--rj-danger);
-  font-size: var(--rj-text-xs);
+.activityDot[data-active="true"] {
+  visibility: visible;
 }
 
-/* Operator screen. */
-.section {
+.summary {
   display: grid;
+  gap: var(--rj-space-5);
+  width: min(100%, 860px);
+  margin: 0 auto var(--rj-space-8);
+  padding: clamp(var(--rj-space-4), 3vw, var(--rj-space-6));
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-md);
+  background: var(--rj-bg-card);
+  box-shadow: var(--rj-shadow-sm);
+}
+.summaryHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--rj-space-3);
-  max-width: 720px;
-  margin-bottom: var(--rj-space-8);
 }
-.section h2 {
+.lastUpdate {
+  display: grid;
+  gap: 3px;
+}
+.eyebrow {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.lastUpdate time {
+  color: var(--rj-text-primary);
+  font-size: var(--rj-text-md);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.success,
+.issueNotice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rj-space-2);
+  width: fit-content;
   margin: 0;
-  font-size: var(--rj-text-lg);
+  padding: 7px 11px;
+  border-radius: var(--rj-radius-pill);
+  font-size: var(--rj-text-sm);
+  font-weight: 700;
 }
-.section p {
+.success {
+  background: #e9f5ef;
+  color: var(--rj-success);
+}
+.issueNotice {
+  background: var(--rj-gold-50);
+  color: #79500a;
+}
+.notice {
   margin: 0;
-}
-.muted {
+  padding: var(--rj-space-3);
+  border-left: 3px solid var(--rj-purple-300);
+  border-radius: 0 var(--rj-radius-sm) var(--rj-radius-sm) 0;
+  background: var(--rj-bg-soft);
   color: var(--rj-text-secondary);
   font-size: var(--rj-text-sm);
 }
-.ok {
-  color: var(--rj-success);
-  font-weight: 700;
+.muted {
+  margin: 0;
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
 }
 .problem {
+  margin: 0;
   color: var(--rj-danger);
+  font-size: var(--rj-text-sm);
   font-weight: 700;
 }
-/* Published, with resources still pending: not an error, not a plain success. */
-.warn {
-  color: var(--rj-warning);
+.progressBlock {
+  display: grid;
+  gap: var(--rj-space-2);
+}
+.progressTitle {
+  margin: 0;
+  color: var(--rj-text-primary);
+  font-size: var(--rj-text-sm);
   font-weight: 700;
+}
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rj-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-pill);
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.steps li[data-state="done"] {
+  border-color: #b9ddca;
+  background: #f1f8f4;
+  color: var(--rj-success);
+}
+.steps li[data-state="current"] {
+  border-color: var(--rj-purple-500);
+  background: var(--rj-purple-100);
+  color: var(--rj-purple-900);
+  font-weight: 700;
+}
+.stepMarker {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgb(22 21 37 / 0.06);
+  font-size: 10px;
+  line-height: 1;
+}
+.steps li[data-state="done"] .stepMarker {
+  background: #d9eee2;
+}
+.steps li[data-state="current"] .stepMarker {
+  background: var(--rj-purple-200);
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--rj-space-3);
+}
+.metric {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: var(--rj-space-3);
+  border: 1px solid var(--rj-border-default);
+  border-radius: var(--rj-radius-sm);
+  background: var(--rj-bg-soft);
+}
+.metric span {
+  overflow-wrap: anywhere;
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-xs);
+  font-weight: 600;
+}
+.metric strong {
+  color: var(--rj-purple-900);
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.metric[data-alert="true"] strong {
+  color: var(--rj-warning);
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rj-space-3);
+}
+.details {
+  border-top: 1px solid var(--rj-border-default);
+}
+.details summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rj-space-3);
+  min-height: 44px;
+  padding-top: var(--rj-space-2);
+  color: var(--rj-purple-900);
+  font-size: var(--rj-text-sm);
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+.details summary::-webkit-details-marker {
+  display: none;
+}
+.details summary:focus-visible {
+  outline: var(--rj-focus-ring);
+  outline-offset: 3px;
+}
+.details summary svg {
+  flex: none;
+  transition: transform var(--rj-motion-fast);
+}
+.details[open] summary svg {
+  transform: rotate(180deg);
+}
+.detailsBody {
+  display: grid;
+  gap: var(--rj-space-4);
+  padding: var(--rj-space-2) 0 var(--rj-space-1);
+}
+.scopeDetails {
+  display: grid;
+  gap: var(--rj-space-2);
+  padding: var(--rj-space-3);
+  border-radius: var(--rj-radius-sm);
+  background: var(--rj-bg-soft);
+}
+.scopeDetails h2,
+.scopeDetails p {
+  margin: 0;
+}
+.scopeDetails h2 {
+  color: var(--rj-text-primary);
+  font-size: var(--rj-text-sm);
+}
+.scopeDetails p {
+  color: var(--rj-text-secondary);
+  font-size: var(--rj-text-sm);
 }
 .coverage {
   display: grid;
@@ -112,35 +289,19 @@
   color: var(--rj-text-secondary);
   font-size: var(--rj-text-xs);
 }
-.steps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--rj-space-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.steps li {
-  padding: 4px 10px;
-  border: 1px solid var(--rj-border-default);
-  border-radius: var(--rj-radius-pill);
-  color: var(--rj-text-secondary);
-  font-size: var(--rj-text-sm);
-}
-.steps li[aria-current="step"] {
-  border-color: var(--rj-purple-700);
-  background: var(--rj-purple-100);
-  color: var(--rj-purple-900);
-  font-weight: 700;
-}
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--rj-space-3);
-}
-/* Phones: the bar keeps only the action; its state is one tap away at /operador. */
-@media (max-width: 640px) {
-  .barState {
-    display: none;
+
+@media (max-width: 480px) {
+  .summary {
+    gap: var(--rj-space-4);
+    padding: var(--rj-space-4);
+  }
+  .metrics {
+    gap: var(--rj-space-2);
+  }
+  .metric {
+    padding: 10px;
+  }
+  .metric strong {
+    font-size: var(--rj-text-lg);
   }
 }

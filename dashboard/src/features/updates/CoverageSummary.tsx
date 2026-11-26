@@ -26,7 +26,9 @@ const COMMENT_UNAVAILABLE_LABELS: Record<string, string> = {
  * What a group update published: new data, previous data kept and pending resources, never mixed. A pending
  * resource is not "no data": it keeps the previous version if there was one, and is never shown as zero.
  */
-export function CoverageSummary({ coverage, requestedAt }: { coverage: UpdateCoverage; requestedAt?: string }) {
+export function CoverageSummary({ coverage, requestedAt, showResourceTotals = true }: {
+  coverage: UpdateCoverage; requestedAt?: string; showResourceTotals?: boolean;
+}) {
   // A match by its teams (named by the backend from the data just published), linked to its page.
   const MatchName = ({ matchId }: { matchId: string }) => {
     const sourceId = matchId.replace(/^sofascore-match-/, "");
@@ -74,15 +76,17 @@ export function CoverageSummary({ coverage, requestedAt }: { coverage: UpdateCov
           {coverage.operationSendsRemaining !== undefined ? `; quedan ${coverage.operationSendsRemaining}` : ""}.
         </p>
       ) : null}
-      <ul className={css.counts}>
-        <li><strong>{coverage.newResources}</strong> datos nuevos</li>
-        <li><strong>{coverage.keptResources}</strong> datos anteriores conservados</li>
-        {pendingByBudget ? (
-          <li><strong>{pendingWork.size}</strong> {pendingWork.size === 1 ? "elemento pendiente/aplazado" : "elementos pendientes/aplazados"}</li>
-        ) : (
-          <li>sin recursos pendientes por presupuesto</li>
-        )}
-      </ul>
+      {showResourceTotals ? (
+        <ul className={css.counts}>
+          <li><strong>{coverage.newResources}</strong> datos nuevos</li>
+          <li><strong>{coverage.keptResources}</strong> datos anteriores conservados</li>
+          {pendingByBudget ? (
+            <li><strong>{pendingWork.size}</strong> {pendingWork.size === 1 ? "elemento pendiente/aplazado" : "elementos pendientes/aplazados"}</li>
+          ) : (
+            <li>sin recursos pendientes por presupuesto</li>
+          )}
+        </ul>
+      ) : null}
       {coverage.pending.length ? (
         <>
           <h3>Pendientes</h3>

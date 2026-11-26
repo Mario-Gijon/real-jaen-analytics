@@ -1,4 +1,4 @@
-import { act, render as renderComponent, screen, waitFor } from "@testing-library/react";
+import { render as renderComponent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -6,6 +6,8 @@ import type { UpdateJob, UpdateStatus } from "@/contract";
 import { OperatorView } from "@/features/updates/OperatorView";
 import { UpdateControl } from "@/features/updates/UpdateControl";
 import { UpdatesProvider } from "@/features/updates/use-updates";
+
+vi.mock("next/navigation", () => ({ usePathname: () => "/" }));
 
 const SCOPE = { kind: "pilot" as const, label: "Actualización piloto: calendario de la jornada 1 y un partido", round: 1,
   actionLabel: "Actualizar piloto", description: "Consulta el calendario de la jornada 1 y un partido. No actualiza el resto de la jornada ni de la temporada: los demás partidos se conservan tal como están publicados.",
@@ -30,6 +32,10 @@ function api(handler: Handler, canUpdate = true) {
 }
 const posts = (fetch: ReturnType<typeof api>, path: string) =>
   fetch.mock.calls.filter(([url, init]) => String(url) === path && init?.method === "POST");
+const expandDetails = async () => {
+  const disclosure = await screen.findByText("Detalles de la actualización");
+  await userEvent.setup().click(disclosure);
+};
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -38,74 +44,108 @@ afterEach(() => {
 });
 
 describe("UpdateControl (top bar)", () => {
-  it("is hidden where updates do not exist", async () => {
-    for (const status of [{ available: false, scope: null, lastPublished: null, activeJob: null, lastJob: null, lastCoverage: null }]) {
-      const fetch = api(() => ({ body: status }));
-      const { container, unmount } = render(<UpdateControl />);
-      await waitFor(() => expect(fetch).toHaveBeenCalled());
-      expect(container).toBeEmptyDOMElement();
-      unmount();
-    }
+  it("keeps a permanent link to the updates screen when no scope is available", async () => {
+    const fetch = api(() => ({ body: { ...operatorStatus(), available: false, scope: null } }));
+    render(<UpdateControl />);
+    const link = screen.getByRole("link", { name: "Actualizaciones" });
+    expect(link).toHaveAttribute("href", "/operador");
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything()));
   });
 
-  it("hides all update controls and polling for a read-only session", async () => {
+  it("keeps navigation available to read-only sessions without starting update polling", async () => {
     const fetch = api(() => ({ body: operatorStatus() }), false);
-    const { container } = render(<UpdateControl />);
+    render(<UpdateControl />);
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything()));
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByRole("link", { name: "Actualizaciones" })).toHaveAttribute("href", "/operador");
     expect(fetch.mock.calls.some(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(false);
   });
 
-  it("clearly disables starting an update when Acquisition is unavailable", async () => {
-    const unavailable = operatorStatus({ available: false });
-    const fetch = api(() => ({ body: unavailable }));
+  it("shows a small activity indicator while a job is active", async () => {
+    const active = job({ pollAfterSeconds: 30 });
+    api(() => ({ body: operatorStatus({ activeJob: active }) }));
     render(<UpdateControl />);
-    const button = await screen.findByRole("button", { name: "Actualización temporalmente no disponible" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveTextContent("No disponible");
-    expect(fetch.mock.calls.some(([url]) => String(url) === "/api/v1/updates/current")).toBe(true);
+    const link = await screen.findByRole("link", { name: "Actualizaciones, actualización en curso" });
+    expect(link).toHaveAttribute("href", "/operador");
+    expect(link.querySelectorAll("svg")).toHaveLength(1);
+    expect(link.querySelector('[data-active="true"]')).not.toBeNull();
+    expect(link).toHaveTextContent("Actualizaciones");
   });
 
-  it("names the pilot scope, and repeated clicks send a single start with one key", async () => {
-    let release: () => void = () => {};
-    let started = false;
-    const fetch = api((url, init) => {
-      if (url === "/api/v1/updates" && init?.method === "POST") return { status: 202, body: { job: job(), reused: false } };
-      return { body: operatorStatus(started ? { activeJob: job({ pollAfterSeconds: 30 }) } : {}) };
-    });
-    render(<UpdateControl />);
-    const start = await screen.findByRole("button", { name: /Actualizar piloto: Actualización piloto/ });
-    expect(start).toHaveTextContent(/^Actualizar$/);
-    expect(screen.queryByText(/jornada completa|temporada/i)).toBeNull();
-    const user = userEvent.setup();
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    fetch.mockImplementationOnce(async () => {
-      await gate;
-      started = true;
-      return new Response(JSON.stringify({ job: job({ pollAfterSeconds: 30 }), reused: false }), { status: 202 });
-    });
-    await user.click(start);
-    await user.click(start);
-    await act(async () => release());
-    expect(await screen.findByRole("button", { name: "Cancelar" })).toBeVisible();
-    const sent = posts(fetch, "/api/v1/updates");
-    expect(sent).toHaveLength(1);
-    expect(new Headers(sent[0][1]!.headers).get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
-    expect(screen.getAllByText("Consultando datos…").length).toBeGreaterThan(0);
-  });
-
-  it("shares one status reader between the top bar and operator screen", async () => {
+  it("shares one status reader between the navigation and operator screen", async () => {
     const active = job({ pollAfterSeconds: 30 });
     const fetch = api(() => ({ body: operatorStatus({ activeJob: active }) }));
     render(<><UpdateControl /><OperatorView /></>);
-    await screen.findAllByRole("button", { name: "Cancelar" });
+    await screen.findByRole("button", { name: "Cancelar actualización" });
+    expect(screen.getByRole("link", { name: "Actualizaciones, actualización en curso" })).toBeVisible();
     await waitFor(() => {
       expect(fetch.mock.calls.filter(([url]) => String(url) === "/api/v1/updates/current")).toHaveLength(1);
     });
     expect(fetch.mock.calls.filter(([url]) => String(url) === `/api/v1/updates/${active.id}`)).toHaveLength(0);
   });
+});
 
-  it("retries a failed job poll and clears the transient error on success", async () => {
+describe("OperatorView (/operador)", () => {
+  it("keeps the status page and published data visible while Acquisition is unavailable", async () => {
+    const fetch = api(() => ({ body: operatorStatus({ available: false }) }));
+    render(<OperatorView />);
+    expect(await screen.findByText("El servicio de actualización no está disponible ahora.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Actualizar datos" })).toBeDisabled();
+    expect(screen.getByRole("heading", { name: "Actualizaciones" })).toBeVisible();
+    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true);
+  });
+
+  it("starts an update once with one idempotency key", async () => {
+    let started = false;
+    const fetch = api((url, init) => {
+      if (url === "/api/v1/updates" && init?.method === "POST") {
+        started = true;
+        return { status: 202, body: { job: job(), reused: false } };
+      }
+      return { body: operatorStatus(started ? { activeJob: job() } : {}) };
+    });
+    render(<OperatorView />);
+    expect(await screen.findByRole("heading", { name: "Actualizaciones" })).toBeVisible();
+    const start = await screen.findByRole("button", { name: "Actualizar datos" });
+    expect(start).toBeEnabled();
+    const user = userEvent.setup();
+    await user.click(start);
+    await user.click(start);
+    expect(await screen.findByRole("button", { name: "Cancelar actualización" })).toBeVisible();
+    const sent = posts(fetch, "/api/v1/updates");
+    expect(sent).toHaveLength(1);
+    expect(new Headers(sent[0][1]!.headers).get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(fetch.mock.calls.map(([url]) => String(url))).not.toContain("/api/v1/session");
+  });
+
+  it("shows pilot scope details only after expanding the technical section", async () => {
+    api(() => ({ body: operatorStatus() }));
+    render(<OperatorView />);
+    expect(await screen.findByRole("heading", { name: "Actualizaciones" })).toBeVisible();
+    const details = (await screen.findByText("Detalles de la actualización")).closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    await userEvent.setup().click(screen.getByText("Detalles de la actualización"));
+    expect(await screen.findByText(/No actualiza el resto de la jornada ni de la temporada/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Ver partido del piloto" })).toHaveAttribute("href", "/matches/sofascore-match-16599363");
+  });
+
+  it("shows a failed update as failed, keeping the previous data, and cancels only while consulting", async () => {
+    api(() => ({ body: operatorStatus({ lastJob: job({ status: "failed", phase: "finished", cancellable: false,
+      error: { code: "ACQUISITION_FAILED", message: "La consulta al proveedor no se completó o fue rechazada.", retryable: true } }) }) }));
+    render(<OperatorView />);
+    expect(await screen.findByText(/no se completó o fue rechazada\. Se mantienen los datos anteriores\./)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Actualizar datos" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Cancelar actualización" })).toBeNull();
+  });
+
+  it("shows compact phases and keeps cancellation available only when permitted", async () => {
+    api(() => ({ body: operatorStatus({ activeJob: job({ phase: "verifying", cancellable: false, pollAfterSeconds: 30 }) }) }));
+    render(<OperatorView />);
+    expect(await screen.findByText("Verificación")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByText("La fase de publicación ya no se puede cancelar.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Cancelar actualización" })).toBeNull();
+  });
+
+  it("retries a failed job poll, clears the transient error, and shows the success state", async () => {
     let polls = 0;
     const completed = job({ status: "completed", phase: "finished", published: true, cancellable: false,
       finishedAt: "2026-10-28T17:02:00Z",
@@ -118,69 +158,30 @@ describe("UpdateControl (top bar)", () => {
       return { body: operatorStatus(polls < 2 ? { activeJob: job() } : { lastJob: completed }) };
     });
     render(<OperatorView />);
-    await screen.findByRole("button", { name: "Cancelar" });
-    expect(await screen.findByRole("alert")).toBeVisible();
-    expect(await screen.findByRole("button", { name: "Recargar datos" }, { timeout: 5000 })).toBeVisible();
+    await screen.findByRole("button", { name: "Cancelar actualización" });
+    expect(await screen.findByRole("button", { name: "Ver datos publicados" }, { timeout: 5000 })).toBeVisible();
+    expect(screen.getByText("Datos actualizados")).toBeVisible();
     expect(polls).toBeGreaterThanOrEqual(2);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("follows the job to its publication and offers to reload the data", async () => {
+  it("uses one status poll and follows the active phase through completion", async () => {
     let polls = 0;
-    api((url) => {
-      if (url.startsWith("/api/v1/updates/7f1c")) {
+    const completed = job({ status: "completed", phase: "finished", published: true, cancellable: false, finishedAt: "2026-10-28T17:02:00Z",
+      result: { publishedAt: "2026-10-28T17:02:00Z", reusedBundle: false, coverage: null } });
+    const fetch = api((url) => {
+      if (url.startsWith(`/api/v1/updates/${completed.id}`)) {
         polls += 1;
-        return { body: polls < 2 ? job({ phase: "publishing", cancellable: false })
-          : job({ status: "completed", phase: "finished", published: true, cancellable: false, finishedAt: "2026-10-28T17:02:00Z",
-            result: { publishedAt: "2026-10-28T17:02:00Z", reusedBundle: false, coverage: null } }) };
+        return { body: polls < 2 ? job({ phase: "publishing", cancellable: false }) : completed };
       }
-      const done = job({ status: "completed", phase: "finished", published: true, cancellable: false,
-        finishedAt: "2026-10-28T17:02:00Z", result: { publishedAt: "2026-10-28T17:02:00Z", reusedBundle: false, coverage: null } });
-      return { body: polls < 2 ? operatorStatus({ activeJob: job() })
-        : operatorStatus({ lastJob: done, lastPublished: { at: "2026-10-28T17:02:00Z" } }) };
+      return { body: polls < 2 ? operatorStatus({ activeJob: job({ phase: "publishing", cancellable: false }) })
+        : operatorStatus({ lastJob: completed, lastPublished: { at: completed.result!.publishedAt } }) };
     });
-    render(<UpdateControl />);
-    expect(await screen.findByRole("button", { name: "Cancelar" })).toBeEnabled();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Cancelar" })).toBeDisabled(), { timeout: 3000 });
-    expect(await screen.findByRole("button", { name: "Recargar datos" }, { timeout: 4000 })).toBeVisible();
-    expect(screen.getAllByText(/Publicado el 28\/10/).length).toBeGreaterThan(0);
-  });
-});
-
-describe("OperatorView (/operador)", () => {
-  it("keeps the status page and published data visible while Acquisition is unavailable", async () => {
-    const fetch = api(() => ({ body: operatorStatus({ available: false }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/La actualización no está disponible ahora/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "No disponible" })).toBeDisabled();
-    expect(screen.getByRole("heading", { name: "Alcance" })).toBeVisible();
-    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true);
-  });
-
-  it("offers the update to the access session, without a second key, and says what the pilot does not update", async () => {
-    const fetch = api(() => ({ body: operatorStatus() }));
-    render(<OperatorView />);
-    expect(await screen.findByText(/No actualiza el resto de la jornada ni de la temporada/)).toBeVisible();
-    expect(screen.getByRole("link", { name: "Ver el partido del piloto" })).toHaveAttribute("href", "/matches/sofascore-match-16599363");
-    expect(screen.getByRole("button", { name: "Actualizar piloto" })).toBeVisible();
-    expect(screen.queryByLabelText(/Clave/)).toBeNull();
-    expect(fetch.mock.calls.map(([url]) => String(url))).not.toContain("/api/v1/session");
-  });
-
-  it("shows a failed update as failed, keeping the previous data, and cancels only while consulting", async () => {
-    api(() => ({ body: operatorStatus({ lastJob: job({ status: "failed", phase: "finished", cancellable: false,
-      error: { code: "ACQUISITION_FAILED", message: "La consulta al proveedor no se completó o fue rechazada.", retryable: true } }) }) }));
-    render(<OperatorView />);
-    expect(await screen.findByText(/no se completó o fue rechazada\. Se mantienen los datos anteriores\./)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Actualizar piloto" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Cancelar" })).toBeNull();
-  });
-
-  it("marks the current step and refuses to cancel once it verifies or publishes", async () => {
-    api(() => ({ body: operatorStatus({ activeJob: job({ phase: "verifying", cancellable: false, pollAfterSeconds: 30 }) }) }));
-    render(<OperatorView />);
-    expect(await screen.findByRole("button", { name: "Ya no se puede cancelar" })).toBeDisabled();
-    expect(screen.getByText("Comprobando los datos recibidos")).toHaveAttribute("aria-current", "step");
+    expect(await screen.findByText("Publicación")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Ver datos publicados" }, { timeout: 5000 })).toBeVisible();
+    expect(screen.getByText("Datos actualizados")).toBeVisible();
+    expect(fetch.mock.calls.filter(([url]) => String(url) === "/api/v1/updates/current")).toHaveLength(2);
   });
 });
 
@@ -209,14 +210,18 @@ describe("Group 2 scope", () => {
   const done = job({ status: "completed", phase: "finished", published: true, cancellable: false, finishedAt: "2026-10-28T17:02:00Z",
     result: { publishedAt: "2026-10-28T17:02:00Z", reusedBundle: false, coverage } });
 
-  it("says the update completed with pending items, and keeps new, kept and pending apart", async () => {
+  it("shows compact success metrics and keeps detailed coverage collapsed by default", async () => {
     const fetch = api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done, lastPublished: { at: "2026-10-28T17:02:00Z" } }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/^Actualización completada con pendientes/)).toBeVisible();
+    expect(await screen.findByText("Datos actualizados")).toBeVisible();
+    expect(screen.getByText("28/10, 18:02")).toBeVisible();
+    expect(screen.getByText("Datos nuevos").parentElement).toHaveTextContent("35");
+    expect(screen.getByText("Conservados").parentElement).toHaveTextContent("608");
+    expect(screen.getByText("Incidencias").parentElement).toHaveTextContent("4");
+    expect(screen.getByText("4 incidencias requieren revisión.")).toBeVisible();
+    expect(screen.getByText("Detalles de la actualización").closest("details")).not.toHaveAttribute("open");
+    await expandDetails();
     expect(screen.getByText(GROUP.description)).toBeVisible();
-    expect(screen.getByText("datos nuevos").parentElement).toHaveTextContent("35 datos nuevos");
-    expect(screen.getByText("datos anteriores conservados").parentElement).toHaveTextContent("608 datos anteriores conservados");
-    expect(screen.getByText(/elementos pendientes\/aplazados/).parentElement).toHaveTextContent("5 elementos pendientes/aplazados");
     const first = (await screen.findByRole("link", { name: "Real Jaén – CE Europa" })).closest("li")!;
     expect(first).toHaveTextContent("estadísticas (respuesta vacía, sin datos publicados)");
     const second = (await screen.findByRole("link", { name: "Huesca – UD Ibiza" })).closest("li")!;
@@ -229,14 +234,17 @@ describe("Group 2 scope", () => {
     expect(screen.getAllByRole("link", { name: "Real Jaén – CE Europa" })[0].parentElement).toHaveTextContent("SofaScore ID 1");
     expect(screen.getByText(/Solicitud recibida el 28\/10, 18:00/)).toBeVisible();
     expect(screen.getByText(/posible sustitución de/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Actualizar Grupo 2" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Actualizar datos" })).toBeEnabled();
     expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true); // no data API calls
   });
 
-  it("separates unavailable narrative from actual errors and keeps 404s non-fatal", async () => {
+  it("keeps real incidents visible and expected unavailable narrations in details", async () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/^Actualización completada con pendientes/)).toBeVisible();
+    expect(await screen.findByText("Datos actualizados")).toBeVisible();
+    expect(screen.queryByText(/completada con pendientes/i)).toBeNull();
+    expect(screen.getByText("4 incidencias requieren revisión.")).toBeVisible();
+    await expandDetails();
     expect(screen.getByText("partidos sin narración disponible").parentElement).toHaveTextContent("2 partidos sin narración disponible");
     expect(screen.getByText("partido con error de comentarios").parentElement).toHaveTextContent("1 partido con error de comentarios");
     const unavailable = screen.getByRole("list", { name: "Partidos sin narración disponible" });
@@ -251,22 +259,40 @@ describe("Group 2 scope", () => {
     expect(screen.getByText(/Los 404 y las listas vacías no bloquean resultados ni estadísticas/)).toBeVisible();
   });
 
-  it("shows an empty HTTP 200 narrative capture as a follow-up item, not an update failure", async () => {
+  it("treats an expected empty narration as success without a visible warning", async () => {
     const emptyOnly = job({ ...done, result: { ...done.result!, coverage: { ...coverage, pending: [], deferredMatchIds: [],
       restrictedMatchIds: [], newMatches: [], comments: { newMatchIds: [], keptMatchIds: [],
         emptyMatchIds: ["sofascore-match-10"], pendingMatchIds: [], failed: [] } } } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: emptyOnly }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/^Actualización completada con pendientes/)).toBeVisible();
+    expect(await screen.findByText("Datos actualizados")).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/completada con pendientes/i)).toBeNull();
+    await expandDetails();
     expect(screen.getByRole("list", { name: "Partidos sin narración disponible" })).toHaveTextContent("Atlético Sanluqueño – Real Jaén");
     expect(screen.queryByText(/actualización fallida/i)).toBeNull();
   });
 
-  it("labels the top bar with the group's action and the same pending line", async () => {
+  it("does not raise an incident for an expected SofaScore 404", async () => {
+    const unavailableOnly = job({ ...done, result: { ...done.result!, coverage: { ...coverage,
+      newResources: 0, keptResources: 0, pending: [], deferredMatchIds: [], restrictedMatchIds: [], newMatches: [],
+      comments: { newMatchIds: [], keptMatchIds: [], emptyMatchIds: [], pendingMatchIds: [],
+        failed: [{ matchId: "sofascore-match-9", reason: "not_found" }] } } } });
+    api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: unavailableOnly }) }));
+    render(<OperatorView />);
+    expect(await screen.findByText("Datos actualizados")).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("Incidencias").parentElement).toHaveTextContent("0");
+    await expandDetails();
+    expect(screen.getByRole("list", { name: "Partidos sin narración disponible" }))
+      .toHaveTextContent("SofaScore respondió 404");
+  });
+
+  it("keeps the navigation label fixed after an update completes", async () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done }) }));
     render(<UpdateControl />);
-    expect(await screen.findByRole("button", { name: /Actualizar Grupo 2: Actualización del Grupo 2/ })).toHaveTextContent(/^Actualizar$/);
-    expect(screen.getAllByText(/^Actualización completada con pendientes/).length).toBeGreaterThan(0);
+    expect(await screen.findByRole("link", { name: "Actualizaciones" })).toHaveAttribute("href", "/operador");
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("keeps the last publication's pending and deferred items visible after a later update failed", async () => {
@@ -275,7 +301,8 @@ describe("Group 2 scope", () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: failed, lastPublished: { at: "2026-10-28T17:02:00Z" },
       lastCoverage: { ...coverage, matchNames: { ...coverage.matchNames, "sofascore-match-3": "SD Ponferradina – Cultural Leonesa" } } }) }));
     render(<OperatorView />);
-    expect(await screen.findByRole("heading", { name: /^Última publicación \(28\/10/ })).toBeVisible();
+    expect(await screen.findByText(/La fuente rechazó la consulta.*Se mantienen los datos anteriores\./)).toBeVisible();
+    await expandDetails();
     expect(screen.getByRole("heading", { name: "Revisiones aplazadas" })).toBeVisible();
     expect(screen.getByRole("link", { name: "SD Ponferradina – Cultural Leonesa" })).toHaveAttribute("href", "/matches/sofascore-match-3");
     expect(screen.getByRole("link", { name: "Huesca – UD Ibiza" }).closest("li")).toHaveTextContent("se mantiene la versión anterior");
@@ -284,8 +311,8 @@ describe("Group 2 scope", () => {
   it("does not repeat the last publication when the last job is that publication", async () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done, lastPublished: { at: "2026-10-28T17:02:00Z" }, lastCoverage: coverage }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/^Actualización completada con pendientes/)).toBeVisible();
-    expect(screen.queryByRole("heading", { name: /^Última publicación/ })).toBeNull();
+    expect(await screen.findByText("Datos actualizados")).toBeVisible();
+    await expandDetails();
     expect(screen.getAllByRole("heading", { name: "Revisiones aplazadas" })).toHaveLength(1);
   });
 
@@ -295,6 +322,7 @@ describe("Group 2 scope", () => {
       referenceRound: 11, recentRounds: [9, 10, 11], recentRoundCount: 3, maxTotalSends: 50 } } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: restricted }) }));
     render(<OperatorView />);
+    await expandDetails();
     const outOfWindow = await screen.findByRole("heading", { name: "Fuera de la ventana rutinaria" });
     expect(outOfWindow).toBeVisible();
     expect(outOfWindow.nextElementSibling).toHaveTextContent(/La rutina se limita a las 3 últimas jornadas disputadas/);
@@ -307,8 +335,9 @@ describe("Group 2 scope", () => {
       comments: { ...coverage.comments, newMatchIds: [], emptyMatchIds: [], pendingMatchIds: [], failed: [] } }, changed: false } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: clean }) }));
     render(<OperatorView />);
-    expect(await screen.findByText(/^Revisión completada sin cambios/)).toBeVisible();
+    expect(await screen.findByText("Datos actualizados")).toBeVisible();
     expect(screen.queryByText(/con pendientes/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("shows the rolling window and operation-wide send budget when declared by group-v3", async () => {
@@ -321,9 +350,10 @@ describe("Group 2 scope", () => {
     const published = job({ ...done, result: { ...done.result!, coverage: rollingCoverage } });
     api(() => ({ body: operatorStatus({ scope: rollingScope, lastJob: published }) }));
     render(<OperatorView />);
+    await expandDetails();
     expect(await screen.findByText(rollingScope.description)).toBeVisible();
     expect(screen.getByText(/Ventana rutinaria: jornadas 9, 10, 11 \(referencia 11\)\. Envíos físicos reservados: 17 de 50; quedan 33/)).toBeVisible();
-    expect(screen.getByText(/elemento pendiente\/aplazado/).parentElement).toHaveTextContent("1 elemento pendiente/aplazado");
+    expect(screen.getByText(/1 revisión queda para\s+la próxima actualización por el límite de consultas/)).toBeVisible();
     expect(screen.queryByText("sin recursos pendientes por presupuesto")).toBeNull();
   });
 });
