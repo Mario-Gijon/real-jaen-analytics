@@ -1,14 +1,18 @@
 # Despliegue
 
-El desarrollo mantiene su configuración SQLite habitual. El despliegue de SINBAD² combina `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml` para ejecutar los cinco servicios con PostgreSQL 18 persistente. Acquisition inicia con el proveedor SofaScore habilitado, pero no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos audiovisuales requieren una acción manual.
+La configuración recomendada de desarrollo y producción usa PostgreSQL 18 para Sports Data y Video Service; Acquisition mantiene su SQLite local de trabajos y perfiles. La instalación SQLite deportiva y audiovisual se conserva como ruta histórica de transición. SINBAD² combina `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml`. Acquisition inicia con el proveedor SofaScore habilitado, pero no inicia trabajos al arrancar; las actualizaciones y trabajos audiovisuales requieren una acción manual.
 
 Los archivos privados `.env.dev` y `.env.prod` se suministran aparte. Los ejemplos versionados no contienen contraseñas, tokens ni datos reales. El anfitrión Docker necesita acceso de red durante las compilaciones para obtener imágenes base y dependencias.
 
 Acquisition construye su runtime de Chromium desde el Dockerfile. La revisión aprobada del SDK de SofaScore está vendorizada en `acquisition/vendor/sofascore_scraper.tar.gz`; el Dockerfile verifica su hash, revisión y manifiesto de fuentes. No hace falta descargar o etiquetar por separado una imagen de runtime.
 
-## Desarrollo
+## Desarrollo recomendado con PostgreSQL
 
-Mario entrega a Álvaro un paquete privado que se extrae en la raíz del repositorio clonado. Incluye `.env.dev`, secretos de desarrollo, catálogo/calibraciones de vídeo y estados SQLite para reproducir la instalación. No incluye vídeos originales, perfiles del navegador ni cookies. Las rutas de desarrollo son relativas al repositorio.
+Para un entorno local nuevo, sigue [PostgreSQL autogestionado](postgresql-self-hosted.md): usa un proyecto, red, volúmenes y secretos propios; aplica las migraciones/importaciones explícitamente antes de iniciar las aplicaciones. No compartas credenciales ni recursos con la instalación SQLite histórica.
+
+## Reproducir la instalación SQLite histórica
+
+El paquete privado heredado permite reproducir la instalación de transición. Incluye `.env.dev`, secretos de desarrollo, catálogo/calibraciones de vídeo y estados SQLite. No incluye vídeos originales, perfiles del navegador ni cookies. Conserva este procedimiento solo para esa instalación; no lo uses como camino recomendado ni para SINBAD².
 
 ```sh
 docker compose --env-file .env.dev -f compose.dev.yaml up -d --build
@@ -58,7 +62,7 @@ Administración debe preparar `shared/postgresql/secrets` con la cuenta de despl
 
 PostgreSQL recibe sus contraseñas de inicialización, las tareas de comprobación reciben únicamente la URL owner de su base y cada servicio recibe solo su URL de ejecución. Los secretos administrativos y owner nunca pasan por el Runner ni se montan en Dashboard, Acquisition o el microservicio ajeno. Las URLs internas usan el host de servicio `postgresql` en la red Docker privada; PostgreSQL no publica puertos. Las futuras conexiones remotas DEV requieren autorización separada, conectividad privada y TLS `verify-full`.
 
-Administración también debe preparar `shared/imports`, volúmenes, red privada, credenciales del servidor, perfil y restauración inicial. El directorio de imports debe ser legible/traversable por UID `10001`. El directorio `shared/video-catalog` del env heredado solo satisface la interpolación del Compose base: el overlay PostgreSQL sustituye ese bind mount, por lo que el catálogo vive en la base y no requiere ese directorio. La restauración inicial se implementará y verificará en Hito 09A; no forma parte del job ordinario.
+Administración también debe preparar `shared/imports`, los volúmenes, la red privada, las credenciales del servidor, el perfil y la restauración inicial con el formato PostgreSQL v3 descrito abajo. El directorio de imports debe ser legible/traversable por UID `10001`. El directorio `shared/video-catalog` del env heredado solo satisface la interpolación del Compose base: el overlay PostgreSQL sustituye ese bind mount, por lo que el catálogo vive en la base y no requiere ese directorio.
 
 ### Secuencia protegida del despliegue
 
@@ -110,9 +114,48 @@ docker compose --project-directory "$PWD" --env-file "$config/.env.prod" \
 
 No publiques los puertos internos, cambies nombres de proyecto/volúmenes ni ejecutes `docker compose down -v`.
 
-## Respaldos y restauración excepcional
+## Backup y restauración PostgreSQL (formato v3)
 
-Los comandos SQLite de esta sección sirven solo para instalaciones SQLite antiguas y ensayos aislados. No los uses en el despliegue PostgreSQL de SINBAD². El backup/restauración PostgreSQL y la restauración inicial administrada corresponden al Hito 09A; el pipeline de código no invoca esos procedimientos.
+El backup PostgreSQL v3 incluye `sports_data.dump` y `video_service.dump` en formato personalizado de `pg_dump`, además de una copia consistente de `jobs.sqlite` de Acquisition, trabajos terminales, paquetes completados sellados y el ledger durable de presupuesto. El manifiesto registra versiones, revisiones, generación/publicaciones, inventarios lógicos, permisos, secuencias, recuentos e integridad de fotografías. `SHA256SUMS` cubre los dumps, el historial y el manifiesto.
+
+No incluye contraseñas, URLs con credenciales, tokens conocidos, perfiles/cookies Chromium, trabajos activos, staging/transporte, cachés, journals locales no autoritativos de Sports Data o Video Service, vídeos originales ni fotografías externas. Las fotos `BYTEA`, calibraciones `JSONB`, asociaciones y publicaciones viven en sus dumps PostgreSQL; no se duplican en archivos sueltos. Los mensajes de error operativos se limpian de URLs con credenciales y credenciales tipo Bearer/Basic antes de archivarse.
+
+Ejecuta el backup desde la release que corresponde a la instalación. En PROD el script usa por defecto `.env.prod`, `.env.postgresql.prod` y los tres Compose PostgreSQL. Para DEV, pasa los dos env files y Compose de esa instalación explícitamente:
+
+```sh
+ENV_FILES="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.dev:$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.postgresql.dev" \
+COMPOSE_FILES="compose.dev.yaml:compose.postgresql.yaml:compose.postgresql.dev.yaml" \
+  scripts/backup-postgresql.sh \
+  "$HOME/.local/share/real-jaen-analytics/postgresql/backups/$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+El destino debe ser nuevo y privado. El comando valida identidad Compose, PostgreSQL 18, revisiones, volúmenes/red/mounts, roles, marcadores, permisos, espacio y ausencia de trabajos activos. Cierra Dashboard para nuevas solicitudes, drena los trabajos, establece el fence durable de Acquisition y detiene solo los workers que estaban en marcha; PostgreSQL permanece activo. Al terminar, recupera los mismos contenedores, quita solo su propio fence y abre Dashboard al final. La carpeta temporal privada se publica atómicamente solo después de verificar los dos dumps, el historial SQLite y los hashes. Nunca copies físicamente `PGDATA`.
+
+Verifica el formato y las sumas antes de transferirlo a otro destino:
+
+```sh
+ENV_FILES="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.dev:$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.postgresql.dev" \
+COMPOSE_FILES="compose.dev.yaml:compose.postgresql.yaml:compose.postgresql.dev.yaml" \
+  scripts/verify-postgresql-backup.sh "/ruta/privada/backup-v3"
+```
+
+La restauración es exclusivamente para una infraestructura nueva. Genera credenciales PROD independientes; inicializa una instancia PostgreSQL 18 vacía con los scripts de Compose, crea los otros volúmenes nombrados vacíos y corrige su propietario para UID `10001`. No inicies servicios de aplicación. Configura los env files de PROD con el proyecto/red/volúmenes estables, credenciales nuevas y `RJ_IMPORT_DIR` privado; comprueba que no hay contenedores de aplicación activos. La herramienta exige bases vacías, owner URLs de destino válidas, volúmenes operativos vacíos y distintos de los del origen. Restaura cada dump como su rol owner usando `pg_restore --no-owner --role=<owner>`: el rol destino recibe la propiedad y se conservan las ACL de los roles runtime ya creados. No usa `--no-acl`, `--clean`, `DROP DATABASE` ni migraciones Alembic.
+
+```sh
+ENV_FILES="$RJA_DEPLOY_ROOT/shared/config/current/.env.prod:$RJA_DEPLOY_ROOT/shared/config/current/.env.postgresql.prod" \
+COMPOSE_FILES="compose.prod.yaml:compose.postgresql.yaml:compose.postgresql.prod.yaml" \
+  scripts/restore-postgresql.sh "/ruta/privada/backup-v3"
+```
+
+Antes de la primera escritura persistente, la restauración crea `shared/imports/.real-jaen-restore-incomplete`. Verifica hashes, destino, SQLite, contenido lógico de cada tabla, revisiones `pg0005`/`vg0002`, publicaciones/generación, blobs de fotos, calibraciones, asociaciones, secuencias, permisos de roles y aislamiento entre bases. Recupera la SQLite operativa sin trabajos activos y no inicia servicios. Solo elimina el marcador propio después de superar todas las comprobaciones. Si falla o se interrumpe, no borres el marcador ni limpies el destino: conserva los volúmenes parciales para inspección y prepara un proyecto y volúmenes nuevos para otro intento.
+
+Antes de una migración de esquema que pueda cambiar datos, genera y verifica un backup PostgreSQL v3; acuerda además el procedimiento de recuperación/compatibilidad de la release. No se configura todavía un calendario de backups en SINBAD².
+
+La restauración inicial de SINBAD² es una tarea administrativa manual, fuera del pipeline normal. La secuencia completa —directorios privados, nombres exactos de recursos, secretos independientes, volúmenes, perfil Chromium nuevo, `jobs.sqlite`, UID/GID y preflights— está en [PostgreSQL autogestionado](postgresql-self-hosted.md). Más adelante se entregará a administración el directorio completo v3 (`sports_data.dump`, `video_service.dump`, `acquisition-history.tar`, `manifest.json`, `SHA256SUMS`) junto con la release/commit acordado. Las credenciales PROD se entregan y provisionan por un canal separado; nunca van dentro del backup ni del repositorio.
+
+## Procedimientos históricos SQLite (formato v2)
+
+Los scripts de esta sección sirven solo para instalaciones SQLite antiguas y ensayos aislados. No los uses para PostgreSQL ni para el despliegue de SINBAD². El pipeline de código no invoca backup ni restauración.
 
 El generador crea cada respaldo en una ubicación nueva y publica la carpeta solo cuando todos los archivos se han copiado, validado y sumado. Por defecto usa `.env.prod` y `compose.prod.yaml`. `COMPOSE_FILE` acepta varios archivos separados por `:` en Linux; Docker Compose aplica los overlays en ese orden y el script toma de la configuración resuelta el proyecto, la imagen y los nombres efectivos de los volúmenes.
 
@@ -136,17 +179,17 @@ ENV_FILE=.env.prod sh dashboard/scripts/respaldo-instalacion.sh \
 
 El preflight resuelve Compose con esos archivos y variables; exige que los cuatro volúmenes persistentes existan, pertenezcan al proyecto y coincidan con los mounts de los contenedores existentes. Comprueba que no haya una restauración incompleta, una actualización deportiva, un trabajo de Acquisition o un trabajo de vídeo activos. Detiene primero Dashboard, repite las comprobaciones y, si la instalación está inactiva, detiene solo los contenedores que estaban en marcha. Al terminar —también ante fallos— inicia los mismos IDs con `docker start`, primero los servicios de datos y al final Dashboard. No ejecuta `compose up`, no reconstruye ni recrea servicios. Si una comprobación previa falla, no detiene contenedores ni crea una carpeta de respaldo.
 
-El formato actual es la versión `2` del manifiesto e incluye `real-jaen.sqlite`, el diario `actualizaciones.tar`, `procedencia.tar` si existe, `acquisition-jobs.tar`, `video-service-state.tar`, `fotos.tar` si existe, `video-catalog.tar`, `copiar.json`, `manifest.json` y `SHA256SUMS`. El almacén fotográfico completo se copia desde `/state/player-photos/`, incluida `fotos.sqlite`, el historial y los blobs WebP; se excluye solo `tmp/`. `video-catalog.tar` conserva únicamente el manifiesto configurado y las calibraciones que este referencia desde `/app/data`; nunca incluye vídeos. Se comprueban la integridad SQLite, referencias, hash y tamaño de cada blob, y la igualdad de los archivos archivados. Los archivos de estado y los contenedores de origen permanecen sin cambios, salvo la copia de seguridad SQLite adicional que `persistencia copiar` crea en `/state/copias`.
+El formato histórico SQLite v2 tiene un manifiesto versión `2` e incluye `real-jaen.sqlite`, el diario `actualizaciones.tar`, `procedencia.tar` si existe, `acquisition-jobs.tar`, `video-service-state.tar`, `fotos.tar` si existe, `video-catalog.tar`, `copiar.json`, `manifest.json` y `SHA256SUMS`. El almacén fotográfico completo se copia desde `/state/player-photos/`, incluida `fotos.sqlite`, el historial y los blobs WebP; se excluye solo `tmp/`. `video-catalog.tar` conserva únicamente el manifiesto configurado y las calibraciones que este referencia desde `/app/data`; nunca incluye vídeos. Se comprueban la integridad SQLite, referencias, hash y tamaño de cada blob, y la igualdad de los archivos archivados. Los archivos de estado y los contenedores de origen permanecen sin cambios, salvo la copia de seguridad SQLite adicional que `persistencia copiar` crea en `/state/copias`.
 
 No se incluyen secretos ni archivos de configuración con credenciales, el volumen de perfil de Acquisition y sus cookies, la caché `.next`, el resto de archivos de `VIDEO_SERVICE_DATA_DIR`, las colecciones originales de fotos ni los vídeos originales externos. Para una restauración habrá que aportar por separado la configuración, secretos, directorios externos de importaciones, colección original de fotos y archivos de vídeo. Las calibraciones creadas por trabajos se conservan en `video-service-state.tar`; el manifiesto y las calibraciones registradas se incluyen en `video-catalog.tar`.
 
-La restauración admite el formato v2 completo y resuelve el proyecto, imágenes, puertos, redes, volúmenes y rutas externas desde la configuración efectiva de Compose. Antes de crear volúmenes, valida manifiesto, inventario, SHA-256, SQLite y todos los archivos tar. Se niega si hay contenedores del proyecto, cualquier volumen o red con los nombres efectivos, un montaje activo que se solape con `imports` o el catálogo externo, o si el puerto publicado por Dashboard ya está ocupado. Los backups anteriores a v2 se rechazan porque no acreditan la colección fotográfica ni el catálogo externo; genera un backup v2 para evitar perder datos silenciosamente.
+El restaurador histórico admite el formato SQLite v2 y resuelve proyecto, imágenes, puertos, redes, volúmenes y rutas externas desde Compose. Antes de crear volúmenes, valida manifiesto, inventario, SHA-256, SQLite y archivos tar. Se niega si hay contenedores del proyecto, nombres de recursos en uso, un montaje activo que se solape con `imports` o el catálogo externo, o si el puerto publicado por Dashboard está ocupado. Los backups anteriores a v2 se rechazan porque no acreditan la colección fotográfica ni el catálogo externo. Este restaurador no es válido para bases PostgreSQL.
 
 La restauración SQLite exige un destino de catálogo de vídeo nuevo, elegido explícitamente con `RJ_RESTORE_VIDEO_CATALOG_DIR`, que coincida con `VIDEO_SERVICE_DATA_DIR`/`RJ_DEV_VIDEO_CATALOG_DIR` resuelto por Compose. No altera un directorio de catálogo existente. En el bootstrap de instalaciones SQLite antiguas, el manifiesto de ejemplo se valida dentro de la imagen y no se crea en esa ruta: el catálogo v2 recuperado ocupa el destino nuevo. Los vídeos originales no se incluyen: solo se recuperan el manifiesto y las calibraciones referenciadas.
 
 Antes de crear el primer volumen, el script crea `imports/.real-jaen-restore-incomplete` con el proyecto, los volúmenes y el destino externo. Escribe además guardas dentro de los estados de Sports Data y Video Service. Si algo falla o se interrumpe, conserva el marcador, los volúmenes parciales y cualquier área de extracción para inspección; no borra datos automáticamente. Sports Data, Video Service, los preflights de backup y el despliegue normal se niegan a continuar mientras detecten la restauración incompleta. Solo tras validar la base y la generación aceptada por el coordinador, los trabajos SQLite, las fotos/blobs, el catálogo real con `VideoCatalog.load` y un perfil de Acquisition recién inicializado se retiran las guardas. El script nunca arranca los servicios.
 
-### Ensayo aislado del backup v2 actual
+### Ensayo histórico aislado del backup SQLite v2
 
 Este ejemplo conserva intactos el backup original, los volúmenes y las carpetas de la instalación de desarrollo. Prepara un nuevo proyecto y prefijo de volúmenes, copia el backup a un directorio de importación aislado y da acceso de lectura solo a esa copia para UID `10001`. El overlay local existente fija el montaje de imports; se genera una copia temporal del overlay con ese único origen dirigido al ensayo. El directorio de semillas queda vacío: como las bases restauradas ya existen, los entrypoints de desarrollo solo las validan y no copian semillas encima.
 

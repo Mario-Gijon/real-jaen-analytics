@@ -2,7 +2,13 @@
 
 Plataforma para analizar partidos, equipos y jugadores del Real Jaén CF, con actualización deportiva manual y reproducción de vídeos sincronizada.
 
-## Desarrollo
+## Desarrollo recomendado: PostgreSQL 18
+
+Sports Data y Video Service utilizan PostgreSQL 18; Acquisition conserva su SQLite local para trabajos y perfiles. La instalación SQLite deportiva y audiovisual se mantiene como ruta histórica de transición. Consulta [PostgreSQL autogestionado](docs/postgresql-self-hosted.md) para crear una instalación DEV aislada, restaurar respaldos y preparar la instalación administrada.
+
+Los respaldos PostgreSQL usan el formato verificado v3. Antes de cambiar un esquema, crea y verifica un respaldo con `scripts/backup-postgresql.sh` y `scripts/verify-postgresql-backup.sh`; el detalle y el proceso de recuperación están en [despliegue](docs/despliegue.md). Los respaldos permanecen privados y no se incluyen en Git.
+
+## Reproducir la instalación SQLite histórica
 
 Para utilizar la instalación con los datos actuales, Álvaro recibe aparte el paquete privado `real-jaen-analytics-dev-alvaro.tar.gz`. Guárdalo en la raíz del repositorio clonado, descomprímelo y arranca los servicios:
 
@@ -13,24 +19,11 @@ docker compose --env-file .env.dev -f compose.dev.yaml up -d --build
 
 El archivo incluye `.env.dev`, las contraseñas de desarrollo y los datos iniciales. No contiene vídeos originales ni cookies. El Dashboard queda en `http://localhost:33201`. La primera ejecución carga los datos solo en volúmenes vacíos; la lectura inicial de Sports Data puede tardar varios minutos y Compose espera antes de iniciar Dashboard. Los volúmenes que ya contienen datos no se sustituyen. Después, los cambios persisten en Docker.
 
-### Desarrollo con PostgreSQL
+La instalación anterior conserva SQLite deportiva y audiovisual para reproducir el entorno de transición. No uses su paquete ni sus comandos para una instalación PostgreSQL. Acquisition sigue usando SQLite local en ambos perfiles.
 
-La instalación SQLite anterior sigue siendo el arranque habitual. Para una instalación separada con PostgreSQL 18 local, prepara los dos archivos env privados (`.env.dev` y `.env.postgresql.dev`), genera los secretos fuera del repositorio y aplica lectura por el grupo privado del servicio. En un volumen nuevo, ejecuta primero las migraciones/importaciones explícitas indicadas en la guía y arranca los cuatro servicios después de tener ambos esquemas preparados:
+## Producción PostgreSQL
 
-```sh
-scripts/create-postgresql-secrets.sh "$HOME/.local/share/real-jaen-analytics/postgresql/dev"
-scripts/prepare-postgresql-app-secrets.sh \
-  "$HOME/.local/share/real-jaen-analytics/postgresql/dev" ./.rja-private/secrets
-docker compose --env-file .env.dev --env-file .env.postgresql.dev \
-  -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
-  up -d --build --wait
-```
-
-Las migraciones e importaciones iniciales son tareas explícitas. Consulta [PostgreSQL autogestionado](docs/postgresql-self-hosted.md) para el orden y las modalidades remota y de producción. No uses `down -v` si quieres conservar los datos.
-
-## Producción
-
-La producción de SINBAD² se actualiza mediante GitLab CI/CD después de fusionar cambios en `main`. La administración prepara la configuración y los cuatro volúmenes persistentes; la pipeline normal falla de forma segura si la instalación no está lista y nunca ejecuta la restauración inicial. No ejecutes `docker compose up` desde una release sin seguir el procedimiento documentado. Apache sirve el Dashboard bajo `/real-jaen` y reenvía al puerto local `8090`.
+SINBAD² usa la arquitectura PostgreSQL 18. La administración prepara la configuración, los cinco volúmenes persistentes y una restauración inicial explícita; el despliegue normal falla de forma segura si la instalación no está lista y nunca ejecuta la restauración. No ejecutes `docker compose up` desde una release sin seguir el procedimiento documentado. Apache sirve el Dashboard bajo `/real-jaen` y reenvía al puerto local `8090`.
 
 El paquete privado, las bases de datos, el catálogo, las calibraciones y los secretos no se publican en Git. Acquisition no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos de vídeo solo comienzan mediante acciones explícitas desde el Dashboard.
 

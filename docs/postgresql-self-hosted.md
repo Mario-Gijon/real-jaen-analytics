@@ -292,3 +292,136 @@ La instalación SQLite anterior sigue activa e intacta. Su Video Service anterio
 ## Estado de SINBAD²
 
 No se accedió ni se desplegó en SINBAD². Continúan pendientes la conectividad DEV compartida, el aprovisionamiento y entrega segura de secretos, el procedimiento de despliegue por release y la coordinación con los administradores. Los scripts y la configuración predeterminada de GitLab no se modifican en este hito.
+
+## Backup PostgreSQL v3
+
+Genera el backup desde la release y con los env files del proyecto que se respalda. El comando cierra admisión, drena trabajos, establece el fence durable de Acquisition y detiene solo los workers necesarios para una copia coherente. PostgreSQL permanece activo y los contenedores originales se recuperan con sus mismos IDs. El destino debe ser nuevo, fuera del repositorio y privado (`0700` para la carpeta, `0600` para archivos); no se sobrescriben backups.
+
+Ejemplo para la instalación permanente local:
+
+```bash
+ENV_FILES="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.dev:$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.postgresql.dev" \
+COMPOSE_FILES="compose.dev.yaml:compose.postgresql.yaml:compose.postgresql.dev.yaml" \
+  scripts/backup-postgresql.sh \
+  "$HOME/.local/share/real-jaen-analytics/postgresql/backups/$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+La carpeta completa contiene `sports_data.dump`, `video_service.dump`, `acquisition-history.tar`, `manifest.json` y `SHA256SUMS`. Incluye publicaciones/generación, fotos y blobs, calibraciones, asociaciones, secuencias y permisos. De Acquisition conserva una snapshot íntegra de `jobs.sqlite`, trabajos terminales, paquetes completados sellados y presupuestos. No incluye contraseñas, URLs con credenciales, perfiles/cookies, trabajos activos, staging/transporte, logs, cachés, journals SQLite deportivos/audiovisuales, vídeos originales ni fotos externas. Las fotos y calibraciones no se duplican fuera de los dumps.
+
+Valida sumas, ambas listas `pg_restore`, la SQLite y el inventario antes de transferirlo:
+
+```bash
+ENV_FILES="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.dev:$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/.env.postgresql.dev" \
+COMPOSE_FILES="compose.dev.yaml:compose.postgresql.yaml:compose.postgresql.dev.yaml" \
+  scripts/verify-postgresql-backup.sh "/ruta/privada/backup-v3"
+```
+
+Los dumps usan `pg_dump -Fc --no-owner`; la restauración crea cada objeto bajo su rol owner nuevo con `pg_restore --no-owner --role=<owner>`, manteniendo las ACL de los roles runtime. No restaura contraseñas/roles de origen, no usa `--no-acl`, `--clean`, `DROP DATABASE` ni vuelve a aplicar Alembic. Antes de toda futura migración de esquema, genera y verifica un backup v3. Este hito no programa backups periódicos.
+
+## Preparación inicial administrada de SINBAD²
+
+La restauración inicial es una operación manual de administración, fuera del pipeline normal. Requiere una release revisada, un backup v3 recibido por canal seguro y un destino nuevo. Nunca se copian credenciales DEV o perfiles privados de navegador.
+
+1. Prepara los env files privados a partir de `.env.prod.example` y `.env.postgresql.prod.example` en `shared/config/versions/<id>/`. Mantén los nombres estables de producción: proyecto `real-jaen-analytics-sinbad2-prod`; red `rja-sinbad2-prod-postgresql-private`; volúmenes `rja-sinbad2-postgresql-data`, `rja-sinbad2-sports-operational-state`, `rja-sinbad2-video-operational-state`, `rja-sinbad2-acquisition-profiles` y `rja-sinbad2-acquisition-jobs`. Define `RJA_DEPLOY_ROOT`, configura `COMPOSE_PROJECT_NAME`/`PG_PROJECT_NAME` y usa un `RJ_IMPORT_DIR` vacío, privado y accesible por UID `10001`.
+
+2. Genera secretos PROD independientes en `shared/postgresql/secrets` y `shared/secrets/current`. No copies secretos DEV:
+
+   ```bash
+   install -d -m 0700 "$RJA_DEPLOY_ROOT/shared/postgresql/secrets" \
+     "$RJA_DEPLOY_ROOT/shared/secrets/current/session" \
+     "$RJA_DEPLOY_ROOT/shared/config/versions/initial"
+   scripts/create-postgresql-secrets.sh "$RJA_DEPLOY_ROOT/shared/postgresql/secrets"
+   umask 077
+   openssl rand -hex 32 > "$RJA_DEPLOY_ROOT/shared/secrets/current/access-password"
+   openssl rand -hex 32 > "$RJA_DEPLOY_ROOT/shared/secrets/current/update-password"
+   openssl rand -hex 32 > "$RJA_DEPLOY_ROOT/shared/secrets/current/session/session-secret"
+   openssl rand -hex 32 > "$RJA_DEPLOY_ROOT/shared/secrets/current/control-token"
+   openssl rand -hex 32 > "$RJA_DEPLOY_ROOT/shared/secrets/current/acquisition-token"
+   chmod 0600 "$RJA_DEPLOY_ROOT/shared/secrets/current"/{access-password,update-password,session/session-secret,control-token,acquisition-token}
+   scripts/prepare-postgresql-app-secrets.sh \
+     "$RJA_DEPLOY_ROOT/shared/postgresql/secrets" "$RJA_DEPLOY_ROOT/shared/secrets/current"
+   ```
+
+   El helper muestra `RJ_APP_SECRET_GID`; administración debe confirmar el GID no privilegiado e incluirlo en el env file PostgreSQL. Contraseñas admin/owner y URLs owner se quedan `0600`. Solo URLs runtime y tokens runtime llevan `0640` con ese GID. Los env files no contienen credenciales.
+
+3. Crea los cuatro volúmenes operativos vacíos, con labels Compose del proyecto; si un nombre ya existe, detente y no lo reutilices:
+
+   ```bash
+   PROJECT=real-jaen-analytics-sinbad2-prod
+   docker volume create --label "com.docker.compose.project=$PROJECT" --label com.docker.compose.volume=sports-operational-state rja-sinbad2-sports-operational-state
+   docker volume create --label "com.docker.compose.project=$PROJECT" --label com.docker.compose.volume=video-operational-state rja-sinbad2-video-operational-state
+   docker volume create --label "com.docker.compose.project=$PROJECT" --label com.docker.compose.volume=acquisition-profiles rja-sinbad2-acquisition-profiles
+   docker volume create --label "com.docker.compose.project=$PROJECT" --label com.docker.compose.volume=acquisition-jobs rja-sinbad2-acquisition-jobs
+   ```
+
+   Desde la release preparada, construye sus imágenes exactas y levanta solo PostgreSQL. Compose crea la red privada interna y el volumen PostgreSQL; su inicializador crea las dos bases y roles a partir de los secretos recién generados. PostgreSQL no publica puertos.
+
+   ```bash
+   cd "$RJA_DEPLOY_ROOT/releases/<release-id>"
+   # Exporta RJ_IMAGE_TAG con el commit de esta release.
+   docker compose --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.prod" \
+     --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.postgresql.prod" \
+     -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml \
+     build sports-data acquisition video-service dashboard
+   docker compose --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.prod" \
+     --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.postgresql.prod" \
+     -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml \
+     up -d --wait postgresql
+   ```
+
+4. Antes de restaurar, confirma que los cuatro volúmenes operativos están vacíos y haz escribible su directorio raíz por UID/GID `10001`. Usa la imagen Acquisition de esa release; cualquier volumen no vacío debe rechazarse sin borrarlo:
+
+   ```bash
+   ACQ_IMAGE="local/real-jaen-analytics/acquisition:$RJ_IMAGE_TAG"
+   for volume in rja-sinbad2-sports-operational-state rja-sinbad2-video-operational-state \
+     rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs; do
+     docker run --rm --network none --user 0:0 -v "$volume:/target" \
+       --entrypoint python "$ACQ_IMAGE" -B -c '
+   from pathlib import Path
+   import os, sys
+   root = Path("/target")
+   if any(root.iterdir()):
+       raise SystemExit("volume is not empty")
+   os.chown(root, 10001, 10001)'
+   done
+   ```
+
+5. Copia el directorio v3 completo a un directorio `imports` privado y ejecuta con env files PROD. La herramienta exige proyecto/red/volúmenes distintos del origen, ninguna aplicación activa, bases vacías, volúmenes operativos vacíos, credenciales owner correctas y espacio. Crea primero `imports/.real-jaen-restore-incomplete`, restaura los dumps y Acquisition, y compara inventarios lógicos, esquemas, permisos y secuencias. Solo quita su marcador cuando todo pasa; no inicia aplicaciones.
+
+   ```bash
+   ENV_FILES="$RJA_DEPLOY_ROOT/shared/config/current/.env.prod:$RJA_DEPLOY_ROOT/shared/config/current/.env.postgresql.prod" \
+   COMPOSE_FILES="compose.prod.yaml:compose.postgresql.yaml:compose.postgresql.prod.yaml" \
+     scripts/restore-postgresql.sh "/ruta/privada/imports/backup-v3"
+   ```
+
+   Si falla, conserva el marcador, las bases y los volúmenes parciales. No quites el marcador ni reintentes sobre esos recursos: inspecciona y prepara otro proyecto/volúmenes.
+
+6. Con Acquisition detenido, crea un perfil Chromium nuevo y verifícalo bajo `--network none` y UID `10001`. No copies un perfil de navegador local:
+
+   ```bash
+   PROFILE_VOLUME=rja-sinbad2-acquisition-profiles
+   docker run --rm --network none --user 10001:10001 --cap-drop ALL \
+     --security-opt no-new-privileges:true \
+     --security-opt seccomp=./acquisition/docker/seccomp-linux-amd64.json \
+     -v "$PROFILE_VOLUME:/profiles" --entrypoint python "$ACQ_IMAGE" -B -m acquisition.admin --root /profiles \
+     initialize-profile --confirm-new-profile
+   docker run --rm --network none --user 10001:10001 --cap-drop ALL \
+     --security-opt no-new-privileges:true \
+     --security-opt seccomp=./acquisition/docker/seccomp-linux-amd64.json \
+     -v "$PROFILE_VOLUME:/profiles" --entrypoint python "$ACQ_IMAGE" -B -m acquisition.admin --root /profiles verify-profile
+   ```
+
+   Arranca Acquisition por sí solo para crear `acquisition-jobs/jobs.sqlite`; el arranque no inicia trabajos ni scraping. Comprueba `PRAGMA integrity_check`, la tabla `job`, `/profiles/control/state.json`, `/profiles/control/owner.lock`, permisos UID `10001` y el GID complementario de secretos confirmado por administración. Acquisition no recibe URLs PostgreSQL.
+
+7. Comprueba el Compose de producción resuelto, sin ejecutar pipeline ni despliegue:
+
+   ```bash
+   docker compose --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.prod" \
+     --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.postgresql.prod" \
+     -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml \
+     --profile migrations config --format json | python scripts/verify-postgresql-prod-compose.py
+   ```
+
+   La restauración ya valida revisiones `pg0005`/`vg0002`, propietarios, ACL, permisos mínimos, aislamiento de bases, publicaciones/generación, blobs, calibraciones y asociaciones. Administración comprueba además la red `internal`, cinco volúmenes con labels, perfil nuevo, SQLite íntegra sin trabajos activos ni fence de mantenimiento. Solo entonces puede autorizar el uso del pipeline normal.
+
+Los únicos artefactos de datos que se entregan a administración son los cinco archivos v3 y la referencia release/commit acordada. Credenciales y configuración privada se generan en destino y se entregan por otro canal. No se incluyen fotos externas, vídeos, perfil/cookies ni secretos. No se configura un calendario automático de backups.
