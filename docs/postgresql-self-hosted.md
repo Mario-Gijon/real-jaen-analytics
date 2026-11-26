@@ -127,7 +127,7 @@ Los overrides opt-in no cambian los archivos SQLite habituales. Compose 2.24 o p
 
 ### DEV autónomo: aplicaciones y PostgreSQL local
 
-1. Copia `.env.dev.example` a `.env.dev` y `.env.postgresql.dev.example` a `.env.postgresql.dev`. Ajusta los nombres de proyecto, red y volumen para que sean únicos. `PG_SECRET_DIR` debe señalar un directorio privado fuera del repositorio. `RJ_DEV_SECRET_DIR` puede usar el directorio `.rja-private/secrets` ya ignorado por Git o una ruta privada externa. La ruta de importación se conserva montada en solo lectura para la protección de restauración incompleta. Las variables antiguas de semilla/catálogo aún deben estar definidas para que Compose pueda interpolar `compose.dev.yaml`, aunque el override elimina esos mounts.
+1. Copia `.env.dev.example` a `.env.dev` y `.env.postgresql.dev.example` a `.env.postgresql.dev`. Ajusta los nombres de proyecto, red, volúmenes y las etiquetas `RJ_DEV_IMAGE_TAG`/`PG_TASK_IMAGE_TAG` para que sean únicos respecto a cualquier instalación SQLite activa. `PG_SECRET_DIR` debe señalar un directorio privado fuera del repositorio. `RJ_DEV_SECRET_DIR` puede usar el directorio `.rja-private/secrets` ya ignorado por Git o una ruta privada externa. La ruta de importación se conserva montada en solo lectura para la protección de restauración incompleta. Las variables antiguas de semilla/catálogo aún deben estar definidas para que Compose pueda interpolar `compose.dev.yaml`, aunque el override elimina esos mounts.
 2. Prepara los tokens y las contraseñas de Dashboard en el directorio privado de desarrollo como para el modo SQLite. Crea los secretos de PostgreSQL y el acceso de solo lectura a los secretos que usan los procesos UID `10001`:
 
    ```bash
@@ -228,6 +228,42 @@ Una segunda instancia de Sports Data y Video Service, con volúmenes operativos 
 No se envió ninguna solicitud de actualización ni se hizo scraping. `ACQ_ENABLE_REAL=0`; se consultó el estado con la receta piloto oficial en modo fixture. El fixture deportivo contiene tres equipos, mientras que el perfil Group 2 exige el ámbito validado de veinte equipos, y no hay un paquete sellado de Acquisition apto para esta prueba. Por tanto, la ejecución completa de importación/publicación mediante un paquete sintético de Acquisition queda pendiente. Tampoco se descargaron vídeos ni se ejecutó OCR real.
 
 En el camino PostgreSQL, `/state` de Sports Data conservó únicamente `jobs.sqlite` como journal operativo local del coordinador; no aparecieron `real-jaen.sqlite`, `fotos.sqlite` ni blobs. Video Service no creó SQLite ni calibraciones JSON en `/state`; conserva su espacio temporal aislado. Acquisition mantiene legítimamente su SQLite local de trabajos y el perfil local del navegador.
+
+### Instalación real local (Hito 08C.1)
+
+La instalación permanente usa los mismos tres archivos Compose del modo DEV, pero con proyecto, prefijo de volúmenes, red, puerto y etiquetas de imagen propios. Guarda los dos env files, los secretos y las copias de importación en ubicaciones privadas fuera del repositorio. `RJ_DEV_IMAGE_TAG` y `PG_TASK_IMAGE_TAG` evitan mover las etiquetas `:dev` que pueden seguir usando contenedores SQLite activos. Mantén `RJ_ACQUISITION_ENABLE_REAL=0` mientras se comprueban los datos migrados.
+
+Para esta instalación, Acquisition usa además un overlay privado en `$HOME/.config/real-jaen-analytics/postgresql/dev-08c1/compose.acquisition-fixture.yaml` y un manifiesto de rutas fixture vacío. El overlay monta el módulo oficial `sdk_fixture`, fija `ACQ_PROVIDER=fixture-site`, `ACQ_TEST_MODE=1` y `ACQ_ENABLE_REAL=0`, y configura Sports Data con `RJ_ACQUISITION_TEST=1`. No se enviaron trabajos de adquisición. Al reiniciar o recrear esta instalación, incluye ese overlay:
+
+```bash
+CONFIG="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1"
+docker compose --project-directory "$PWD" \
+  --env-file "$CONFIG/.env.dev" --env-file "$CONFIG/.env.postgresql.dev" \
+  -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+  -f "$CONFIG/compose.acquisition-fixture.yaml" \
+  up -d --wait
+```
+
+El Dashboard queda publicado solo en `127.0.0.1:33202`. Para detener esta instalación y conservar sus volúmenes, ejecuta desde la raíz del repositorio:
+
+```bash
+CONFIG="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1"
+docker compose --project-directory "$PWD" \
+  --env-file "$CONFIG/.env.dev" --env-file "$CONFIG/.env.postgresql.dev" \
+  -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+  -f "$CONFIG/compose.acquisition-fixture.yaml" \
+  down
+```
+
+No añadas `-v`.
+
+Para reconstruir solo Sports Data, Video Service, Acquisition o Dashboard, usa `docker compose ... build NOMBRE_SERVICIO` y luego `docker compose ... up -d --no-deps --force-recreate NOMBRE_SERVICIO`, conservando el mismo env y todos los archivos Compose indicados arriba.
+
+El 26 de noviembre de 2026 se migró desde el backup local v2 del 24 de noviembre, después de verificar `SHA256SUMS`, integridad SQLite y equivalencia lógica completa con la fuente activa. Fotos, estado de Video Service y catálogo estático coincidieron byte a byte con esa copia. El backup del 9 de noviembre quedó descartado por ser anterior. Los archivos originales y la copia de migración permanecen en el directorio privado de datos y no se incluyen en Git.
+
+La instalación PostgreSQL quedó saludable con los esquemas `pg0005` y `vg0002`. Los roles de aplicación no son superusuario ni pueden conectar a la base del otro servicio. Se validaron en lectura el login, el equipo Real Jaén, jugadores y foto WebP, un partido observado, comentarios y enriquecimientos, asociaciones de vídeo, sincronización, locate y el estado de actualizaciones sin trabajo activo. No se inició ninguna adquisición ni scraping; la publicación mediante un paquete sellado queda pendiente. Sports Data no creó SQLite deportiva ni almacén local de fotos, y Video Service no creó SQLite ni calibraciones JSON persistentes. Acquisition conserva su SQLite de trabajos.
+
+La instalación SQLite anterior sigue activa e intacta. Su Video Service anterior permanece no saludable porque la imagen ya existente no incluye SQLAlchemy, aunque sus archivos de datos se verificaron; el Video Service nuevo de esta instalación PostgreSQL está saludable.
 
 ## Estado de SINBAD²
 

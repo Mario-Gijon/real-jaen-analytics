@@ -4,6 +4,7 @@ name: ${RJ_DEV_PROJECT_NAME:-real-jaen-analytics-postgresql-dev}
 
 services:
   sports-data:
+    image: local/real-jaen-analytics/sports-data:${RJ_DEV_IMAGE_TAG:-postgresql-dev}
     entrypoint: !override [python, -B]
     command: !override [-m, uvicorn, app:app, --host, 0.0.0.0, --port, "8002", --workers, "1"]
     group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
@@ -41,9 +42,11 @@ services:
     networks: !override [sports-data-internal, acquisition-control, postgresql-private]
 
   acquisition:
+    image: local/real-jaen-analytics/acquisition:${RJ_DEV_IMAGE_TAG:-postgresql-dev}
     group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
 
   video-service:
+    image: local/real-jaen-analytics/video-service:${RJ_DEV_IMAGE_TAG:-postgresql-dev}
     entrypoint: !override [python, -B, -m, video_service]
     command: !override []
     group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
@@ -61,6 +64,9 @@ services:
         target: /state
     secrets: !override [video_service_database_url]
     networks: !override [video-internal, video-egress, postgresql-private]
+
+  dashboard:
+    image: local/real-jaen-analytics/dashboard:${RJ_DEV_IMAGE_TAG:-postgresql-dev}
 
 networks:
   postgresql-private:
