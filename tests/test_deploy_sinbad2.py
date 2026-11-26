@@ -131,6 +131,12 @@ elif args[:2] == ["inspect", "--format"]:
         print("healthy")
     elif ".State.Status" in template:
         print("running")
+    elif ".Config.Env" in template:
+        service = args[-1].removeprefix("container-")
+        if service == "sports-data":
+            print("SPORTS_DATA_STORAGE=" + os.environ.get("RJA_TEST_SPORTS_STORAGE", "postgresql"))
+        elif service == "video-service":
+            print("VIDEO_SERVICE_STORAGE=" + os.environ.get("RJA_TEST_VIDEO_STORAGE", "postgresql"))
     elif ".Mounts" in template:
         if '"/var/lib/postgresql"' in template:
             print("rja-sinbad2-postgresql-data:true")
@@ -355,6 +361,18 @@ class SinbadPostgreSQLDeploymentTests(unittest.TestCase):
         self.assertFalse(any("build" in call for call in calls))
         self.assertFalse(any("up" in call for call in calls))
         self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
+
+    def test_existing_sqlite_installation_is_refused_without_stopping_it(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_SPORTS_STORAGE"] = "sql"
+
+        result = self.invoke(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy SQLite application", result.stderr)
+        calls = self.docker_calls()
+        self.assertFalse(any("stop" in call for call in calls))
+        self.assertFalse(any("up" in call for call in calls))
 
     def test_schema_check_failure_stops_before_admission_or_service_changes(self) -> None:
         env = self.environment()

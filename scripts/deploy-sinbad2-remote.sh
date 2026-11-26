@@ -56,6 +56,7 @@ jobs_volume=
 postgres_container=
 admission_closed=0
 previous_rollback_compatible=0
+previous_is_sqlite=0
 dashboard_was_present=0
 
 safe_link() {
@@ -260,6 +261,10 @@ if [ -f "$last_good" ]; then
   safe_link "$secrets_base" "$previous_secret_target" || fail 'last healthy secret version is missing'
   case "$previous_pipeline" in *[!0-9]*|'') fail 'last healthy pipeline identifier is invalid' ;; esac
   has_previous=1
+  previous_database_family=$(sed -n 's/^database_family=//p' "$last_good" | tail -n 1)
+  if [ "$previous_database_family" != postgresql ]; then
+    previous_is_sqlite=1
+  fi
   previous_config_dir="$config_base/$previous_config_target"
   previous_release_dir="$root/releases/$previous_release"
   if [ -f "$previous_config_dir/.env.postgresql.prod" ] \
@@ -320,6 +325,7 @@ require_line 'RJ_PROD_ACQUISITION_PROFILES_VOLUME=rja-sinbad2-acquisition-profil
 require_line 'RJ_PROD_ACQUISITION_JOBS_VOLUME=rja-sinbad2-acquisition-jobs'
 require_line 'RJ_DASHBOARD_BIND=127.0.0.1'
 require_line 'RJ_DASHBOARD_PORT=8090'
+require_line 'RJ_ACQUISITION_ENABLE_REAL=1'
 require_line 'RJ_PROD_SECRET_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/secrets/current'
 require_line 'RJ_IMPORT_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/imports'
 require_line 'RJ_VIDEO_CATALOG_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/video-catalog'
@@ -487,6 +493,44 @@ dc() {
     -f "$compose_dir/compose.postgresql.prod.yaml" "$@"
 }
 
+service_storage_mode() {
+  storage_service=$1
+  storage_variable=$2
+  storage_ids=$(dc "$release" ps --all -q "$storage_service") \
+    || fail 'could not inspect the existing application containers before deployment'
+  [ -n "$storage_ids" ] || { printf 'absent'; return 0; }
+  set -- $storage_ids
+  [ "$#" -eq 1 ] || fail 'multiple existing service containers require manual inspection before deployment'
+  storage_environment=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1") \
+    || fail 'could not inspect the existing service storage mode'
+  storage_count=$(printf '%s\n' "$storage_environment" | grep -Ec "^${storage_variable}=" || true)
+  [ "$storage_count" -le 1 ] || fail 'existing service storage mode is ambiguous; deployment stopped'
+  if [ "$storage_count" -eq 0 ]; then
+    if [ "$storage_variable" = VIDEO_SERVICE_STORAGE ]; then
+      printf 'sqlite'
+    else
+      printf 'unknown'
+    fi
+    return 0
+  fi
+  storage_value=$(printf '%s\n' "$storage_environment" | sed -n "s/^${storage_variable}=//p")
+  case "$storage_variable:$storage_value" in
+    SPORTS_DATA_STORAGE:sql|VIDEO_SERVICE_STORAGE:sqlite) printf 'sqlite' ;;
+    SPORTS_DATA_STORAGE:postgresql|VIDEO_SERVICE_STORAGE:postgresql) printf 'postgresql' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+sports_storage_mode=$(service_storage_mode sports-data SPORTS_DATA_STORAGE)
+video_storage_mode=$(service_storage_mode video-service VIDEO_SERVICE_STORAGE)
+if [ "$sports_storage_mode" = sqlite ] || [ "$video_storage_mode" = sqlite ]; then
+  fail 'a legacy SQLite application is installed in this Compose project; the PostgreSQL code deployment was refused without stopping or changing it'
+fi
+if { [ "$sports_storage_mode" != absent ] && [ "$sports_storage_mode" != postgresql ]; } \
+    || { [ "$video_storage_mode" != absent ] && [ "$video_storage_mode" != postgresql ]; }; then
+  fail 'an existing application container does not declare PostgreSQL storage; inspect the installation before deployment'
+fi
+
 dc "$release" config -q >/dev/null 2>&1 || fail 'PostgreSQL production Compose configuration is invalid'
 dc "$release" --profile migrations config --format json 2>/dev/null \
   | python3 "$release/scripts/verify-postgresql-prod-compose.py" >/dev/null 2>&1 \
@@ -525,7 +569,13 @@ done
 
 if [ "$missing" -gt 0 ]; then
   if [ "$present" -eq 0 ]; then
+    if [ "$previous_is_sqlite" -eq 1 ]; then
+      fail 'the last healthy deployment is SQLite and no PostgreSQL resources are prepared; run the separate administrator-led PostgreSQL restoration before ordinary code deployment'
+    fi
     fail 'PostgreSQL installation is not prepared; administration must provision all five persistent volumes before deployment'
+  fi
+  if [ "$previous_is_sqlite" -eq 1 ]; then
+    fail 'the previous installation is SQLite and PostgreSQL preparation is incomplete; deployment stopped without creating, restoring, or removing any volume'
   fi
   fail 'PostgreSQL installation is incomplete; deployment stopped without creating, restoring, or removing any volume'
 fi

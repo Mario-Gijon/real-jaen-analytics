@@ -65,7 +65,13 @@ def run() -> None:
                     SELECT current_database(), current_user,
                            role.rolsuper, role.rolcreatedb, role.rolcreaterole,
                            has_schema_privilege(current_user, 'public', 'CREATE'),
-                           has_table_privilege(current_user, 'public.{version_table}', 'SELECT'),
+                           (has_table_privilege(current_user, 'public.{version_table}', 'SELECT') OR
+                            has_table_privilege(current_user, 'public.{version_table}', 'INSERT') OR
+                            has_table_privilege(current_user, 'public.{version_table}', 'UPDATE') OR
+                            has_table_privilege(current_user, 'public.{version_table}', 'DELETE') OR
+                            has_table_privilege(current_user, 'public.{version_table}', 'TRUNCATE') OR
+                            has_table_privilege(current_user, 'public.{version_table}', 'REFERENCES') OR
+                            has_table_privilege(current_user, 'public.{version_table}', 'TRIGGER')),
                            has_database_privilege(current_user, :other_database, 'CONNECT')
                     FROM pg_roles AS role WHERE role.rolname=current_user
                 """), {"other_database": other_database}).one()

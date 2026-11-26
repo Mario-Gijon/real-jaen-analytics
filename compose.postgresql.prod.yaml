@@ -1,5 +1,5 @@
-# Opt-in single-host production integration. The ordinary GitLab Compose file
-# remains SQLite by default until a later deployment milestone.
+# Production PostgreSQL overlay; Compose must combine this file with the base
+# application and PostgreSQL service files.
 name: ${COMPOSE_PROJECT_NAME:-real-jaen-analytics-postgresql-prod}
 
 services:

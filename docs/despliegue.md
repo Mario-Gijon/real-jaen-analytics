@@ -1,6 +1,6 @@
 # Despliegue
 
-El desarrollo mantiene su configuración SQLite habitual. El despliegue de SINBAD² combina `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml` para ejecutar los cinco servicios con PostgreSQL 18 persistente. Acquisition no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos audiovisuales requieren una acción manual.
+El desarrollo mantiene su configuración SQLite habitual. El despliegue de SINBAD² combina `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml` para ejecutar los cinco servicios con PostgreSQL 18 persistente. Acquisition inicia con el proveedor SofaScore habilitado, pero no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos audiovisuales requieren una acción manual.
 
 Los archivos privados `.env.dev` y `.env.prod` se suministran aparte. Los ejemplos versionados no contienen contraseñas, tokens ni datos reales. El anfitrión Docker necesita acceso de red durante las compilaciones para obtener imágenes base y dependencias.
 
@@ -52,7 +52,7 @@ $HOME/deploy_real-jaen-analytics/
 
 ### Preparación administrada previa
 
-El pipeline rechaza el destino si falta cualquiera de estos volúmenes preparados: datos de PostgreSQL 18, estado operativo de Sports Data, estado operativo de Video Service, trabajos SQLite de Acquisition y perfil Chromium de Acquisition. No crea volúmenes, no restaura copias ni importa datos. Requiere PostgreSQL ya saludable, bases `sports_data` y `video_service`, revisión `pg0005`/`vg0002` y volúmenes montados con las identidades configuradas. Acquisition conserva legítimamente su SQLite de trabajos y perfil; Sports Data y Video Service no requieren sus antiguos archivos SQLite.
+El pipeline rechaza el destino si falta cualquiera de estos volúmenes preparados: datos de PostgreSQL 18, estado operativo de Sports Data, estado operativo de Video Service, trabajos SQLite de Acquisition y perfil Chromium de Acquisition. No crea volúmenes, no restaura copias ni importa datos. Requiere PostgreSQL ya saludable, bases `sports_data` y `video_service`, revisión `pg0005`/`vg0002` y volúmenes montados con las identidades configuradas. Si detecta servicios SQLite activos del proyecto, los deja intactos y rechaza el despliegue; si hay un marcador de restauración incompleta o faltan recursos PostgreSQL, indica que administración debe completar la preparación. Acquisition conserva legítimamente su SQLite de trabajos y perfil; Sports Data y Video Service no requieren sus antiguos archivos SQLite.
 
 Administración debe preparar `shared/postgresql/secrets` con la cuenta de despliegue como propietaria y modo `0700`, de forma que el pipeline pueda validar los permisos sin transportar las credenciales. Incluye contraseña administrativa, contraseñas de los cuatro roles y las cuatro URLs (dos de ejecución y dos owner). Contraseñas y URLs owner/migración: `0600`. Solo las URLs de ejecución son legibles por UID `10001` mediante un GID complementario no privilegiado provisionado por administración: modo `0640` y GID indicado en `ENV_POSTGRESQL_PROD`. Sports Data y Video Service reciben ese grupo; Acquisition no lo recibe. El despliegue comprueba esos permisos sin cambiarlos. No se presupone un grupo privado, ACL ni sudo.
 
@@ -64,8 +64,8 @@ Administración también debe preparar `shared/imports`, volúmenes, red privada
 
 1. Comprueba Compose efectivo, permisos de secretos, las cinco identidades persistentes, PostgreSQL 18 saludable, rol owner de cada base, revisiones esperadas, conexión de cada rol app a su base y rechazo de acceso a la base ajena. Las comprobaciones de base son de solo lectura.
 2. Construye únicamente Sports Data, Acquisition, Video Service y Dashboard. PostgreSQL no se construye, inicia, detiene, actualiza ni fuerza a recrear.
-3. Detiene Dashboard, que es el único punto de entrada publicado, para cerrar nuevas solicitudes deportivas y audiovisuales. Consulta en PostgreSQL los trabajos compartidos de Sports Data y Video Service y en solo lectura los trabajos SQLite de Acquisition. Espera a que terminen y exige cinco lecturas consecutivas sin trabajos. Si no se vacían en 30 minutos, cancela antes de reemplazar servicios y reabre Dashboard.
-4. Escribe el marcador de mantenimiento durable de Acquisition, que impide aceptar trabajo nuevo, y vuelve a comprobar el estado compartido. No modifica leases ni fencing tokens y no bloquea heartbeat ni publicaciones.
+3. Detiene Dashboard, que es el único punto de entrada publicado, para cerrar nuevas solicitudes deportivas y audiovisuales. Consulta en PostgreSQL los trabajos compartidos de Sports Data y Video Service y en solo lectura los trabajos SQLite de Acquisition. Espera a que terminen y exige cinco lecturas consecutivas sin trabajos.
+4. Escribe el marcador de mantenimiento durable de Acquisition y repite el drenaje con el marcador activo, cerrando la carrera entre la última consulta de trabajos y el reemplazo. El marcador impide admitir nuevos trabajos; si no se vacían en 30 minutos, cancela el despliegue y conserva el estado para inspección. No modifica leases ni fencing tokens y no bloquea heartbeat ni publicaciones.
 5. Recrea primero Acquisition y Video Service; comprueba salud; retira el marcador y recrea Sports Data y Dashboard. El Dashboard se valida en `http://127.0.0.1:8090/real-jaen/api/v1/session`. Actualiza `last-good` solo tras comprobar los cinco servicios saludables.
 
 No se ejecuta Alembic ni se hacen downgrades automáticos. Las futuras migraciones de esquema requieren un procedimiento explícito y una recuperación compatible. El rollback de código solo usa una release PostgreSQL marcada como compatible con `pg0005`/`vg0002`; no reinicia una release SQLite contra PostgreSQL y nunca restaura bases de datos. Si la revisión difiere, detiene el rollback automático y deja Dashboard cerrado para inspección.
@@ -85,6 +85,8 @@ Como archivos protegidos de GitLab con ámbito `production` y sin expansión de 
 | `APP_ACCESS_PASSWORD`, `APP_UPDATE_PASSWORD`, `APP_SESSION_SECRET`, `APP_CONTROL_TOKEN`, `APP_ACQUISITION_TOKEN` | Credenciales de aplicación en archivos File protegidos. |
 
 Las credenciales PostgreSQL permanecen en el servidor y no se transportan en cada pipeline. Administración debe confirmar el host Docker, Compose 2.24.4+, red y volúmenes preparados, permisos de carpetas/secretos, restauración inicial y configuración de Apache (`Host`, `X-Forwarded-Proto: https`, preservación de `/real-jaen`). La autorización para alojamiento DEV compartido y su conectividad privada sigue pendiente.
+
+`RJ_ACQUISITION_ENABLE_REAL=1` es obligatorio en `ENV_PROD`: Acquisition necesita el proveedor SofaScore real para iniciar saludable. Habilitar el proveedor no inicia scraping; las solicitudes siguen siendo manuales desde Dashboard y conservan los límites de intentos, envíos, jornadas y presupuesto definidos en Compose.
 
 No se accedió a SINBAD² ni GitLab, no se ejecutó CI Lint ni despliegue real en este hito. Antes del primer push a `main`, administración debe aplicar estas variables y preparar el destino; el código no supone que esos recursos existen.
 

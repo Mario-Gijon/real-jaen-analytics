@@ -47,6 +47,17 @@ def main() -> None:
         if services[name].get("ports"):
             fail("internal services must not publish host ports")
 
+    acquisition_env = services["acquisition"].get("environment", {})
+    if acquisition_env.get("ACQ_PROVIDER") != "sofascore" or acquisition_env.get("ACQ_ENABLE_REAL") != "1":
+        fail("production Acquisition must explicitly use the real SofaScore provider")
+    if any(acquisition_env.get(key) != expected for key, expected in {
+        "ACQ_MAX_ATTEMPTS": "48",
+        "ACQ_MAX_SENDS": "52",
+        "ACQ_UPDATE_RECENT_ROUNDS": "3",
+        "ACQ_UPDATE_MAX_TOTAL_SENDS": "50",
+    }.items()):
+        fail("production Acquisition query and send limits must remain at their approved values")
+
     dashboard_env = services["dashboard"].get("environment", {})
     if dashboard_env.get("NEXT_PUBLIC_BASE_PATH") != "/real-jaen":
         fail("Dashboard must use basePath /real-jaen")
@@ -125,8 +136,13 @@ def main() -> None:
         fail("Acquisition must retain its browser profile and SQLite jobs volumes")
     if services["sports-data"].get("environment", {}).get("SPORTS_DATA_STORAGE") != "postgresql":
         fail("Sports Data must use PostgreSQL in production")
+    if services["sports-data"].get("environment", {}).get("SPORTS_DATA_DB") not in (None, ""):
+        fail("Sports Data must not retain the SQLite database path in PostgreSQL mode")
     if services["video-service"].get("environment", {}).get("VIDEO_SERVICE_STORAGE") != "postgresql":
         fail("Video Service must use PostgreSQL in production")
+    video_env = services["video-service"].get("environment", {})
+    if video_env.get("VIDEO_SERVICE_DATA_DIR") not in (None, "") or video_env.get("VIDEO_SERVICE_MANIFEST") not in (None, ""):
+        fail("Video Service must not retain SQLite catalog paths in PostgreSQL mode")
     secret_groups = []
     for service in ("sports-data", "video-service"):
         groups = services[service].get("group_add", [])
