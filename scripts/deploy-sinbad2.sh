@@ -10,8 +10,8 @@ fail() {
 
 mode=${1:-}
 case "$mode" in
-  deploy|bootstrap) ;;
-  *) fail 'internal mode must be deploy or bootstrap' ;;
+  deploy) ;;
+  *) fail 'only ordinary PostgreSQL code deployments are supported' ;;
 esac
 
 for tool in bash git ssh ssh-keygen tar mktemp install tr; do
@@ -25,6 +25,7 @@ require_file_variable() {
 }
 
 require_file_variable ENV_PROD
+require_file_variable ENV_POSTGRESQL_PROD
 require_file_variable APP_ACCESS_PASSWORD
 require_file_variable APP_UPDATE_PASSWORD
 require_file_variable APP_SESSION_SECRET
@@ -72,6 +73,7 @@ trap cleanup EXIT
 private_bundle="$work_dir/private"
 mkdir -m 700 -p "$private_bundle/secrets/session"
 install -m 600 -- "$ENV_PROD" "$private_bundle/.env.prod"
+install -m 600 -- "$ENV_POSTGRESQL_PROD" "$private_bundle/.env.postgresql.prod"
 install -m 600 -- "$APP_ACCESS_PASSWORD" "$private_bundle/secrets/access-password"
 install -m 600 -- "$APP_UPDATE_PASSWORD" "$private_bundle/secrets/update-password"
 install -m 600 -- "$APP_SESSION_SECRET" "$private_bundle/secrets/session/session-secret"

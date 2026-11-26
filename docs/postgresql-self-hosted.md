@@ -1,6 +1,6 @@
 # PostgreSQL autogestionado
 
-Esta es la guía para PostgreSQL 18 autogestionado. DEV y PROD usan proyectos Compose, volúmenes, redes y credenciales distintos. La integración PostgreSQL es opt-in: el arranque habitual de `compose.dev.yaml` sigue usando SQLite, `compose.prod.yaml` y el despliegue GitLab siguen sin cambios, y el override de producción se reserva para un cambio de despliegue futuro.
+Esta es la guía para PostgreSQL 18 autogestionado. DEV y PROD usan proyectos Compose, volúmenes, redes y credenciales distintos. El arranque habitual de desarrollo en `compose.dev.yaml` sigue usando SQLite; el despliegue de producción combina los tres Compose PostgreSQL y conserva la infraestructura estable fuera de los cambios de código.
 
 ## Bases y roles
 
@@ -123,7 +123,7 @@ Alembic no vuelve a ejecutar una revisión que la base ya registra. Por ello, ca
 
 ## Integración de los cuatro servicios (Hito 08B)
 
-Los overrides opt-in no cambian los archivos SQLite habituales. Compose 2.24 o posterior es necesario para `!override` y `!reset`; la configuración se verificó con Docker Compose 5.6.1.
+Los overrides opt-in no cambian los archivos SQLite habituales. Compose 2.24.4 o posterior es necesario para `!override` y `!reset` ([documentación de Docker](https://docs.docker.com/reference/compose-file/merge/)); la configuración se verificó con Docker Compose 5.6.1.
 
 ### DEV autónomo: aplicaciones y PostgreSQL local
 
@@ -201,17 +201,28 @@ docker compose --env-file .env.dev --env-file .env.postgresql.remote \
 
 No incluyas `compose.postgresql.yaml`, no se levanta una base local. Solo Sports Data tiene una red de salida para su DB remota; Video Service usa su red de salida existente. La excepción Docker sin TLS se elimina en este perfil. No se incluyen tareas de migración y no se deben ejecutar migraciones/importadores contra un PostgreSQL compartido desde cada instalación local.
 
-### PROD preparado, no desplegado
+### Producción SINBAD²
 
-La combinación `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml` prepara Sports Data, Acquisition, Video Service, Dashboard y PostgreSQL en el mismo servidor. Usa el env protegido PROD, los nombres y secretos PROD separados, rutas de datos que preparen los administradores y el siguiente orden de archivos:
+El despliegue productivo usa conjuntamente `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml`, además de `ENV_PROD` y `ENV_POSTGRESQL_PROD` protegidos:
 
 ```bash
-docker compose --env-file /ruta/segura/prod.env \
+docker compose --env-file /ruta/segura/.env.prod \
+  --env-file /ruta/segura/.env.postgresql.prod \
   -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml \
-  config --services
+  --profile migrations config --services
 ```
 
-El overlay conserva el Dashboard en `127.0.0.1:8090`, fija `NEXT_PUBLIC_BASE_PATH=/real-jaen` (también está compilado así en `dashboard/Dockerfile`), no publica PostgreSQL y no publica directamente los otros tres servicios. Solo Sports Data y Video Service se conectan a `postgresql-private`. Los nombres de volúmenes, red y secretos deben tener el prefijo/raíz PROD configurados en el env protegido y no reutilizar DEV. Esta modalidad es solo configuración revisable: no se levantó, desplegó ni cambió GitLab.
+El perfil `migrations` solo describe tareas owner; la pipeline no las inicia. El release verifica PostgreSQL 18 y las revisiones `pg0005` y `vg0002` mediante SELECT de solo lectura. Ningún `upgrade`, downgrade, importador, bootstrap o restauración se ejecuta durante un despliegue de código.
+
+El proyecto y la red privada son estables en PROD. Deben existir los volúmenes nombrados de PostgreSQL, Sports Data, Video Service, perfil de Acquisition y trabajos SQLite de Acquisition. El job rechaza cualquier volumen o credencial que falte. La base PostgreSQL debe estar ejecutándose y saludable antes de desplegar; el job no la inicia, recrea ni actualiza. El Dashboard conserva `127.0.0.1:8090` y `basePath=/real-jaen`; solo los microservicios de base acceden a la red privada PostgreSQL y ningún otro servicio publica puertos.
+
+Las credenciales PostgreSQL permanecen bajo `shared/postgresql/secrets`, fuera de las versiones y rotaciones de secretos de aplicación. Administración prepara el directorio como propiedad de la cuenta de despliegue y modo `0700`, para que el job compruebe permisos sin copiar las credenciales al Runner. Contraseñas administrativas y URLs owner: `0600`; solo URLs runtime: `0640` con un GID complementario no privilegiado para UID `10001`. Sports Data y Video Service reciben ese grupo; Acquisition no. No se usa lectura global ni se presupone que SINBAD² permita sudo, ACL o un grupo privado existente. Administración proporciona el GID y prepara las rutas y permisos antes de configurar `ENV_POSTGRESQL_PROD`.
+
+Antes de recrear aplicaciones, el job detiene Dashboard (único punto publicado), espera a que terminen trabajos de Sports Data y Video Service almacenados en PostgreSQL y Acquisition en su SQLite, y coloca el marcador de mantenimiento de Acquisition. No toca leases/fencing tokens, no bloquea heartbeats y cancela el despliegue si los trabajos no se vacían. Primero reinicia Acquisition y Video Service; luego Sports Data y Dashboard. Comprueba salud de cinco servicios y el endpoint `127.0.0.1:8090/real-jaen/api/v1/session` antes de promover `last-good`.
+
+El rollback solo se permite hacia una release registrada como PostgreSQL compatible con los mismos esquemas `pg0005` y `vg0002`. No reinicia una versión SQLite contra PostgreSQL ni restaura bases de datos. Si las revisiones cambian, deja Dashboard detenido y el estado disponible para inspección. PostgreSQL se excluye de build, `up` y `--force-recreate`; los scripts de inicialización están montados desde su release original y esta release se conserva mientras un contenedor PostgreSQL activo use sus bind mounts. El limpiador conserva al menos cinco releases y no ejecuta `docker system prune`.
+
+La restauración inicial y el backup/restore PostgreSQL quedan para el Hito 09A. La conectividad a una base DEV compartida en SINBAD² sigue pendiente de autorización de administración. En este hito no se accedió al servidor ni a GitLab y no se realizó un despliegue.
 
 ### Healthcheck, puertos y límites
 

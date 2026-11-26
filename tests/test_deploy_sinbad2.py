@@ -1,8 +1,7 @@
-"""Local, isolated deployment tests. SSH and Docker are replaced by test shims."""
+"""Focused, isolated SINBAD² PostgreSQL deployment checks; SSH and Docker are shims."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,12 +14,19 @@ import unittest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 COMMIT = "a" * 40
-SECRETS = {
+APP_SECRETS = {
     "APP_ACCESS_PASSWORD": secrets.token_urlsafe(18),
     "APP_UPDATE_PASSWORD": secrets.token_urlsafe(18),
     "APP_SESSION_SECRET": secrets.token_urlsafe(32),
     "APP_CONTROL_TOKEN": secrets.token_urlsafe(32),
     "APP_ACQUISITION_TOKEN": secrets.token_urlsafe(32),
+}
+VOLUMES = {
+    "rja-sinbad2-postgresql-data",
+    "rja-sinbad2-sports-operational-state",
+    "rja-sinbad2-video-operational-state",
+    "rja-sinbad2-acquisition-profiles",
+    "rja-sinbad2-acquisition-jobs",
 }
 
 FAKE_GIT = r"""#!/bin/sh
@@ -32,36 +38,16 @@ set -eu
 
 FAKE_SSH = r"""#!/bin/sh
 set -eu
-if [ -n "${RJA_TEST_SSH_LOG:-}" ]; then
-  for argument do printf '%s\n' "$argument" >> "$RJA_TEST_SSH_LOG"; done
-fi
-ssh_key=
-known_hosts=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -i) ssh_key=$2; shift 2 ;;
-    -o)
-      case "$2" in UserKnownHostsFile=*) known_hosts=${2#*=} ;; esac
-      shift 2
-      ;;
+    -i|-o) shift 2 ;;
     *) break ;;
   esac
 done
 [ "$#" -ge 2 ] || exit 91
 target=$1
 shift
-case "$target" in *@*) ;; *) exit 92 ;; esac
-python3 - "$ssh_key" "$known_hosts" "$RJA_TEST_SSH_MATERIAL_LOG" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-key, hosts, log = map(Path, sys.argv[1:])
-with log.open("a", encoding="utf-8") as stream:
-    stream.write(json.dumps({"key_mode": key.stat().st_mode & 0o777,
-                             "known_hosts_mode": hosts.stat().st_mode & 0o777,
-                             "private_key_env_present": "SSH_PRIVATE_KEY" in os.environ}) + "\n")
-PY
+case "$target" in deploy@sinbad2.test) ;; *) exit 92 ;; esac
 export HOME="$RJA_TEST_REMOTE_HOME"
 if [ "$1" = sh ]; then
   shift
@@ -70,1123 +56,456 @@ fi
 exec /bin/sh -c "$1"
 """
 
-FAKE_SH = r"""#!/bin/sh
-set -eu
-case " $* " in
-  *"dashboard/scripts/restaurar-instalacion.sh"*)
-    python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-state = json.loads(Path(os.environ["RJA_TEST_DOCKER_STATE"]).read_text(encoding="utf-8"))
-Path(os.environ["RJA_TEST_RESTORE_PRESTATE"]).write_text(
-    json.dumps({"volumes": state["volumes"]}), encoding="utf-8"
-)
-PY
-    ;;
-esac
-exec "$RJA_REAL_SH" "$@"
-"""
-
-FAKE_MV = r"""#!/bin/sh
-set -eu
-target=
-for argument do target=$argument; done
-case "${RJA_TEST_FAIL_LAST_GOOD:-0}:$target" in
-  1:*/shared/deploy-state/last-good) exit 1 ;;
-esac
-exec "$RJA_REAL_MV" "$@"
-"""
-
-FAKE_RM = r"""#!/bin/sh
-set -eu
-case "${RJA_TEST_FAIL_RELEASE_PRUNE:-0}:$*" in
-  1:*"/releases/"*) exit 1 ;;
-esac
-exec "$RJA_REAL_RM" "$@"
-"""
-
 FAKE_DOCKER = r"""#!/usr/bin/env python3
-import json
-import os
+import json, os, subprocess, sys
 from pathlib import Path
-import subprocess
-import sys
 
 args = sys.argv[1:]
 log = Path(os.environ["RJA_TEST_DOCKER_LOG"])
 with log.open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(args) + "\n")
 state_path = Path(os.environ["RJA_TEST_DOCKER_STATE"])
-if state_path.exists():
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-else:
-    state = {"volumes": os.environ.get("RJA_TEST_VOLUMES", "").split(), "up_count": 0,
-             "deployed": False, "network_detached": False}
-
-state.setdefault("implicit_volume_creations", [])
+state = json.loads(state_path.read_text()) if state_path.exists() else {
+    "volumes": sorted(filter(None, os.environ.get("RJA_TEST_VOLUMES", "").split())),
+    "deployed": True, "dashboard_stopped": False, "up_services": [], "up_count": 0,
+    "active_sports_polls": 0, "active_video_polls": 0,
+    "active_acquisition_polls": 0, "maintenance": False,
+}
 
 def save():
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
-def resolved_compose_config():
-    prefix = "rja-sinbad2-prod"
-    shared = Path(os.environ["RJA_TEST_REMOTE_HOME"]) / "deploy_real-jaen-analytics" / "shared"
-    volumes = {
-        "sports-state": "rja-sinbad2-sports-state",
-        "acquisition-profiles": "rja-sinbad2-acquisition-profiles",
-        "acquisition-jobs": "rja-sinbad2-acquisition-jobs",
-        "video-state": "rja-sinbad2-video-state",
-    }
-    def vol(name, target):
-        return {"type": "volume", "source": name, "target": target}
-    def image(service):
-        return f"local/real-jaen-analytics/{service}:{os.environ.get('RJ_IMAGE_TAG', 'prod')}"
-    return {
-        "name": "real-jaen-analytics-sinbad2-prod",
-        "services": {
-            "sports-data": {"image": image("sports-data"), "volumes": [
-                vol("sports-state", "/state"),
-                {"type": "bind", "source": str(shared / "imports"), "target": "/imports", "read_only": True},
-            ]},
-            "acquisition": {"image": image("acquisition"), "volumes": [
-                vol("acquisition-jobs", "/acquisition-jobs"), vol("acquisition-profiles", "/profiles"),
-            ]},
-            "video-service": {"image": image("video-service"), "environment": {"VIDEO_SERVICE_MANIFEST": "videos.json"}, "volumes": [
-                vol("video-state", "/state"),
-                {"type": "bind", "source": str(shared / "video-catalog"), "target": "/app/data", "read_only": True},
-            ]},
-            "dashboard": {"ports": [{"target": 3000, "published": "8090", "host_ip": "127.0.0.1"}]},
-        },
-        "volumes": {key: {"name": value} for key, value in volumes.items()},
-        "networks": {name: {"name": f"{prefix}-{name}"} for name in (
-            "dashboard-edge", "sports-data-internal", "video-internal", "acquisition-control",
-            "acquisition-egress", "video-egress")},
-    }
+def real_compose():
+    result = subprocess.run([os.environ["RJA_REAL_DOCKER"], *args], check=False)
+    raise SystemExit(result.returncode)
 
-def add_implicit_volume(name, trigger):
-    if name and name not in state["volumes"]:
-        state["volumes"].append(name)
-        state["implicit_volume_creations"].append({"name": name, "trigger": trigger})
-        save()
-
-def implicit_volumes_for_compose(command, command_args):
-    managed = os.environ.get("RJA_TEST_MANAGED_VOLUMES", "").split()
-    if command == "up":
-        for name in managed:
-            add_implicit_volume(name, "compose up")
-    elif command == "run":
-        services = {"sports-data", "acquisition", "video-service", "dashboard"}
-        service = next((arg for arg in command_args if arg in services), None)
-        if service and len(managed) == 4:
-            indexes = {"sports-data": (0,), "acquisition": (1, 2),
-                       "video-service": (3,), "dashboard": ()}[service]
-            for index in indexes:
-                add_implicit_volume(managed[index], "compose run " + service)
-
-def uid_10001_can_access(path, *, read=False, execute=False):
-    # Evaluate actual host mode bits using the application's numeric UID/GID.
-    try:
-        info = Path(path).stat()
-    except OSError:
-        return False
-    if info.st_uid == 10001:
-        bits = (info.st_mode >> 6) & 7
-    elif info.st_gid == 10001:
-        bits = (info.st_mode >> 3) & 7
-    else:
-        bits = info.st_mode & 7
-    return (not read or bool(bits & 4)) and (not execute or bool(bits & 1))
-
-def check_host_mounts_for_uid_10001():
-    mounts = []
-    for index, argument in enumerate(args[:-1]):
-        if argument == "-v":
-            source, target, *_ = args[index + 1].split(":", 2)
-            if source.startswith("/"):
-                mounts.append((Path(source), target))
-    command_text = " ".join(args)
-    for source, target in mounts:
-        if target == "/imports":
-            if not uid_10001_can_access(source, read=True, execute=True):
-                return False
-            if "initial-backup" in command_text:
-                backup = source / "initial-backup"
-                if not uid_10001_can_access(backup, read=True, execute=True):
-                    return False
-                names = ["real-jaen.sqlite", "actualizaciones.tar", "acquisition-jobs.tar",
-                         "video-service-state.tar", "manifest.json", "SHA256SUMS"]
-                if (backup / "procedencia.tar").is_file():
-                    names.append("procedencia.tar")
-                if any(not uid_10001_can_access(backup / name, read=True) for name in names):
-                    return False
-        elif target == "/app/data":
-            if not uid_10001_can_access(source, read=True, execute=True):
-                return False
-            if "VideoCatalog.load" in command_text:
-                manifest = source / "videos.json"
-                if not uid_10001_can_access(manifest, read=True):
-                    return False
-                try:
-                    json.loads(manifest.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    return False
-    return True
+def command_index(commands):
+    return next((index for index, value in enumerate(args) if value in commands), None)
 
 if args[:3] == ["compose", "version", "--short"]:
-    print("5.6.1")
+    print(os.environ.get("RJA_TEST_COMPOSE_VERSION", "5.6.1"))
 elif args[:2] == ["volume", "inspect"]:
     raise SystemExit(0 if args[2] in state["volumes"] else 1)
-elif args[:2] == ["volume", "create"]:
-    name = args[-1]
-    if name not in state["volumes"]:
-        state["volumes"].append(name)
-    save()
-    print(name)
-elif args and args[0] == "compose":
-    subcommands = {"config", "build", "up", "ps", "run"}
-    index = next((i for i, arg in enumerate(args[1:], 1) if arg in subcommands), None)
+elif args[:2] == ["network", "inspect"]:
+    raise SystemExit(0)
+elif args[:1] == ["compose"]:
+    index = command_index({"config", "build", "up", "ps", "stop", "start"})
     command = args[index] if index is not None else ""
     command_args = args[index + 1:] if index is not None else []
-    if command in ("up", "run"):
-        implicit_volumes_for_compose(command, command_args)
-    if command == "build":
-        raise SystemExit(1 if os.environ.get("RJA_TEST_FAIL_BUILD") == "1" else 0)
+    if command == "config":
+        real_compose()
+    elif command == "build":
+        raise SystemExit(0)
     elif command == "up":
         state["up_count"] += 1
+        selected = [item for item in command_args if item in {
+            "dashboard", "sports-data", "acquisition", "video-service", "postgresql"
+        }]
+        state["up_services"].append(selected)
         fail_at = int(os.environ.get("RJA_TEST_FAIL_UP_AT", "0"))
-        if state["up_count"] == fail_at:
+        if fail_at and state["up_count"] == fail_at:
             save()
             raise SystemExit(1)
         state["deployed"] = True
-        if "sports-data" in args:
-            state["network_detached"] = False
+        if "dashboard" in selected:
+            state["dashboard_stopped"] = False
         save()
     elif command == "ps":
-        if state["deployed"]:
-            print("container-" + args[-1])
-    elif command == "run":
-        if any("instalacion_compose.py" in arg for arg in args):
-            helper_mount = next((args[i + 1].split(":", 1)[0] for i, arg in enumerate(args[:-1])
-                                if arg == "-v" and "instalacion_compose.py" in args[i + 1]), None)
-            if helper_mount is None:
-                raise SystemExit(92)
-            resolved = subprocess.run([sys.executable, helper_mount], input=sys.stdin.read(), text=True,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            sys.stdout.write(resolved.stdout)
-            sys.stderr.write(resolved.stderr)
-            raise SystemExit(resolved.returncode)
-        if (os.environ.get("RJA_TEST_FAIL_RESTORE") == "1" and len(state["volumes"]) == 4
-                and "scripts.initialize_snapshot" in args):
-            raise SystemExit(1)
-        if not check_host_mounts_for_uid_10001():
-            raise SystemExit(1)
-        if any("SELECT COUNT(*) FROM job" in x for x in args):
-            print(os.environ.get("RJA_TEST_ACTIVE_JOBS", "0"))
-    elif command == "config":
-        if "--images" in command_args:
-            print(f"local/real-jaen-analytics/sports-data:{os.environ.get('RJ_IMAGE_TAG', 'prod')}")
-        elif "--format" in command_args:
-            json.dump(resolved_compose_config(), sys.stdout)
-            sys.stdout.write("\n")
+        service = command_args[-1]
+        if service == "postgresql" or (state["deployed"] and not
+                (service == "dashboard" and state["dashboard_stopped"])):
+            print("container-" + service)
+    elif command == "stop":
+        if "dashboard" in command_args:
+            state["dashboard_stopped"] = True
+            save()
+    elif command == "start":
+        if "dashboard" in command_args:
+            state["dashboard_stopped"] = False
+            save()
     else:
-        print("unexpected fake compose invocation", file=sys.stderr)
         raise SystemExit(93)
 elif args[:2] == ["inspect", "--format"]:
     template = args[2]
-    if ".NetworkSettings.Networks" in template:
-        if state["network_detached"]:
-            print("{}")
+    if ".State.Health.Status" in template:
+        print("healthy")
+    elif ".State.Status" in template:
+        print("running")
+    elif ".Mounts" in template:
+        if '"/var/lib/postgresql"' in template:
+            print("rja-sinbad2-postgresql-data:true")
         else:
-            print('{"rja-sinbad2-prod-acquisition-control":{}}')
+            print(os.environ.get("RJA_TEST_CONTAINER_BIND_MOUNT", ""))
+    elif ".HostConfig.PortBindings" in template:
+        print("{}")
     else:
-        print("healthy" if ".State.Health.Status" in template else "running")
-elif args[:2] == ["network", "disconnect"]:
-    state["network_detached"] = True
-    save()
-elif args[:2] == ["network", "connect"]:
-    state["network_detached"] = False
-    save()
-elif args[:2] == ["network", "inspect"]:
-    raise SystemExit(1)
-elif args and args[0] == "ps":
+        print("{}")
+elif args[:2] == ["exec", "container-postgresql"]:
+    print("t")
+elif args[:2] == ["ps", "-q"]:
     pass
-elif args and args[0] in ("info", "run", "image"):
-    if args[0] == "run":
-        for index, argument in enumerate(args[:-1]):
-            if argument == "-v":
-                source = args[index + 1].split(":", 1)[0]
-                if source and not source.startswith("/") and source not in (".", "..") \
-                        and not source.startswith(("./", "../")):
-                    add_implicit_volume(source, "docker run -v")
-        if any("instalacion_compose.py" in arg for arg in args):
-            helper_mount = next((args[i + 1].split(":", 1)[0] for i, arg in enumerate(args[:-1])
-                                if arg == "-v" and "instalacion_compose.py" in args[i + 1]), None)
-            if helper_mount is None:
-                raise SystemExit(92)
-            resolved = subprocess.run([sys.executable, helper_mount], input=sys.stdin.read(), text=True,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            sys.stdout.write(resolved.stdout)
-            sys.stderr.write(resolved.stderr)
-            raise SystemExit(resolved.returncode)
-        if (os.environ.get("RJA_TEST_FAIL_RESTORE") == "1" and len(state["volumes"]) == 4
-                and "scripts.initialize_snapshot" in args):
-            raise SystemExit(1)
-        if any("video-catalog-respaldo.py" in arg for arg in args) and "restaurar" in args:
-            mount = next((args[i + 1] for i, arg in enumerate(args[:-1])
-                          if arg == "--mount" and "target=/catalog-parent" in args[i + 1]), None)
-            target = args[args.index("--target") + 1] if "--target" in args else None
-            if mount is None or target is None:
-                raise SystemExit(92)
-            parent = Path(next(part.removeprefix("source=") for part in mount.split(",")
-                               if part.startswith("source=")))
-            restored_catalog = parent / Path(target).name
-            restored_catalog.mkdir()
-            manifest = restored_catalog / "videos.json"
-            manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
-            manifest.chmod(0o444)
-            restored_catalog.chmod(0o555)
-        if not check_host_mounts_for_uid_10001():
-            raise SystemExit(1)
-        if os.environ.get("RJA_TEST_FAIL_CATALOG") == "1" and any("VideoCatalog.load" in x for x in args):
-            raise SystemExit(1)
-        if any("SELECT COUNT(*) FROM job" in x for x in args):
-            print(os.environ.get("RJA_TEST_ACTIVE_JOBS", "0"))
+elif args[:2] == ["ps", "-aq"]:
+    if os.environ.get("RJA_TEST_CONTAINER_BIND_MOUNT"):
+        print("container-with-pinned-release")
+elif args[:1] == ["run"]:
+    command = " ".join(args)
+    if os.environ.get("RJA_TEST_FAIL_SCHEMA") == "1" and any(
+            value in args for value in ("sports-schema", "video-schema", "sports-app", "video-app")):
+        raise SystemExit(1)
+    if any(value in args for value in ("sports-schema", "sports-app", "video-schema", "video-app")):
+        print("ok")
+    elif "sports-active" in args:
+        state["active_sports_polls"] += 1
+        delay = int(os.environ.get("RJA_TEST_ACTIVE_SPORTS_POLLS", "0"))
+        print("1" if state["active_sports_polls"] <= delay else "0")
+    elif "video-active" in args:
+        state["active_video_polls"] += 1
+        delay = int(os.environ.get("RJA_TEST_ACTIVE_VIDEO_POLLS", "0"))
+        print("1" if state["active_video_polls"] <= delay else "0")
+    elif "print('present' if" in command:
+        print("present" if state["maintenance"] else "absent")
+    elif "os.O_EXCL" in command and "deployment-maintenance" in command:
+        state["maintenance"] = True
+        save()
+    elif "p.unlink()" in command and "deployment-maintenance" in command:
+        state["maintenance"] = False
+        save()
+    elif "SELECT COUNT(*) FROM job" in command:
+        state["active_acquisition_polls"] += 1
+        delay = int(os.environ.get("RJA_TEST_ACTIVE_ACQUISITION_POLLS", "0"))
+        print("1" if state["active_acquisition_polls"] <= delay else "0")
+    else:
+        pass
+elif args and args[0] in ("info", "image"):
+    pass
 else:
-    print("unexpected fake docker invocation", file=sys.stderr)
-    raise SystemExit(93)
+    print("unexpected fake Docker invocation", file=sys.stderr)
+    raise SystemExit(94)
 save()
 """
 
 
-class DeploySinbad2Tests(unittest.TestCase):
+class SinbadPostgreSQLDeploymentTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(prefix="rja-deploy-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="rja-sinbad-pg-test-")
         self.base = Path(self.temp.name)
         self.bin_dir = self.base / "bin"
         self.bin_dir.mkdir()
         self.remote_home = self.base / "remote-home"
         self.remote_home.mkdir()
-        self.files = self.base / "file-vars"
-        self.files.mkdir()
-        self.logs = self.base / "docker.jsonl"
-        self.ssh_log = self.base / "ssh-args.log"
-        self.ssh_material_log = self.base / "ssh-material.jsonl"
+        self.file_vars = self.base / "file-vars"
+        self.file_vars.mkdir()
+        self.log = self.base / "docker.jsonl"
         self.state = self.base / "docker-state.json"
-        self.write_file(self.bin_dir / "git", FAKE_GIT, 0o755)
-        self.write_file(self.bin_dir / "ssh", FAKE_SSH, 0o755)
-        self.write_file(self.bin_dir / "sh", FAKE_SH, 0o755)
-        self.write_file(self.bin_dir / "docker", FAKE_DOCKER, 0o755)
-        self.write_file(self.bin_dir / "mv", FAKE_MV, 0o755)
-        self.write_file(self.bin_dir / "rm", FAKE_RM, 0o755)
-        real_python = shutil.which("python3") or "/usr/bin/python3"
-        self.write_file(self.bin_dir / "python3", f'''#!{real_python}
-import os, runpy, sys
-if "--check-dashboard-port" in sys.argv:
-    sys.argv.remove("--check-dashboard-port")
-    runpy.run_path(sys.argv[1], run_name="__main__")
-else:
-    os.execv({real_python!r}, [{real_python!r}, *sys.argv[1:]])
-''', 0o755)
-        self.make_file_variables()
-        self.key = self.files / "deploy_key"
-        subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key)],
-            check=True,
+        self.secret_gid = str(os.getgid())
+        self.write(self.bin_dir / "git", FAKE_GIT, 0o755)
+        self.write(self.bin_dir / "ssh", FAKE_SSH, 0o755)
+        self.write(self.bin_dir / "docker", FAKE_DOCKER, 0o755)
+        self.git_key = self.file_vars / "deploy_key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.git_key)], check=True)
+        key_type, key_value, *_ = self.git_key.with_suffix(".pub").read_text().split()
+        self.write(self.file_vars / "known_hosts", f"sinbad2.test {key_type} {key_value}\n")
+        self.write(self.file_vars / "ENV_PROD", (REPOSITORY / ".env.prod.example").read_text())
+        postgres_env = (REPOSITORY / ".env.postgresql.prod.example").read_text().replace(
+            "REPLACE_WITH_ADMIN_PROVISIONED_GID", self.secret_gid
         )
-        public_key = self.key.with_suffix(".pub").read_text(encoding="utf-8").split()
-        self.write_file(self.files / "known_hosts", f"sinbad2.test {public_key[0]} {public_key[1]}\n")
+        self.write(self.file_vars / "ENV_POSTGRESQL_PROD", postgres_env)
+        for name, value in APP_SECRETS.items():
+            self.write(self.file_vars / name, value + "\n")
+
+        shared = self.remote_home / "deploy_real-jaen-analytics" / "shared"
+        imports = shared / "imports"
+        pg_secrets = shared / "postgresql" / "secrets"
+        imports.mkdir(parents=True)
+        pg_secrets.mkdir(parents=True)
+        imports.chmod(0o755)
+        pg_secrets.chmod(0o700)
+        for name in (
+            "postgres_admin_password", "sports_data_owner_password", "sports_data_app_password",
+            "video_service_owner_password", "video_service_app_password",
+            "sports_data_migration_database_url", "video_service_migration_database_url",
+        ):
+            self.write(pg_secrets / name, "synthetic-test-credential\n", 0o600)
+        for name in ("sports_data_database_url", "video_service_database_url"):
+            self.write(pg_secrets / name, "postgresql://synthetic.invalid\n", 0o640)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     @staticmethod
-    def write_file(path: Path, content: str, mode: int = 0o600) -> None:
-        path.write_text(content, encoding="utf-8")
+    def write(path: Path, value: str, mode: int = 0o600) -> None:
+        path.write_text(value, encoding="utf-8")
         path.chmod(mode)
 
-    def make_file_variables(self) -> None:
-        env_text = (REPOSITORY / ".env.prod.example").read_text(encoding="utf-8")
-        for name, value in {"ENV_PROD": env_text, **SECRETS}.items():
-            self.write_file(self.files / name, value + ("\n" if not value.endswith("\n") else ""))
-
-    def environment(self, pipeline_id: int = 101, job_id: int = 501) -> dict[str, str]:
+    def environment(self) -> dict[str, str]:
         env = os.environ.copy()
-        env.update(
-            {
-                "PATH": f"{self.bin_dir}{os.pathsep}{env['PATH']}",
-                "TMPDIR": str(self.base),
-                "RJA_TEST_SOURCE": str(REPOSITORY),
-                "RJA_REAL_GIT": shutil.which("git") or "/usr/bin/git",
-                "RJA_REAL_MV": shutil.which("mv") or "/bin/mv",
-                "RJA_REAL_RM": shutil.which("rm") or "/bin/rm",
-                "RJA_TEST_REMOTE_HOME": str(self.remote_home),
-                "RJA_TEST_DOCKER_LOG": str(self.logs),
-                "RJA_TEST_DOCKER_STATE": str(self.state),
-                "RJA_TEST_SSH_LOG": str(self.ssh_log),
-                "RJA_TEST_SSH_MATERIAL_LOG": str(self.ssh_material_log),
-                "RJA_TEST_RESTORE_PRESTATE": str(self.base / "restore-prestate.json"),
-                "RJA_TEST_VOLUMES": "rja-sinbad2-sports-state rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs rja-sinbad2-video-state",
-                "RJA_TEST_MANAGED_VOLUMES": "rja-sinbad2-sports-state rja-sinbad2-acquisition-profiles rja-sinbad2-acquisition-jobs rja-sinbad2-video-state",
-                "RJA_REAL_SH": shutil.which("sh") or "/bin/sh",
-                "SSH_HOST": "sinbad2.test",
-                "REMOTE_USER": "deploy",
-                "CI_COMMIT_SHA": COMMIT,
-                "CI_PIPELINE_ID": str(pipeline_id),
-                "CI_JOB_ID": str(job_id),
-            }
-        )
-        for name in ("ENV_PROD", "SSH_PRIVATE_KEY", "SSH_KNOWN_HOSTS", *SECRETS):
-            if name == "SSH_PRIVATE_KEY":
-                path = self.key
-            elif name == "SSH_KNOWN_HOSTS":
-                path = self.files / "known_hosts"
-            else:
-                path = self.files / name
-            env[name] = str(path)
+        env.update({
+            "PATH": f"{self.bin_dir}{os.pathsep}{env['PATH']}",
+            "TMPDIR": str(self.base),
+            "RJA_TEST_SOURCE": str(REPOSITORY),
+            "RJA_REAL_GIT": shutil.which("git") or "/usr/bin/git",
+            "RJA_REAL_DOCKER": shutil.which("docker") or "/usr/bin/docker",
+            "RJA_TEST_REMOTE_HOME": str(self.remote_home),
+            "RJA_TEST_DOCKER_LOG": str(self.log),
+            "RJA_TEST_DOCKER_STATE": str(self.state),
+            "RJA_TEST_VOLUMES": " ".join(sorted(VOLUMES)),
+            "SSH_HOST": "sinbad2.test",
+            "REMOTE_USER": "deploy",
+            "CI_COMMIT_SHA": COMMIT,
+            "CI_PIPELINE_ID": "101",
+            "CI_JOB_ID": "501",
+        })
+        for name in ("ENV_PROD", "ENV_POSTGRESQL_PROD", *APP_SECRETS):
+            env[name] = str(self.file_vars / name)
+        env["SSH_PRIVATE_KEY"] = str(self.git_key)
+        env["SSH_KNOWN_HOSTS"] = str(self.file_vars / "known_hosts")
         return env
 
-    def invoke(
-        self,
-        mode: str = "deploy",
-        env: dict[str, str] | None = None,
-        pipeline_id: int = 101,
-        job_id: int = 501,
-    ) -> subprocess.CompletedProcess[str]:
-        result_env = self.environment(pipeline_id=pipeline_id, job_id=job_id) if env is None else env
+    def invoke(self, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(REPOSITORY / "scripts/deploy-sinbad2.sh"), mode],
+            ["bash", str(REPOSITORY / "scripts/deploy-sinbad2.sh"), "deploy"],
             cwd=REPOSITORY,
-            env=result_env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+            env=self.environment() if env is None else env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
 
     def docker_calls(self) -> list[list[str]]:
-        if not self.logs.exists():
+        if not self.log.exists():
             return []
-        return [json.loads(line) for line in self.logs.read_text(encoding="utf-8").splitlines()]
+        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
 
-    def assert_ssh_material_is_private(self, result: subprocess.CompletedProcess[str], key_text: str) -> None:
-        logged = result.stdout + result.stderr
-        if self.ssh_log.exists():
-            logged += self.ssh_log.read_text(encoding="utf-8")
-        if self.logs.exists():
-            logged += self.logs.read_text(encoding="utf-8")
-        self.assertNotIn(key_text.strip(), logged)
-        material = [json.loads(line) for line in self.ssh_material_log.read_text(encoding="utf-8").splitlines()]
-        self.assertTrue(material)
-        self.assertTrue(all(item["key_mode"] == 0o600 for item in material))
-        self.assertTrue(all(item["known_hosts_mode"] == 0o600 for item in material))
-        self.assertTrue(all(not item["private_key_env_present"] for item in material))
+    def test_main_push_is_the_only_remote_deployment_rule(self) -> None:
+        pipeline = (REPOSITORY / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        self.assertIn('$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"', pipeline)
+        self.assertIn("resource_group: sinbad2-production", pipeline)
+        self.assertIn("interruptible: false", pipeline)
+        self.assertNotIn("bootstrap", pipeline)
 
-    def test_fake_docker_creates_implicit_named_volumes(self) -> None:
+    def test_compose_older_than_override_tags_is_rejected(self) -> None:
         env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        direct = subprocess.run(
-            [str(self.bin_dir / "docker"), "run", "--rm", "-v", "implicit-run-volume:/state", "alpine", "true"],
-            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
-        self.assertEqual(direct.returncode, 0, direct.stderr)
-        compose_run = subprocess.run(
-            [str(self.bin_dir / "docker"), "compose", "run", "--rm", "sports-data", "true"],
-            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
-        self.assertEqual(compose_run.returncode, 0, compose_run.stderr)
-        compose_up = subprocess.run(
-            [str(self.bin_dir / "docker"), "compose", "up", "-d"],
-            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
-        self.assertEqual(compose_up.returncode, 0, compose_up.stderr)
+        env["RJA_TEST_COMPOSE_VERSION"] = "2.24.3"
 
-        state = json.loads(self.state.read_text(encoding="utf-8"))
-        self.assertIn("implicit-run-volume", state["volumes"])
-        self.assertCountEqual(state["volumes"], env["RJA_TEST_MANAGED_VOLUMES"].split() + ["implicit-run-volume"])
-        self.assertTrue(any(item["trigger"] == "docker run -v" for item in state["implicit_volume_creations"]))
-        self.assertTrue(any(item["trigger"].startswith("compose ") for item in state["implicit_volume_creations"]))
+        result = self.invoke(env)
 
-    @staticmethod
-    def compose_call(call: list[str], subcommand: str) -> bool:
-        if not call or call[0] != "compose":
-            return False
-        return subcommand in call[1:]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Docker Compose 2.24.4 or newer", result.stderr)
+        self.assertFalse(any("up" in call for call in self.docker_calls()))
 
-    def release_contains(self, release: Path, needle: str) -> bool:
-        target = needle.encode("utf-8")
-        for path in release.rglob("*"):
-            if not path.is_file():
-                continue
-            carry = b""
-            with path.open("rb") as stream:
-                while chunk := stream.read(1024 * 1024):
-                    data = carry + chunk
-                    if target in data:
-                        return True
-                    carry = data[-(len(target) - 1) :] if len(target) > 1 else b""
-        return False
-
-    def last_good(self) -> str:
-        return (self.remote_home / "deploy_real-jaen-analytics/shared/deploy-state/last-good").read_text(
-            encoding="utf-8"
-        )
-
-    def add_verified_backup(self) -> Path:
-        backup = self.remote_home / "deploy_real-jaen-analytics/shared/imports/initial-backup"
-        backup.mkdir(parents=True)
-        names = (
-            "real-jaen.sqlite",
-            "actualizaciones.tar",
-            "acquisition-jobs.tar",
-            "video-service-state.tar",
-            "manifest.json",
-        )
-        for name in names:
-            (backup / name).write_text(f"mock backup payload: {name}\n", encoding="utf-8")
-        (backup / "manifest.json").write_text(json.dumps({
-            "formato_respaldo": 2,
-            "fotos": {"formato": 1, "incluidas": False},
-            "catalogo_video": {"formato": 1, "incluida": True, "manifiesto": "videos.json"},
-        }), encoding="utf-8")
-        entries = []
-        for name in names:
-            digest = hashlib.sha256((backup / name).read_bytes()).hexdigest()
-            entries.append(f"{digest}  {name}")
-        (backup / "SHA256SUMS").write_text("\n".join(entries) + "\n", encoding="utf-8")
-        return backup
-
-    def test_file_variables_deploy_and_secret_permissions(self) -> None:
+    def test_simulated_pipeline_deploys_only_application_services(self) -> None:
         result = self.invoke()
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assert_ssh_material_is_private(result, self.key.read_text(encoding="utf-8"))
-        for secret in SECRETS.values():
-            self.assertNotIn(secret, result.stdout + result.stderr)
-
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        good = (root / "shared/deploy-state/last-good").read_text(encoding="utf-8")
-        self.assertIn(f"commit_sha={COMMIT}\n", good)
-        self.assertTrue((root / "shared/secrets/current/access-password").is_file())
-        self.assertEqual(
-            (root / "shared/secrets/current/access-password").read_text(encoding="utf-8").strip(),
-            SECRETS["APP_ACCESS_PASSWORD"],
-        )
-        self.assertEqual((root / "shared/secrets/current/access-password").stat().st_mode & 0o777, 0o444)
-        self.assertEqual((root / "shared/secrets/current/session").stat().st_mode & 0o777, 0o555)
-        self.assertEqual((root / "shared/config/current/.env.prod").stat().st_mode & 0o777, 0o600)
-        release = next((root / "releases").iterdir())
-        for secret in SECRETS.values():
-            self.assertFalse(self.release_contains(release, secret), "private value found in archived release")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("persistent data volumes were preserved", result.stdout)
+        self.assertNotIn("synthetic-test-credential", result.stdout + result.stderr)
+        self.assertNotIn("postgresql://", result.stdout + result.stderr)
+        last_good = self.remote_home / "deploy_real-jaen-analytics/shared/deploy-state/last-good"
+        metadata = last_good.read_text(encoding="utf-8")
+        self.assertIn("database_family=postgresql\n", metadata)
+        self.assertIn("sports_schema_revision=pg0005\n", metadata)
+        self.assertIn("video_schema_revision=vg0002\n", metadata)
 
         calls = self.docker_calls()
-        dashboard_check = next(call for call in calls if "--user" in call and "node" in call)
-        mounted = {
-            argument.split(":/run/secrets/", 1)[1].split(":", 1)[0]
-            for argument in dashboard_check
-            if ":/run/secrets/" in argument
-        }
-        self.assertEqual(mounted, {"access-password", "update-password", "control-token", "session"})
-        self.assertTrue(any(call[:2] == ["image", "tag"] and call[-1].endswith(":prod") for call in calls))
-        logged_arguments = self.logs.read_text(encoding="utf-8")
-        for secret in SECRETS.values():
-            self.assertNotIn(secret, logged_arguments, "private value appeared in a Docker command")
-
-    def test_incomplete_restore_marker_blocks_remote_deploy_before_docker_changes(self) -> None:
-        imports = self.remote_home / "deploy_real-jaen-analytics/shared/imports"
-        imports.mkdir(parents=True)
-        marker = imports / ".real-jaen-restore-incomplete"
-        marker.write_text("project=restore-test\nvolumes=rja-restore-sports\n", encoding="utf-8")
-
-        result = self.invoke()
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("incomplete restore is recorded", result.stderr)
-        self.assertTrue(marker.is_file())
-        self.assertEqual(self.docker_calls(), [], "deploy must stop before any Docker command")
-
-    def test_ssh_private_key_variable_text_is_supported_without_logging_it(self) -> None:
-        env = self.environment()
-        private_key = self.key.read_text(encoding="utf-8")
-        env["SSH_PRIVATE_KEY"] = private_key
-
-        result = self.invoke(env=env)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assert_ssh_material_is_private(result, private_key)
-
-    def test_ssh_private_key_crlf_is_normalized(self) -> None:
-        env = self.environment()
-        private_key = self.key.read_text(encoding="utf-8").replace("\n", "\r\n")
-        env["SSH_PRIVATE_KEY"] = private_key
-
-        result = self.invoke(env=env)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assert_ssh_material_is_private(result, private_key)
-
-    def test_missing_or_invalid_ssh_private_key_fails_before_ssh(self) -> None:
-        cases = (None, str(self.base / "missing-deploy-key"), "this is not an SSH private key")
-        for index, value in enumerate(cases):
-            with self.subTest(value=value):
-                env = self.environment(pipeline_id=101 + index, job_id=501 + index)
-                if value is None:
-                    env.pop("SSH_PRIVATE_KEY")
-                else:
-                    env["SSH_PRIVATE_KEY"] = value
-                result = self.invoke(env=env)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(self.ssh_log.exists())
-                self.assertNotIn("this is not an SSH private key", result.stdout + result.stderr)
-
-    def test_ssh_known_hosts_variable_text_is_supported(self) -> None:
-        env = self.environment()
-        env["SSH_KNOWN_HOSTS"] = (self.files / "known_hosts").read_text(encoding="utf-8")
-
-        result = self.invoke(env=env)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assert_ssh_material_is_private(result, self.key.read_text(encoding="utf-8"))
-        self.assertIn("StrictHostKeyChecking=yes", self.ssh_log.read_text(encoding="utf-8"))
-
-    def test_runner_known_hosts_file_is_used_when_variable_is_missing(self) -> None:
-        env = self.environment()
-        env.pop("SSH_KNOWN_HOSTS")
-        runner_home = self.base / "runner-home"
-        runner_known_hosts = runner_home / ".ssh/known_hosts"
-        runner_known_hosts.parent.mkdir(parents=True)
-        shutil.copyfile(self.files / "known_hosts", runner_known_hosts)
-        env["HOME"] = str(runner_home)
-
-        result = self.invoke(env=env)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assert_ssh_material_is_private(result, self.key.read_text(encoding="utf-8"))
-
-    def test_absent_trusted_host_key_fails_before_ssh(self) -> None:
-        env = self.environment()
-        env.pop("SSH_KNOWN_HOSTS")
-        env["HOME"] = str(self.base / "runner-home-without-known-hosts")
-
-        result = self.invoke(env=env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No trusted SSH host key is configured", result.stderr)
-        self.assertIn("verifying its fingerprint out of band", result.stderr)
-        self.assertFalse(self.ssh_log.exists())
-
-        mismatch = self.environment(pipeline_id=102, job_id=502)
-        mismatch["SSH_KNOWN_HOSTS"] = (self.files / "known_hosts").read_text(encoding="utf-8").replace(
-            "sinbad2.test", "other-host.test"
-        )
-        mismatch_result = self.invoke(env=mismatch)
-        self.assertNotEqual(mismatch_result.returncode, 0)
-        self.assertIn("No trusted SSH host key matches SSH_HOST", mismatch_result.stderr)
-        self.assertFalse(self.ssh_log.exists())
-
-    def test_missing_file_variable_fails_before_ssh(self) -> None:
-        env = self.environment()
-        secret = SECRETS["APP_CONTROL_TOKEN"]
-        env.pop("APP_CONTROL_TOKEN")
-        result = self.invoke(env=env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("APP_CONTROL_TOKEN must be a non-empty GitLab File variable", result.stderr)
-        self.assertNotIn(secret, result.stdout + result.stderr)
-        self.assertFalse(self.logs.exists())
-
-    def test_pipeline_rules_are_scoped_to_main_push_without_bootstrap(self) -> None:
-        config = (REPOSITORY / ".gitlab-ci.yml").read_text(encoding="utf-8")
-        self.assertIn('$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"', config)
-        self.assertIn("resource_group: sinbad2-production", config)
-        self.assertIn("name: production", config)
-        self.assertIn("when: on_success", config)
-        self.assertIn("interruptible: false", config)
-        self.assertIn("allow_failure: false", config)
-        self.assertNotIn("bootstrap_sinbad2", config)
-        self.assertNotIn("when: manual", config)
-        self.assertNotIn("tags:", config)
-        self.assertNotIn("master", config)
-
-    def test_production_bind_port_and_dashboard_healthcheck_match_admin_contract(self) -> None:
-        env_example = (REPOSITORY / ".env.prod.example").read_text(encoding="utf-8")
-        dev_env_example = (REPOSITORY / ".env.dev.example").read_text(encoding="utf-8")
-        compose = (REPOSITORY / "compose.prod.yaml").read_text(encoding="utf-8")
-        remote = (REPOSITORY / "scripts/deploy-sinbad2-remote.sh").read_text(encoding="utf-8")
-        dockerfile = (REPOSITORY / "dashboard/Dockerfile").read_text(encoding="utf-8")
-        dev_compose = (REPOSITORY / "compose.dev.yaml").read_text(encoding="utf-8")
-        e2e_config = (REPOSITORY / "dashboard/playwright.config.ts").read_text(encoding="utf-8")
-        self.assertIn("RJ_DASHBOARD_BIND=127.0.0.1", env_example)
-        self.assertIn("RJ_DASHBOARD_PORT=8090", env_example)
-        self.assertIn("RJ_DASHBOARD_BIND=127.0.0.1", remote)
-        self.assertIn("RJ_DASHBOARD_PORT=8090", remote)
-        self.assertIn('${RJ_DASHBOARD_BIND:-127.0.0.1}:${RJ_DASHBOARD_PORT:-8090}:3000', compose)
-        self.assertIn("RJ_DEV_DASHBOARD_PORT=33201", dev_env_example)
-        self.assertEqual(compose.count("    ports:"), 1, "only Dashboard should publish a production host port")
-        self.assertIn("NEXT_PUBLIC_BASE_PATH=/real-jaen", dockerfile)
-        self.assertIn("/api/v1/session", dockerfile)
-        self.assertIn("process.env.NEXT_PUBLIC_BASE_PATH", dockerfile)
-        self.assertIn('NEXT_PUBLIC_BASE_PATH: ""', dev_compose)
-        self.assertIn('NEXT_PUBLIC_BASE_PATH: ""', e2e_config)
-        self.assertNotIn('0.0.0.0:8120', compose)
-
-    def test_successful_deployment_retains_five_releases_and_never_follows_symlinks(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        releases = root / "releases"
-        previous = next(path for path in releases.iterdir() if path.is_dir())
-
-        old_releases = []
-        for index in range(1, 8):
-            candidate = releases / f"{index:040x}-10-{index}"
-            candidate.mkdir()
-            (candidate / "compose.prod.yaml").write_text("release fixture\n", encoding="utf-8")
-            os.utime(candidate, (1_700_000_000 + index, 1_700_000_000 + index))
-            old_releases.append(candidate)
-        unrelated = releases / "not-a-release"
-        unrelated.mkdir()
-        (unrelated / "compose.prod.yaml").write_text("not a managed release\n", encoding="utf-8")
-
-        external = self.base / "external-release-target"
-        external.mkdir()
-        external_marker = external / "preserve.txt"
-        external_marker.write_text("outside releases\n", encoding="utf-8")
-        link = releases / f"{'f' * 40}-999-999"
-        link.symlink_to(external, target_is_directory=True)
-        shared_marker = root / "shared" / "preserve.txt"
-        shared_marker.write_text("persistent state\n", encoding="utf-8")
-
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["CI_COMMIT_SHA"] = "b" * 40
-        second = self.invoke(env=env)
-        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
-
-        current_good = self.last_good()
-        current = current_good.split("release_id=")[1].splitlines()[0]
-        retained = [path for path in releases.iterdir() if path.is_dir() and not path.is_symlink()]
-        retained_names = {path.name for path in retained}
-        self.assertGreaterEqual(len(retained), 5)
-        self.assertIn(current, retained_names)
-        self.assertIn(previous.name, retained_names)
-        self.assertTrue(link.is_symlink())
-        self.assertTrue(unrelated.is_dir(), "cleanup removed a directory that was not a release")
-        self.assertTrue(external_marker.is_file())
-        self.assertEqual(shared_marker.read_text(encoding="utf-8"), "persistent state\n")
-        removed_old = [path for path in old_releases if not path.exists()]
-        self.assertGreater(len(removed_old), 0)
-
-    def test_release_cleanup_runs_only_after_last_good_commit(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        old_releases = []
-        for index in range(1, 8):
-            old_release = root / "releases" / f"{index:040x}-10-{index}"
-            old_release.mkdir()
-            (old_release / "compose.prod.yaml").write_text("release fixture\n", encoding="utf-8")
-            os.utime(old_release, (1_700_000_000 + index, 1_700_000_000 + index))
-            old_releases.append(old_release)
-        self.write_file(self.files / "APP_ACCESS_PASSWORD", secrets.token_urlsafe(20) + "\n")
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["RJA_TEST_FAIL_LAST_GOOD"] = "1"
-        failed = self.invoke(env=env)
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertTrue(all(path.is_dir() for path in old_releases), "release cleanup ran before last-good was committed")
-
-    def test_release_cleanup_failure_warns_without_failing_healthy_deployment(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        releases = root / "releases"
-        old_releases = []
-        for index in range(1, 8):
-            old_release = releases / f"{index:040x}-10-{index}"
-            old_release.mkdir()
-            (old_release / "compose.prod.yaml").write_text("release fixture\n", encoding="utf-8")
-            os.utime(old_release, (1_700_000_000 + index, 1_700_000_000 + index))
-            old_releases.append(old_release)
-
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["CI_COMMIT_SHA"] = "b" * 40
-        env["RJA_TEST_FAIL_RELEASE_PRUNE"] = "1"
-        result = self.invoke(env=env)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("warning: could not remove old code release", result.stderr)
-        self.assertTrue(all(path.is_dir() for path in old_releases))
-        self.assertIn(f"commit_sha={'b' * 40}\n", self.last_good())
-        self.assertTrue(json.loads(self.state.read_text(encoding="utf-8"))["deployed"])
-
-    def test_missing_volumes_fail_without_build_or_creation(self) -> None:
-        env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        result = self.invoke(env=env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("installation is not initialized", result.stderr)
-        calls = self.docker_calls()
+        ups = [call for call in calls if call[:1] == ["compose"] and "up" in call]
+        self.assertEqual(len(ups), 2)
+        self.assertTrue(any({"acquisition", "video-service"}.issubset(set(call)) for call in ups))
+        self.assertTrue(any({"dashboard", "sports-data"}.issubset(set(call)) for call in ups))
+        self.assertTrue(all("postgresql" not in call for call in ups))
+        builds = [call for call in calls if call[:1] == ["compose"] and "build" in call]
+        self.assertEqual(len(builds), 1)
+        self.assertNotIn("postgresql", builds[0])
         self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
-
-    def test_bootstrap_without_backup_fails_before_build_or_volume_creation(self) -> None:
-        env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        result = self.invoke("bootstrap", env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("bootstrap backup is missing", result.stderr)
-        calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
-
-    def test_new_bootstrap_directories_and_backup_are_readable_by_uid_10001(self) -> None:
-        env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        first = self.invoke("bootstrap", env)
-        self.assertNotEqual(first.returncode, 0)
-        self.assertIn("bootstrap backup is missing", first.stderr)
-
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        imports = root / "shared/imports"
-        catalog = root / "shared/video-catalog"
-        self.assertEqual(imports.stat().st_mode & 0o777, 0o755)
-        self.assertTrue(imports.stat().st_mode & 0o005 == 0o005)
-        self.assertFalse(catalog.exists(), "bootstrap must leave the restoration target absent")
-
-        backup = self.add_verified_backup()
-        second = self.invoke("bootstrap", self.environment(pipeline_id=102, job_id=502))
-        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
-        self.assertEqual(backup.stat().st_mode & 0o777, 0o755)
-        self.assertEqual(catalog.stat().st_mode & 0o777, 0o555)
-        self.assertEqual((catalog / "videos.json").stat().st_mode & 0o777, 0o444)
-        for path in backup.iterdir():
-            self.assertTrue(path.stat().st_mode & 0o004, f"UID 10001 cannot read {path.name}")
-        self.assertTrue(any("initial-backup" in argument for call in self.docker_calls() for argument in call))
-
-    def test_bootstrap_refuses_existing_external_video_catalog_without_modifying_it(self) -> None:
-        env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        self.add_verified_backup()
-        catalog = self.remote_home / "deploy_real-jaen-analytics/shared/video-catalog"
-        catalog.mkdir(parents=True)
-        manifest = catalog / "videos.json"
-        manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
-        manifest.chmod(0o444)
-        before = manifest.read_bytes()
-
-        result = self.invoke("bootstrap", env)
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("bootstrap video catalog destination already exists", result.stderr)
-        self.assertEqual(manifest.read_bytes(), before)
-        self.assertEqual(manifest.stat().st_mode & 0o777, 0o444)
-        calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
-
-    def test_existing_shared_directories_without_uid_access_fail_without_chmod_or_up(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        imports = root / "shared/imports"
-        catalog = root / "shared/video-catalog"
-        before_ups = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
-
-        for index, directory in enumerate((imports, catalog)):
-            directory.chmod(0o700)
-            env_file = self.files / "ENV_PROD"
-            env_file.write_text(env_file.read_text(encoding="utf-8") + "# preflight retry\n", encoding="utf-8")
-            failed = self.invoke(pipeline_id=102 + index, job_id=502 + index)
-            self.assertNotEqual(failed.returncode, 0)
-            self.assertIn("not readable and traversable by UID 10001", failed.stderr)
-            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
-            after_ups = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
-            self.assertEqual(after_ups, before_ups)
-            directory.chmod(0o755)
-
-    def test_bootstrap_refuses_existing_volume_before_build(self) -> None:
-        env = self.environment()
-        self.add_verified_backup()
-        result = self.invoke("bootstrap", env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("bootstrap refused", result.stderr)
-        calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
-
-    def test_partial_installation_fails_without_creating_other_volumes(self) -> None:
-        env = self.environment()
-        env["RJA_TEST_VOLUMES"] = "rja-sinbad2-sports-state"
-        result = self.invoke(env=env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("only some persistent volumes exist", result.stderr)
-        calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
-
-    def test_restore_failure_keeps_created_volumes_for_inspection(self) -> None:
-        env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        env["RJA_TEST_FAIL_RESTORE"] = "1"
-        self.add_verified_backup()
-        result = self.invoke("bootstrap", env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("bootstrap restore failed", result.stderr)
-        calls = self.docker_calls()
-        self.assertEqual(len([call for call in calls if call[:2] == ["volume", "create"]]), 4)
-        self.assertFalse(any(call[:2] == ["volume", "rm"] for call in calls))
         self.assertFalse(any("down" in call for call in calls))
 
-    def test_bootstrap_with_verified_backup_creates_only_named_volumes(self) -> None:
+    def test_stale_pipeline_is_skipped_before_docker_mutation(self) -> None:
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.log.write_text("", encoding="utf-8")
         env = self.environment()
-        env["RJA_TEST_VOLUMES"] = ""
-        self.add_verified_backup()
-        result = self.invoke("bootstrap", env)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        pre_restore = json.loads((self.base / "restore-prestate.json").read_text(encoding="utf-8"))
-        self.assertEqual(pre_restore["volumes"], [], "persistent volumes existed immediately before restore")
+        env["CI_PIPELINE_ID"] = "100"
+        env["CI_JOB_ID"] = "499"
+
+        result = self.invoke(env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Skipping stale pipeline 100", result.stdout)
+        self.assertEqual(self.docker_calls(), [])
+
+    def test_release_cleanup_preserves_a_container_bind_mount(self) -> None:
+        releases = self.remote_home / "deploy_real-jaen-analytics/releases"
+        old_releases = [releases / f"{'b' * 40}-{pipeline}-1" for pipeline in range(1, 7)]
+        for release in old_releases:
+            release.mkdir(parents=True)
+            for name in ("compose.prod.yaml", "compose.postgresql.yaml", "compose.postgresql.prod.yaml"):
+                self.write(release / name, "# PostgreSQL release\n")
+        env = self.environment()
+        env["RJA_TEST_CONTAINER_BIND_MOUNT"] = str(old_releases[0])
+
+        result = self.invoke(env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(old_releases[0].is_dir(), "release with a mounted PostgreSQL init script was removed")
+        self.assertFalse(old_releases[1].exists(), "ordinary obsolete code release was not pruned")
+
+    def test_missing_prepared_volume_fails_before_build_or_compose_up(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_VOLUMES"] = " ".join(sorted(VOLUMES - {"rja-sinbad2-video-operational-state"}))
+        result = self.invoke(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PostgreSQL installation is incomplete", result.stderr)
         calls = self.docker_calls()
-        created = [call[-1] for call in calls if call[:2] == ["volume", "create"]]
-        self.assertEqual(
-            created,
-            [
-                "rja-sinbad2-sports-state",
-                "rja-sinbad2-video-state",
-                "rja-sinbad2-acquisition-jobs",
-                "rja-sinbad2-acquisition-profiles",
-            ],
-        )
-        tar_restores = [call for call in calls if call and call[0] == "run" and "--entrypoint" in call
-                        and call[call.index("--entrypoint") + 1] == "tar"]
-        self.assertEqual(tar_restores, [], "restore should use its validated extractor, not ad-hoc tar commands")
-        self.assertTrue(any("acquisition-jobs.tar" in arg for call in calls for arg in call))
-        self.assertTrue(any("video-service-state.tar" in arg for call in calls for arg in call))
-        self.assertFalse(any(self.compose_call(call, "run") for call in calls))
-        self.assertFalse(json.loads(self.state.read_text(encoding="utf-8"))["implicit_volume_creations"])
-        self.assertFalse(any("down" in call for call in calls))
-        self.assertFalse(any(call[:2] == ["volume", "rm"] for call in calls))
-        final_state = json.loads(self.state.read_text(encoding="utf-8"))
-        self.assertEqual(final_state["implicit_volume_creations"], [])
-        self.assertTrue((self.remote_home / "deploy_real-jaen-analytics/shared/deploy-state/last-good").is_file())
+        self.assertFalse(any("build" in call for call in calls))
+        self.assertFalse(any("up" in call for call in calls))
+        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
 
-        later = self.invoke("deploy", self.environment(pipeline_id=102, job_id=502))
-        self.assertEqual(later.returncode, 0, later.stderr + later.stdout)
+    def test_schema_check_failure_stops_before_admission_or_service_changes(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_FAIL_SCHEMA"] = "1"
+        result = self.invoke(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pg0005 schema preflight failed", result.stderr)
+        calls = self.docker_calls()
+        self.assertFalse(any("stop" in call for call in calls))
+        self.assertFalse(any("up" in call for call in calls))
 
-    def test_build_failure_keeps_previous_healthy_release(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        marker = self.last_good()
-        before = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["CI_COMMIT_SHA"] = "b" * 40
-        env["RJA_TEST_FAIL_BUILD"] = "1"
-        second = self.invoke(env=env)
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn("image build failed", second.stderr)
-        self.assertEqual(self.last_good(), marker)
-        after = len([call for call in self.docker_calls() if self.compose_call(call, "up")])
-        self.assertEqual(after, before)
-        for secret in SECRETS.values():
-            self.assertNotIn(secret, second.stdout + second.stderr)
+    def test_active_sports_job_finishes_before_any_service_is_replaced(self) -> None:
+        env = self.environment()
+        env["RJA_TEST_ACTIVE_SPORTS_POLLS"] = "1"
+        env["RJA_TEST_ACTIVE_VIDEO_POLLS"] = "1"
+        env["RJA_TEST_ACTIVE_ACQUISITION_POLLS"] = "1"
+        result = self.invoke(env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.docker_calls()
+        stop_index = next(i for i, call in enumerate(calls) if call[:1] == ["compose"] and "stop" in call)
+        first_update = next(i for i, call in enumerate(calls) if call[:1] == ["compose"] and "up" in call)
+        active_reads = [i for i, call in enumerate(calls) if "sports-active" in call]
+        video_reads = [i for i, call in enumerate(calls) if "video-active" in call]
+        acquisition_reads = [i for i, call in enumerate(calls)
+                             if "SELECT COUNT(*) FROM job" in " ".join(call)]
+        self.assertGreaterEqual(len(active_reads), 6)
+        self.assertGreaterEqual(len(video_reads), 6)
+        self.assertGreaterEqual(len(acquisition_reads), 6)
+        self.assertLess(stop_index, active_reads[0])
+        self.assertLess(stop_index, video_reads[0])
+        self.assertLess(stop_index, acquisition_reads[0])
+        self.assertLess(active_reads[-1], first_update)
+        self.assertLess(video_reads[-1], first_update)
+        self.assertLess(acquisition_reads[-1], first_update)
 
-    def test_same_sha_secret_rotation_force_recreates_consumer(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
+    def test_incompatible_previous_release_is_not_used_for_rollback(self) -> None:
         root = self.remote_home / "deploy_real-jaen-analytics"
-        old_target = (root / "shared/secrets/current").resolve()
-        new_password = secrets.token_urlsafe(20)
-        self.write_file(self.files / "APP_ACCESS_PASSWORD", new_password + "\n")
-
-        rotated = self.invoke(pipeline_id=102, job_id=502)
-        self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
-        new_target = (root / "shared/secrets/current").resolve()
-        self.assertNotEqual(new_target, old_target)
-        self.assertEqual((new_target / "access-password").read_text(encoding="utf-8").strip(), new_password)
-        calls = [call for call in self.docker_calls() if self.compose_call(call, "up")]
-        update = calls[-1]
-        self.assertIn("--force-recreate", update)
-        self.assertIn("dashboard", update)
-        self.assertNotIn("sports-data", update)
-        self.assertNotIn("acquisition", update)
-
-    def test_same_sha_without_changes_does_not_recreate_running_services(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        calls_before = len(self.docker_calls())
-
-        repeated = self.invoke(pipeline_id=102, job_id=502)
-        self.assertEqual(repeated.returncode, 0, repeated.stderr + repeated.stdout)
-        calls = self.docker_calls()[calls_before:]
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls))
-        self.assertIn("pipeline_id=102\n", self.last_good())
-
-    def test_same_sha_env_rotation_force_recreates_services(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        env_file = self.files / "ENV_PROD"
-        env_file.write_text(env_file.read_text(encoding="utf-8") + "RJ_TRUSTED_CLIENT_IP_HEADER=X-Forwarded-For\n",
-                            encoding="utf-8")
-
-        rotated = self.invoke(pipeline_id=102, job_id=502)
-        self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
-        calls = [call for call in self.docker_calls() if self.compose_call(call, "up")]
-        updates = calls[1:]
-        self.assertTrue(all("--force-recreate" in update for update in updates))
-        updated_services = {service for update in updates for service in update if service in {
-            "dashboard", "sports-data", "acquisition", "video-service"
-        }}
-        for service in ("dashboard", "sports-data", "acquisition", "video-service"):
-            self.assertIn(service, updated_services)
-
-    def test_acquisition_secret_rotation_drains_without_profile_lock_collision(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        calls_before = len(self.docker_calls())
-        new_token = secrets.token_urlsafe(40)
-        self.write_file(self.files / "APP_ACQUISITION_TOKEN", new_token + "\n")
-
-        rotated = self.invoke(pipeline_id=102, job_id=502)
-        self.assertEqual(rotated.returncode, 0, rotated.stderr + rotated.stdout)
-        calls = self.docker_calls()
-        ups = [call for call in calls if self.compose_call(call, "up")]
-        self.assertGreaterEqual(len(ups), 3)  # Acquisition, Sports Data, then health/metadata completion.
-        self.assertTrue(any(call[:2] == ["network", "disconnect"] for call in calls))
-        self.assertTrue(any(call[:2] == ["network", "connect"] for call in calls) is False)
-        self.assertTrue(any("deployment-maintenance" in argument for call in calls for argument in call))
-        second_calls = calls[calls_before:]
-        self.assertFalse(any("verify-profile" in argument for call in second_calls for argument in call))
-        self.assertEqual((self.remote_home / "deploy_real-jaen-analytics/shared/secrets/current/acquisition-token")
-                         .read_text(encoding="utf-8").strip(), new_token)
-
-    def test_readonly_existing_video_catalog_permissions_are_preserved(self) -> None:
-        catalog = self.remote_home / "deploy_real-jaen-analytics/shared/video-catalog"
-        catalog.mkdir(parents=True)
-        manifest = catalog / "videos.json"
-        manifest.write_text('{"schema_version":1,"videos":[]}\n', encoding="utf-8")
-        manifest.chmod(0o444)
-        catalog.chmod(0o555)
-        before_manifest = manifest.stat()
-        before_catalog = catalog.stat()
-
-        result = self.invoke()
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        after_manifest = manifest.stat()
-        after_catalog = catalog.stat()
-        self.assertEqual(after_manifest.st_mode & 0o777, before_manifest.st_mode & 0o777)
-        self.assertEqual((after_manifest.st_uid, after_manifest.st_gid), (before_manifest.st_uid, before_manifest.st_gid))
-        self.assertEqual(after_catalog.st_mode & 0o777, before_catalog.st_mode & 0o777)
-        self.assertEqual((after_catalog.st_uid, after_catalog.st_gid), (before_catalog.st_uid, before_catalog.st_gid))
-        catalog.chmod(0o755)
-
-    def test_env_prod_rejects_duplicate_critical_volume_identity(self) -> None:
-        env_file = self.files / "ENV_PROD"
-        env_file.write_text(
-            env_file.read_text(encoding="utf-8") +
-            "RJ_PROD_ACQUISITION_JOBS_VOLUME=other-acquisition-jobs\n",
+        releases = root / "releases"
+        config_versions = root / "shared/config/versions"
+        secret_versions = root / "shared/secrets/versions"
+        old_release = releases / "old-sqlite-release"
+        old_config = config_versions / "old-sqlite-config"
+        old_secrets = secret_versions / "old-secrets"
+        old_release.mkdir(parents=True)
+        old_config.mkdir(parents=True)
+        old_secrets.mkdir(parents=True)
+        self.write(old_release / "compose.prod.yaml", "# SQLite release\n")
+        self.write(old_config / ".env.prod", (self.file_vars / "ENV_PROD").read_text())
+        for name, source in (
+            ("access-password", "APP_ACCESS_PASSWORD"),
+            ("update-password", "APP_UPDATE_PASSWORD"),
+            ("control-token", "APP_CONTROL_TOKEN"),
+            ("acquisition-token", "APP_ACQUISITION_TOKEN"),
+        ):
+            shutil.copyfile(self.file_vars / source, old_secrets / name)
+            (old_secrets / name).chmod(0o444)
+        session = old_secrets / "session"
+        session.mkdir()
+        shutil.copyfile(self.file_vars / "APP_SESSION_SECRET", session / "session-secret")
+        (session / "session-secret").chmod(0o444)
+        session.chmod(0o555)
+        (old_secrets).chmod(0o700)
+        (root / "shared/config/current").symlink_to("versions/old-sqlite-config")
+        (root / "shared/secrets/current").symlink_to("versions/old-secrets")
+        last_good = root / "shared/deploy-state/last-good"
+        last_good.parent.mkdir(parents=True)
+        last_good.write_text(
+            "pipeline_id=99\nrelease_id=old-sqlite-release\n"
+            f"commit_sha={'b' * 40}\nconfig_target=versions/old-sqlite-config\n"
+            "secret_target=versions/old-secrets\n",
             encoding="utf-8",
         )
-        result = self.invoke()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("declares critical key RJ_PROD_ACQUISITION_JOBS_VOLUME more than once", result.stderr)
-        calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "inspect"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+        last_good.chmod(0o600)
+        env = self.environment()
+        env["RJA_TEST_FAIL_UP_AT"] = "1"
 
-    def test_env_prod_rejects_altered_project_identity(self) -> None:
-        env_file = self.files / "ENV_PROD"
-        content = env_file.read_text(encoding="utf-8")
-        content = content.replace(
-            "COMPOSE_PROJECT_NAME=real-jaen-analytics-sinbad2-prod",
-            "COMPOSE_PROJECT_NAME=attacker-selected-project",
-        )
-        env_file.write_text(content, encoding="utf-8")
-        result = self.invoke()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("critical setting COMPOSE_PROJECT_NAME does not match", result.stderr)
-        calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "inspect"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+        result = self.invoke(env)
 
-    def test_env_prod_rejects_altered_volume_identity(self) -> None:
-        env_file = self.files / "ENV_PROD"
-        content = env_file.read_text(encoding="utf-8").replace(
-            "RJ_PROD_ACQUISITION_JOBS_VOLUME=rja-sinbad2-acquisition-jobs",
-            "RJ_PROD_ACQUISITION_JOBS_VOLUME=other-acquisition-jobs",
-        )
-        env_file.write_text(content, encoding="utf-8")
-        result = self.invoke()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("critical setting RJ_PROD_ACQUISITION_JOBS_VOLUME does not match", result.stderr)
+        self.assertIn("no PostgreSQL-compatible previous release", result.stderr)
         calls = self.docker_calls()
-        self.assertFalse(any(call[:2] == ["volume", "inspect"] for call in calls))
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls))
+        ups = [call for call in calls if call[:1] == ["compose"] and "up" in call]
+        self.assertEqual(len(ups), 1)
+        self.assertFalse(any("old-sqlite-release" in call and "up" in call for call in calls))
+        self.assertTrue(json.loads(self.state.read_text(encoding="utf-8"))["dashboard_stopped"])
 
-    def test_preflight_failure_leaves_running_stack_and_current_links_untouched(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
+    def test_failed_deploy_rolls_back_to_matching_postgresql_release(self) -> None:
         root = self.remote_home / "deploy_real-jaen-analytics"
-        old_config = (root / "shared/config/current").resolve()
-        old_secret = (root / "shared/secrets/current").resolve()
-        state_before = json.loads(self.state.read_text(encoding="utf-8"))
-        env_file = self.files / "ENV_PROD"
-        env_file.write_text(env_file.read_text(encoding="utf-8") + "# rotated config\n", encoding="utf-8")
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["RJA_TEST_FAIL_CATALOG"] = "1"
+        release_id = f"{'b' * 40}-99-199"
+        old_release = root / "releases" / release_id
+        old_config = root / "shared/config/versions/old-postgresql-config"
+        old_secrets = root / "shared/secrets/versions/old-secrets"
+        old_release.mkdir(parents=True)
+        old_config.mkdir(parents=True)
+        old_secrets.mkdir(parents=True)
+        for name in ("compose.prod.yaml", "compose.postgresql.yaml", "compose.postgresql.prod.yaml"):
+            self.write(old_release / name, "# PostgreSQL-compatible release\n")
+        self.write(old_config / ".env.prod", (self.file_vars / "ENV_PROD").read_text())
+        self.write(old_config / ".env.postgresql.prod", (self.file_vars / "ENV_POSTGRESQL_PROD").read_text())
+        for name, source in (
+            ("access-password", "APP_ACCESS_PASSWORD"),
+            ("update-password", "APP_UPDATE_PASSWORD"),
+            ("control-token", "APP_CONTROL_TOKEN"),
+            ("acquisition-token", "APP_ACQUISITION_TOKEN"),
+        ):
+            shutil.copyfile(self.file_vars / source, old_secrets / name)
+            (old_secrets / name).chmod(0o444)
+        session = old_secrets / "session"
+        session.mkdir()
+        shutil.copyfile(self.file_vars / "APP_SESSION_SECRET", session / "session-secret")
+        (session / "session-secret").chmod(0o444)
+        session.chmod(0o555)
+        old_secrets.chmod(0o700)
+        (root / "shared/config/current").symlink_to("versions/old-postgresql-config")
+        (root / "shared/secrets/current").symlink_to("versions/old-secrets")
+        last_good = root / "shared/deploy-state/last-good"
+        last_good.parent.mkdir(parents=True)
+        last_good.write_text(
+            f"pipeline_id=99\nrelease_id={release_id}\ncommit_sha={'b' * 40}\n"
+            "database_family=postgresql\nsports_schema_revision=pg0005\n"
+            "video_schema_revision=vg0002\nconfig_target=versions/old-postgresql-config\n"
+            "secret_target=versions/old-secrets\n",
+            encoding="utf-8",
+        )
+        last_good.chmod(0o600)
+        env = self.environment()
+        env["RJA_TEST_FAIL_UP_AT"] = "1"
 
-        failed = self.invoke(env=env)
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("video catalog is invalid or unreadable by UID 10001", failed.stderr)
-        self.assertEqual((root / "shared/config/current").resolve(), old_config)
-        self.assertEqual((root / "shared/secrets/current").resolve(), old_secret)
-        state_after = json.loads(self.state.read_text(encoding="utf-8"))
-        self.assertEqual(state_after["up_count"], state_before["up_count"])
-        self.assertEqual(state_after["deployed"], state_before["deployed"])
-        self.assertFalse(any(call[:2] == ["network", "disconnect"] for call in self.docker_calls()))
+        result = self.invoke(env)
 
-    def test_last_good_rename_failure_rolls_back_services_and_links(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        root = self.remote_home / "deploy_real-jaen-analytics"
-        old_good = self.last_good()
-        old_secret = (root / "shared/secrets/current").resolve()
-        self.write_file(self.files / "APP_ACCESS_PASSWORD", secrets.token_urlsafe(20) + "\n")
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["RJA_TEST_FAIL_LAST_GOOD"] = "1"
-
-        failed = self.invoke(env=env)
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("previous code/config and services were restored", failed.stderr)
-        self.assertEqual(self.last_good(), old_good)
-        self.assertEqual((root / "shared/secrets/current").resolve(), old_secret)
-        self.assertEqual(len([call for call in self.docker_calls() if self.compose_call(call, "up")]), 3)
-        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["deployed"], True)
-
-    def test_up_failure_restarts_previous_release_without_volume_removal(self) -> None:
-        first = self.invoke()
-        self.assertEqual(first.returncode, 0, first.stderr)
-        marker = self.last_good()
-        env = self.environment(pipeline_id=102, job_id=502)
-        env["CI_COMMIT_SHA"] = "b" * 40
-        env["RJA_TEST_FAIL_UP_AT"] = "2"
-        second = self.invoke(env=env)
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn("previous code/config was restarted", second.stderr)
-        self.assertIn("Data compatibility depends on schema changes", second.stderr)
-        self.assertEqual(self.last_good(), marker)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("previous PostgreSQL-compatible code/config was restarted", result.stderr)
         calls = self.docker_calls()
-        self.assertEqual(len([call for call in calls if self.compose_call(call, "up")]), 4)
-        self.assertFalse(any(call[:2] == ["volume", "create"] for call in calls))
-        self.assertFalse(any(call[:2] == ["volume", "rm"] for call in calls))
-        self.assertFalse(any("down" in call for call in calls))
-        for secret in SECRETS.values():
-            self.assertNotIn(secret, second.stdout + second.stderr)
+        ups = [call for call in calls if call[:1] == ["compose"] and "up" in call]
+        self.assertEqual(len(ups), 3)
+        self.assertIn("old-postgresql-config", " ".join(ups[1]))
+        self.assertIn("old-postgresql-config", " ".join(ups[2]))
+        self.assertFalse(json.loads(self.state.read_text(encoding="utf-8"))["dashboard_stopped"])
+        self.assertIn(f"commit_sha={'b' * 40}\n", last_good.read_text(encoding="utf-8"))
 
-    def test_older_pipeline_is_skipped(self) -> None:
-        first = self.invoke(pipeline_id=120)
-        self.assertEqual(first.returncode, 0, first.stderr)
-        marker = self.last_good()
-        calls_before = len(self.docker_calls())
-        old = self.invoke(env=self.environment(pipeline_id=119, job_id=599))
-        self.assertEqual(old.returncode, 0, old.stderr)
-        self.assertIn("Skipping stale pipeline 119", old.stdout)
-        self.assertEqual(self.last_good(), marker)
-        calls_after = self.docker_calls()[calls_before:]
-        self.assertFalse(any(self.compose_call(call, "build") for call in calls_after))
-        self.assertFalse(any(self.compose_call(call, "up") for call in calls_after))
+    def test_rollback_requires_matching_postgresql_schema_metadata(self) -> None:
+        remote_script = (REPOSITORY / "scripts/deploy-sinbad2-remote.sh").read_text(encoding="utf-8")
+        for marker in (
+            "database_family=postgresql",
+            "sports_schema_revision=pg0005",
+            "video_schema_revision=vg0002",
+            "previous_rollback_compatible",
+        ):
+            self.assertIn(marker, remote_script)
+        self.assertNotIn("persistencia verificar --base /state/real-jaen.sqlite", remote_script)
+        self.assertNotIn("/state/video-service.sqlite", remote_script)
 
 
 if __name__ == "__main__":

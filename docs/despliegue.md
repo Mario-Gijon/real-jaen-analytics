@@ -1,6 +1,6 @@
 # Despliegue
 
-El repositorio tiene dos configuraciones Compose en la raíz. Ambas levantan Dashboard, Sports Data, Acquisition y Video Service. Acquisition no inicia trabajos al arrancar; las consultas deportivas y los trabajos de vídeo requieren una acción manual.
+El desarrollo mantiene su configuración SQLite habitual. El despliegue de SINBAD² combina `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml` para ejecutar los cinco servicios con PostgreSQL 18 persistente. Acquisition no inicia trabajos al arrancar; las actualizaciones deportivas y los trabajos audiovisuales requieren una acción manual.
 
 Los archivos privados `.env.dev` y `.env.prod` se suministran aparte. Los ejemplos versionados no contienen contraseñas, tokens ni datos reales. El anfitrión Docker necesita acceso de red durante las compilaciones para obtener imágenes base y dependencias.
 
@@ -26,95 +26,91 @@ docker compose --env-file .env.dev -f compose.dev.yaml start
 
 Las carpetas y claves del paquete están excluidas de Git. Los secretos de desarrollo no se comparten con producción. No se consulta SofaScore, descarga vídeo ni ejecuta OCR al iniciar.
 
-## Producción en SINBAD²
+## Producción en SINBAD²: PostgreSQL 18
 
-### Publicación y proxy
+La URL acordada es `https://sinbad2.ujaen.es/real-jaen`. Apache termina TLS y reenvía al Dashboard por `http://127.0.0.1:8090`; conserva `/real-jaen` en las rutas. Dashboard compila con Next.js `basePath=/real-jaen`. Solo Dashboard publica un puerto y únicamente en loopback; Sports Data, Acquisition, Video Service y PostgreSQL no publican puertos.
 
-La URL pública acordada es `https://sinbad2.ujaen.es/real-jaen`. Apache termina TLS y reenvía al Dashboard por `http://127.0.0.1:8090`; el contenedor no configura TLS y el puerto de producción no escucha en interfaces externas. Solo Dashboard publica un puerto. Sports Data, Acquisition y Video Service permanecen en redes internas.
+La pipeline contiene un solo job de producción y conserva la regla existente: solo un `push` a `main`, después de la solicitud de fusión aprobada, puede iniciar el despliegue. `resource_group: sinbad2-production` serializa los jobs, el job no es interrumpible y el host omite pipelines obsoletas. Los desarrolladores trabajan en ramas `feat`; solo administradores pueden fusionar a `main`. La protección de rama y de variables debe configurarla GitLab.
 
-El Dashboard de producción se compila con Next.js `basePath=/real-jaen`; el desarrollo conserva la raíz `/` y el puerto `33201`. El prefijo forma parte de las rutas que Apache entrega a Next: el proxy debe preservar `/real-jaen` en la ruta y no quitarlo ni añadirlo una segunda vez. Next.js prefija los enlaces internos; el cliente del Dashboard prefija API, recursos, redirecciones y cookies. La ruta de salud del contenedor es `/real-jaen/api/v1/session`.
+Compose combina siempre, en este orden, `compose.prod.yaml`, `compose.postgresql.yaml` y `compose.postgresql.prod.yaml`. Se requiere Docker Compose 2.24.4 o posterior por las etiquetas `!override` y `!reset` ([documentación de Docker](https://docs.docker.com/reference/compose-file/merge/)). El proyecto, red PostgreSQL y cinco volúmenes usan identidades estables de producción definidas por los ejemplos `.env.prod.example` y `.env.postgresql.prod.example`.
 
-Antes del despliegue, administración debe confirmar que Apache reenvía el encabezado `Host` público y envía `X-Forwarded-Proto: https`. Esto permite que la validación de origen compare el mismo host y que la cookie de sesión incluya `Secure`. También debe confirmar cómo conserva o sobrescribe `X-Forwarded-For`. La aplicación no confía en cabeceras de IP por defecto; si se configura `RJ_TRUSTED_CLIENT_IP_HEADER`, Apache debe sobrescribir esa cabecera con un valor confiable. La configuración efectiva del proxy, sus reglas de ruta y su certificado no se han inspeccionado desde este repositorio.
-
-### Pipeline y rutas del host
-
-La pipeline contiene un único job de producción. `deploy_to_sinbad2` se ejecuta solo por un `push` a `main`, después de la fusión aprobada; no corre al abrir una merge request ni en ramas de desarrollo. Mantiene `resource_group: sinbad2-production`, no es interrumpible y el host omite pipelines obsoletas. No hay job de bootstrap en la pipeline.
-
-El despliegue usa el home de la cuenta SSH sin sudo y conserva estas rutas existentes:
+La cuenta de despliegue usa su `$HOME`, escritura allí y acceso directo a Docker; no requiere sudo. El árbol conserva releases y configuración versionada, además de estado compartido:
 
 ```text
 $HOME/deploy_real-jaen-analytics/
 ├── releases/<commit>-<pipeline>-<job>/
 └── shared/
-    ├── config/versions/<release>/.env.prod
+    ├── config/versions/<release>/{.env.prod,.env.postgresql.prod}
     ├── config/current -> versions/<release>
-    ├── secrets/versions/<release>/
+    ├── secrets/versions/<release>/       # solo credenciales de la aplicación
     ├── secrets/current -> versions/<release>
-    ├── imports/
-    ├── video-catalog/
-    ├── incoming/                     # staging temporal de archivos privados
+    ├── postgresql/secrets/               # permanente, fuera de releases y rotaciones
+    ├── imports/                          # administrador; lectura para UID 10001
+    ├── incoming/                         # staging temporal
     └── deploy-state/last-good
 ```
 
-Administración prepara `.env.prod`, los secretos y el estado persistente por el canal acordado. Debe confirmar que sus rutas y permisos corresponden a `$HOME/deploy_real-jaen-analytics/shared/` y que los cuatro volúmenes tienen exactamente los nombres de `.env.prod.example`. No se mueve nada a `/etc` o `/srv`. Las carpetas privadas de configuración y secretos quedan restringidas; `.env.prod` queda en `0600`, y los secretos se montan como solo lectura.
+### Preparación administrada previa
 
-El job normal exige que existan los cuatro volúmenes, sean íntegros y compatibles, y que las rutas externas sean accesibles por UID `10001`. Nunca crea, inicializa, reemplaza ni restaura esos volúmenes. Si falta alguno o falla una comprobación, el preflight termina antes de cambiar los contenedores. `dashboard/scripts/restaurar-instalacion.sh` permanece como herramienta independiente para la preparación administrada; la pipeline no la invoca. No restaures sobre volúmenes existentes.
+El pipeline rechaza el destino si falta cualquiera de estos volúmenes preparados: datos de PostgreSQL 18, estado operativo de Sports Data, estado operativo de Video Service, trabajos SQLite de Acquisition y perfil Chromium de Acquisition. No crea volúmenes, no restaura copias ni importa datos. Requiere PostgreSQL ya saludable, bases `sports_data` y `video_service`, revisión `pg0005`/`vg0002` y volúmenes montados con las identidades configuradas. Acquisition conserva legítimamente su SQLite de trabajos y perfil; Sports Data y Video Service no requieren sus antiguos archivos SQLite.
 
-Los preflights comprueban la base deportiva, los trabajos de Acquisition, la base SQLite de Video Service, los secretos y el catálogo. Si Acquisition está levantado, el job respeta el bloqueo de su perfil y comprueba su healthcheck e integridad estructural sin abrir el perfil por segunda vez. Al recrear Acquisition, cierra temporalmente la admisión de nuevos trabajos y espera a que terminen los aceptados; no cancela trabajos. Una rotación de `ENV_PROD` o de secretos fuerza la recreación de los servicios consumidores aunque el SHA no cambie. Un fallo de build o preflight deja los contenedores activos; un fallo tras promover o iniciar la release intenta restaurar el estado saludable anterior sin tocar volúmenes.
+Administración debe preparar `shared/postgresql/secrets` con la cuenta de despliegue como propietaria y modo `0700`, de forma que el pipeline pueda validar los permisos sin transportar las credenciales. Incluye contraseña administrativa, contraseñas de los cuatro roles y las cuatro URLs (dos de ejecución y dos owner). Contraseñas y URLs owner/migración: `0600`. Solo las URLs de ejecución son legibles por UID `10001` mediante un GID complementario no privilegiado provisionado por administración: modo `0640` y GID indicado en `ENV_POSTGRESQL_PROD`. Sports Data y Video Service reciben ese grupo; Acquisition no lo recibe. El despliegue comprueba esos permisos sin cambiarlos. No se presupone un grupo privado, ACL ni sudo.
 
-Tras confirmar `last-good`, se conservan al menos las cinco releases de código recientes y además la activa y la release previa de recuperación. La limpieza solo elimina directorios de releases antiguas y valida que sean hijos directos de `releases/`; no toca configuración, secretos, importaciones, catálogo, redes, imágenes ni volúmenes. Si falla, escribe una advertencia y mantiene saludable el despliegue. No se ejecuta `docker system prune` ni `docker volume prune`.
+PostgreSQL recibe sus contraseñas de inicialización, las tareas de comprobación reciben únicamente la URL owner de su base y cada servicio recibe solo su URL de ejecución. Los secretos administrativos y owner nunca pasan por el Runner ni se montan en Dashboard, Acquisition o el microservicio ajeno. Las URLs internas usan el host de servicio `postgresql` en la red Docker privada; PostgreSQL no publica puertos. Las futuras conexiones remotas DEV requieren autorización separada, conectividad privada y TLS `verify-full`.
 
-### Variables y requisitos de GitLab/Runner
+Administración también debe preparar `shared/imports`, volúmenes, red privada, credenciales del servidor, perfil y restauración inicial. El directorio de imports debe ser legible/traversable por UID `10001`. El directorio `shared/video-catalog` del env heredado solo satisface la interpolación del Compose base: el overlay PostgreSQL sustituye ese bind mount, por lo que el catálogo vive en la base y no requiere ese directorio. La restauración inicial se implementará y verificará en Hito 09A; no forma parte del job ordinario.
 
-Las variables SSH existentes `SSH_PRIVATE_KEY`, `SSH_HOST` y `REMOTE_USER` pueden reutilizarse sin cambiar sus nombres ni tipos. `SSH_PRIVATE_KEY` acepta texto multilínea o variable File; el job normaliza CRLF, crea una copia temporal `0600` y valida la clave sin imprimirla. La clave pública correspondiente debe estar autorizada para `REMOTE_USER`.
+### Secuencia protegida del despliegue
 
-Administración entregará la host key previamente verificada en `SSH_KNOWN_HOSTS` como File o texto. El job conserva `StrictHostKeyChecking=yes`; si falta una entrada confiable para `SSH_HOST`, falla antes de conectar. No usa `ssh-keyscan` para decidir en quién confiar.
+1. Comprueba Compose efectivo, permisos de secretos, las cinco identidades persistentes, PostgreSQL 18 saludable, rol owner de cada base, revisiones esperadas, conexión de cada rol app a su base y rechazo de acceso a la base ajena. Las comprobaciones de base son de solo lectura.
+2. Construye únicamente Sports Data, Acquisition, Video Service y Dashboard. PostgreSQL no se construye, inicia, detiene, actualiza ni fuerza a recrear.
+3. Detiene Dashboard, que es el único punto de entrada publicado, para cerrar nuevas solicitudes deportivas y audiovisuales. Consulta en PostgreSQL los trabajos compartidos de Sports Data y Video Service y en solo lectura los trabajos SQLite de Acquisition. Espera a que terminen y exige cinco lecturas consecutivas sin trabajos. Si no se vacían en 30 minutos, cancela antes de reemplazar servicios y reabre Dashboard.
+4. Escribe el marcador de mantenimiento durable de Acquisition, que impide aceptar trabajo nuevo, y vuelve a comprobar el estado compartido. No modifica leases ni fencing tokens y no bloquea heartbeat ni publicaciones.
+5. Recrea primero Acquisition y Video Service; comprueba salud; retira el marcador y recrea Sports Data y Dashboard. El Dashboard se valida en `http://127.0.0.1:8090/real-jaen/api/v1/session`. Actualiza `last-good` solo tras comprobar los cinco servicios saludables.
 
-En el proyecto GitLab `despliegues-autorizados/real-jaen-analytics`, deben configurarse como variables File protegidas, con ámbito `production` y sin expansión de referencias:
+No se ejecuta Alembic ni se hacen downgrades automáticos. Las futuras migraciones de esquema requieren un procedimiento explícito y una recuperación compatible. El rollback de código solo usa una release PostgreSQL marcada como compatible con `pg0005`/`vg0002`; no reinicia una release SQLite contra PostgreSQL y nunca restaura bases de datos. Si la revisión difiere, detiene el rollback automático y deja Dashboard cerrado para inspección.
 
-| Variable | Archivo/contenido esperado |
+Tras `last-good`, se conservan las cinco releases más recientes y las releases en uso por contenedores o bind mounts. PostgreSQL monta scripts desde la release con la que fue creado; el limpiador inspecciona los mounts de contenedores activos y conserva esa release. La limpieza no elimina volúmenes, backups, secretos ni ejecuta `docker system prune`/`docker volume prune`.
+
+### Variables y responsabilidades pendientes
+
+El Runner protegido necesita `bash`, `git`, `ssh`, `ssh-keygen`, `tar`, `mktemp`, `install` y `tr`. Administración entrega `SSH_KNOWN_HOSTS` verificado fuera de banda; se conserva `StrictHostKeyChecking=yes` y no se confía en `ssh-keyscan`. La clave SSH solo está disponible en ramas protegidas. No se necesita terminal interactiva ni sudo en SINBAD².
+
+Como archivos protegidos de GitLab con ámbito `production` y sin expansión de referencias, configure:
+
+| Variable | Uso |
 |---|---|
-| `ENV_PROD` | Archivo completo basado en `.env.prod.example`, con bind `127.0.0.1`, puerto `8090`, nombres fijos de proyecto/red/volumen y rutas bajo `shared/`. No debe contener credenciales. |
-| `APP_ACCESS_PASSWORD` | Contraseña de acceso, al menos 12 caracteres ASCII imprimibles. |
-| `APP_UPDATE_PASSWORD` | Contraseña administrativa distinta, al menos 9 caracteres ASCII imprimibles. |
-| `APP_SESSION_SECRET` | Secreto de sesión con al menos 32 caracteres ASCII imprimibles. |
-| `APP_CONTROL_TOKEN` | Token interno con al menos 32 caracteres ASCII imprimibles. |
-| `APP_ACQUISITION_TOKEN` | Token de Acquisition distinto del token de control, con al menos 32 caracteres ASCII imprimibles. |
+| `ENV_PROD` | Configuración basada en `.env.prod.example`; sin credenciales. |
+| `ENV_POSTGRESQL_PROD` | Configuración basada en `.env.postgresql.prod.example`; sustituir el GID por el valor confirmado por administración. Sin contraseñas ni URLs. |
+| `APP_ACCESS_PASSWORD`, `APP_UPDATE_PASSWORD`, `APP_SESSION_SECRET`, `APP_CONTROL_TOKEN`, `APP_ACQUISITION_TOKEN` | Credenciales de aplicación en archivos File protegidos. |
 
-Los cinco secretos aceptan una línea de hasta 256 caracteres y un salto de línea final opcional. No se escriben en Git, artifacts, logs, argumentos o imágenes.
+Las credenciales PostgreSQL permanecen en el servidor y no se transportan en cada pipeline. Administración debe confirmar el host Docker, Compose 2.24.4+, red y volúmenes preparados, permisos de carpetas/secretos, restauración inicial y configuración de Apache (`Host`, `X-Forwarded-Proto: https`, preservación de `/real-jaen`). La autorización para alojamiento DEV compartido y su conectividad privada sigue pendiente.
 
-El Runner necesita `bash`, `git`, `ssh`, `ssh-keygen`, `tar`, `mktemp`, `install` y `tr`, poder recibir variables protegidas de `production` y conectarse al host por SSH. La cuenta remota necesita escritura en `$HOME` y acceso directo a Docker; no se usa sudo. El host requiere Docker Engine, Compose v2.17 o posterior, permiso para builds/redes/volúmenes y salida a registros e índices de dependencias. El job mantiene sin cambios el proyecto, seis redes y cuatro volúmenes persistentes ya definidos.
+No se accedió a SINBAD² ni GitLab, no se ejecutó CI Lint ni despliegue real en este hito. Antes del primer push a `main`, administración debe aplicar estas variables y preparar el destino; el código no supone que esos recursos existen.
 
-### Requisitos que administración debe confirmar
+### Inspección de una release
 
-- Que las variables protegidas llegan al entorno `production` y el Runner asignado dispone de las herramientas y conectividad indicadas.
-- La disponibilidad y autorización de las tres variables SSH existentes y la entrega de `SSH_KNOWN_HOSTS` con la clave verificada.
-- Que `$HOME/deploy_real-jaen-analytics/shared/`, sus permisos y los cuatro volúmenes son las ubicaciones preparadas, con datos íntegros y compatibles.
-- Que Apache conserva `/real-jaen`, envía `Host` y `X-Forwarded-Proto: https` como se indica y publica únicamente el proxy TLS acordado.
-- La creación de `ENV_PROD` y los cinco `APP_*` protegidos como File.
-
-No se ha conectado con GitLab privado ni con SINBAD², no se ha ejecutado un despliegue y la configuración del Apache, Runner, variables, volúmenes y secretos sigue pendiente de validación por administración. CI Lint debe ejecutarse en el GitLab autohospedado antes de la primera publicación allí.
-
-## Operaciones de Docker en producción
-
-Para inspeccionar la release saludable desde el servidor, usa la carpeta indicada por `release_id` en `shared/deploy-state/last-good`; `.env.prod` se encuentra en el enlace estable `shared/config/current/.env.prod`. Carga el root de despliegue y el SHA de la última release antes de invocar Compose:
+Desde el servidor, inspecciona `shared/deploy-state/last-good` y opera con los tres archivos Compose y los dos env files versionados de esa release. Los comandos siguientes solo consultan estado y logs:
 
 ```sh
 export RJA_DEPLOY_ROOT="$HOME/deploy_real-jaen-analytics"
-RJ_IMAGE_TAG=$(sed -n 's/^commit_sha=//p' "$RJA_DEPLOY_ROOT/shared/deploy-state/last-good")
-export RJ_IMAGE_TAG
-cd "$RJA_DEPLOY_ROOT/releases/$(sed -n 's/^release_id=//p' "$RJA_DEPLOY_ROOT/shared/deploy-state/last-good")"
-docker compose --project-directory "$PWD" \
-  --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.prod" \
-  -f compose.prod.yaml ps
-docker compose --project-directory "$PWD" \
-  --env-file "$RJA_DEPLOY_ROOT/shared/config/current/.env.prod" \
-  -f compose.prod.yaml logs --tail=100 dashboard
+release_id=$(sed -n 's/^release_id=//p' "$RJA_DEPLOY_ROOT/shared/deploy-state/last-good")
+export RJ_IMAGE_TAG=$(sed -n 's/^commit_sha=//p' "$RJA_DEPLOY_ROOT/shared/deploy-state/last-good")
+config="$RJA_DEPLOY_ROOT/shared/config/current"
+cd "$RJA_DEPLOY_ROOT/releases/$release_id"
+docker compose --project-directory "$PWD" --env-file "$config/.env.prod" \
+  --env-file "$config/.env.postgresql.prod" \
+  -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml ps
+docker compose --project-directory "$PWD" --env-file "$config/.env.prod" \
+  --env-file "$config/.env.postgresql.prod" \
+  -f compose.prod.yaml -f compose.postgresql.yaml -f compose.postgresql.prod.yaml logs --tail=100 dashboard
 ```
 
-El `RJ_IMAGE_TAG` usado en operación manual debe ser el `commit_sha` registrado en `shared/deploy-state/last-good`; no confíes en `:prod` para identificar una release concreta. No publiques los puertos internos de Sports Data, Acquisition o Video Service. Mantén fijos proyecto, redes y volúmenes y no ejecutes `docker compose down -v`.
+No publiques los puertos internos, cambies nombres de proyecto/volúmenes ni ejecutes `docker compose down -v`.
 
 ## Respaldos y restauración excepcional
+
+Los comandos SQLite de esta sección sirven solo para instalaciones SQLite antiguas y ensayos aislados. No los uses en el despliegue PostgreSQL de SINBAD². El backup/restauración PostgreSQL y la restauración inicial administrada corresponden al Hito 09A; el pipeline de código no invoca esos procedimientos.
 
 El generador crea cada respaldo en una ubicación nueva y publica la carpeta solo cuando todos los archivos se han copiado, validado y sumado. Por defecto usa `.env.prod` y `compose.prod.yaml`. `COMPOSE_FILE` acepta varios archivos separados por `:` en Linux; Docker Compose aplica los overlays en ese orden y el script toma de la configuración resuelta el proyecto, la imagen y los nombres efectivos de los volúmenes.
 
@@ -129,7 +125,7 @@ RJ_DEV_VIDEO_CATALOG_DIR="$HOME/.config/real-jaen-analytics/video-data" \
   "$HOME/.config/real-jaen-analytics/backups/$(date +%Y%m%d-%H%M%S)"
 ```
 
-En producción, ejecútalo desde la release que corresponde a la instalación activa y usa su `.env.prod` privado:
+Para una instalación SQLite antigua, ejecútalo desde su release y configuración privada. No es válido para el perfil PostgreSQL:
 
 ```sh
 ENV_FILE=.env.prod sh dashboard/scripts/respaldo-instalacion.sh \
@@ -144,7 +140,7 @@ No se incluyen secretos ni archivos de configuración con credenciales, el volum
 
 La restauración admite el formato v2 completo y resuelve el proyecto, imágenes, puertos, redes, volúmenes y rutas externas desde la configuración efectiva de Compose. Antes de crear volúmenes, valida manifiesto, inventario, SHA-256, SQLite y todos los archivos tar. Se niega si hay contenedores del proyecto, cualquier volumen o red con los nombres efectivos, un montaje activo que se solape con `imports` o el catálogo externo, o si el puerto publicado por Dashboard ya está ocupado. Los backups anteriores a v2 se rechazan porque no acreditan la colección fotográfica ni el catálogo externo; genera un backup v2 para evitar perder datos silenciosamente.
 
-La restauración exige un destino de catálogo de vídeo nuevo, elegido explícitamente con `RJ_RESTORE_VIDEO_CATALOG_DIR`, que coincida con `VIDEO_SERVICE_DATA_DIR`/`RJ_DEV_VIDEO_CATALOG_DIR` resuelto por Compose. No altera un directorio de catálogo existente. En el bootstrap de producción, el manifiesto de ejemplo se valida dentro de la imagen y no se crea en esa ruta: el catálogo v2 recuperado ocupa el destino nuevo. Los vídeos originales no se incluyen: solo se recuperan el manifiesto y las calibraciones referenciadas.
+La restauración SQLite exige un destino de catálogo de vídeo nuevo, elegido explícitamente con `RJ_RESTORE_VIDEO_CATALOG_DIR`, que coincida con `VIDEO_SERVICE_DATA_DIR`/`RJ_DEV_VIDEO_CATALOG_DIR` resuelto por Compose. No altera un directorio de catálogo existente. En el bootstrap de instalaciones SQLite antiguas, el manifiesto de ejemplo se valida dentro de la imagen y no se crea en esa ruta: el catálogo v2 recuperado ocupa el destino nuevo. Los vídeos originales no se incluyen: solo se recuperan el manifiesto y las calibraciones referenciadas.
 
 Antes de crear el primer volumen, el script crea `imports/.real-jaen-restore-incomplete` con el proyecto, los volúmenes y el destino externo. Escribe además guardas dentro de los estados de Sports Data y Video Service. Si algo falla o se interrumpe, conserva el marcador, los volúmenes parciales y cualquier área de extracción para inspección; no borra datos automáticamente. Sports Data, Video Service, los preflights de backup y el despliegue normal se niegan a continuar mientras detecten la restauración incompleta. Solo tras validar la base y la generación aceptada por el coordinador, los trabajos SQLite, las fotos/blobs, el catálogo real con `VideoCatalog.load` y un perfil de Acquisition recién inicializado se retiran las guardas. El script nunca arranca los servicios.
 
@@ -197,7 +193,7 @@ COMPOSE_FILE="$COMPOSE_FILES" docker compose --project-directory "$PWD" --env-fi
 
 `restaurar-instalacion.sh` comprueba también el puerto `33401`; la prueba de bind anterior permite detectar el conflicto antes de invocarla. Mantén las rutas y secretos de desarrollo originales fuera de los directorios de imports, catálogo, semillas y colecciones del ensayo.
 
-Si la restauración falla o se interrumpe, no quites el marcador ni repitas sobre los mismos nombres. Léelo para obtener el proyecto, los cuatro volúmenes y la ruta externa; inspecciona esos recursos y conserva los logs. Los datos parciales quedan protegidos. Para un nuevo intento, prepara otro directorio externo, otro proyecto y otro prefijo de volúmenes; no borres los parciales hasta que hayas comprobado y preservado lo que contienen. La configuración de producción usa el mismo procedimiento con sus archivos Compose y `ENV_FILE` efectivos, pero requiere volúmenes y rutas externos nuevos.
+Si una restauración SQLite falla o se interrumpe, no quites el marcador ni repitas sobre los mismos nombres. Léelo para obtener el proyecto, los cuatro volúmenes y la ruta externa; inspecciona esos recursos y conserva los logs. Los datos parciales quedan protegidos. Para un nuevo ensayo SQLite, prepara otro directorio externo, otro proyecto y otro prefijo de volúmenes; no borres los parciales hasta que hayas comprobado y preservado lo que contienen. Este procedimiento no corresponde al despliegue PostgreSQL de SINBAD².
 
 En SINBAD², ejecútalo desde una release para que Compose use el mismo SHA de imágenes que la instalación activa y entrega la ruta privada de configuración explícitamente:
 

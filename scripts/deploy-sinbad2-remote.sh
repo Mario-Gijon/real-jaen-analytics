@@ -11,7 +11,7 @@ mode=${1:-}
 release_id=${2:-}
 commit_sha=${3:-}
 pipeline_id=${4:-}
-case "$mode" in deploy|bootstrap) ;; *) fail 'invalid deployment mode' ;; esac
+case "$mode" in deploy) ;; *) fail 'only ordinary PostgreSQL code deployments are supported' ;; esac
 case "$release_id" in *[!a-zA-Z0-9_-]*|'') fail 'invalid release identifier' ;; esac
 case "$commit_sha" in *[!a-fA-F0-9]*|'') fail 'invalid commit identifier' ;; esac
 case "$pipeline_id" in *[!0-9]*|'') fail 'invalid pipeline identifier' ;; esac
@@ -22,7 +22,7 @@ incoming="$root/shared/incoming/$release_id"
 config_base="$root/shared/config"
 secrets_base="$root/shared/secrets"
 imports="$root/shared/imports"
-catalog="$root/shared/video-catalog"
+postgres_secret_root="$root/shared/postgresql/secrets"
 state_dir="$root/shared/deploy-state"
 # A restore marker is created before the first destination volume. Check before any directory, release, symlink or
 # container mutation so an interrupted restore cannot be mistaken for a deployable installation.
@@ -40,14 +40,23 @@ previous_commit=
 links_promoted=0
 containers_mutated=0
 maintenance_active=0
-network_detached=0
-acquisition_drain=0
 preserve_candidate_state=0
 recovery_complete=0
 deployment_ready=0
 config_temp="$config_base/versions/.$release_id.tmp"
 secret_temp="$secrets_base/versions/.$release_id.tmp"
 metadata_tmp="$state_dir/.last-good-$release_id"
+postgres_env_file=
+postgres_secret_dir=
+postgres_volume=
+sports_operational_volume=
+video_operational_volume=
+profile_volume=
+jobs_volume=
+postgres_container=
+admission_closed=0
+previous_rollback_compatible=0
+dashboard_was_present=0
 
 safe_link() {
   base=$1
@@ -55,6 +64,19 @@ safe_link() {
   case "$target" in versions/*) ;; *) return 1 ;; esac
   case "/$target/" in */../*|*//*) return 1 ;; esac
   [ -d "$base/$target" ] && [ ! -L "$base/$target" ]
+}
+
+release_has_container_bind_mount() {
+  candidate_path=$1
+  containers=$(docker ps -aq 2>/dev/null) || return 0
+  for container_id in $containers; do
+    sources=$(docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container_id" 2>/dev/null) || return 0
+    if printf '%s\n' "$sources" | awk -v root="$candidate_path" \
+      '$0 == root || index($0, root "/") == 1 { found=1 } END { exit !found }'; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 prune_old_releases() {
@@ -81,7 +103,9 @@ prune_old_releases() {
     candidate_pipeline=${candidate_rest%%-*}
     candidate_job=${candidate_rest#*-}
     case "$candidate_pipeline:$candidate_job" in *[!0-9:]*|:*|*:) continue ;; esac
-    [ -f "$candidate_path/compose.prod.yaml" ] || continue
+    [ -f "$candidate_path/compose.prod.yaml" ] \
+      && [ -f "$candidate_path/compose.postgresql.yaml" ] \
+      && [ -f "$candidate_path/compose.postgresql.prod.yaml" ] || continue
     printf '%s %s %s\n' "$candidate_pipeline" "$candidate_job" "$candidate"
   done | sort -k 1,1nr -k 2,2nr) || {
     printf 'SINBAD2 deploy: warning: release cleanup could not list old releases\n' >&2
@@ -103,7 +127,13 @@ prune_old_releases() {
       continue
     esac
     [ -d "$candidate_path" ] && [ ! -L "$candidate_path" ] || continue
-    [ -f "$candidate_path/compose.prod.yaml" ] || continue
+    [ -f "$candidate_path/compose.prod.yaml" ] \
+      && [ -f "$candidate_path/compose.postgresql.yaml" ] \
+      && [ -f "$candidate_path/compose.postgresql.prod.yaml" ] || continue
+    if release_has_container_bind_mount "$candidate_path"; then
+      printf 'SINBAD2 deploy: preserving release %s because a container has a bind mount in it\n' "$candidate" >&2
+      continue
+    fi
     if ! rm -rf -- "$candidate_path"; then
       printf 'SINBAD2 deploy: warning: could not remove old code release %s\n' "$candidate" >&2
     fi
@@ -134,11 +164,10 @@ restore_previous_links() {
 ensure_uid_read_directory() {
   path=$1
   if [ -e "$path" ]; then
-    [ -d "$path" ] && [ ! -L "$path" ] || fail 'shared imports/catalog path is not a real directory'
+    [ -d "$path" ] && [ ! -L "$path" ] || fail 'administrator-prepared shared/imports path is not a real directory'
     return 0
   fi
-  mkdir -m 700 "$path" || fail 'could not create shared imports/catalog directory'
-  chmod 755 "$path" || fail 'could not make new shared imports/catalog directory readable'
+  fail 'an administrator-prepared shared directory is missing; no directory was created'
 }
 
 cleanup() {
@@ -163,22 +192,28 @@ cleanup() {
     deployment_finalized=1
   fi
   if [ "$deployment_finalized" -eq 0 ] && [ "$recovery_complete" -eq 0 ]; then
-    if [ "$containers_mutated" -eq 1 ] && [ "$has_previous" -eq 1 ]; then
+    if [ "$containers_mutated" -eq 1 ] && [ "$has_previous" -eq 1 ] \
+        && [ "$previous_rollback_compatible" -eq 1 ]; then
       rollback_candidate || preserve_candidate_state=1
+    elif [ "$containers_mutated" -eq 1 ]; then
+      preserve_candidate_state=1
+      dc "$release" stop dashboard >/dev/null 2>&1 || true
+      wait_for_idle_jobs || true
+      printf 'SINBAD2 deploy: automatic rollback is disabled because the prior release is not PostgreSQL-compatible; admission remains closed for inspection\n' >&2
     elif [ "$maintenance_active" -eq 1 ] && [ "$preserve_candidate_state" -eq 0 ]; then
       if clear_maintenance; then
-        resume_previous_sports_data || {
+        resume_dashboard || {
           preserve_candidate_state=1
-          printf 'SINBAD2 deploy: could not restore the Sports Data network; admission remains closed for inspection\n' >&2
+          printf 'SINBAD2 deploy: could not restore service admission; admission remains closed for inspection\n' >&2
         }
       else
         preserve_candidate_state=1
         printf 'SINBAD2 deploy: maintenance fence could not be cleared; admission remains closed for inspection\n' >&2
       fi
-    elif [ "$network_detached" -eq 1 ] && [ "$preserve_candidate_state" -eq 0 ]; then
-      resume_previous_sports_data || {
+    elif [ "$admission_closed" -eq 1 ] && [ "$preserve_candidate_state" -eq 0 ]; then
+      resume_dashboard || {
         preserve_candidate_state=1
-        printf 'SINBAD2 deploy: could not restore the Sports Data network; admission remains closed for inspection\n' >&2
+        printf 'SINBAD2 deploy: could not restore service admission; admission remains closed for inspection\n' >&2
       }
     fi
   fi
@@ -191,7 +226,7 @@ cleanup() {
 trap cleanup EXIT
 
 for path in "$root" "$root/releases" "$root/shared" "$config_base" "$secrets_base" \
-  "$config_base/versions" "$secrets_base/versions" "$imports" "$catalog" \
+  "$config_base/versions" "$secrets_base/versions" "$imports" "$postgres_secret_root" \
   "$root/shared/incoming" "$state_dir"; do
   [ ! -L "$path" ] || fail 'deployment path contains a symbolic link'
 done
@@ -200,17 +235,16 @@ mkdir -p "$root/releases" "$root/shared" "$config_base/versions" "$secrets_base/
 chmod 700 "$root" "$root/shared" "$config_base" "$secrets_base" \
   "$config_base/versions" "$secrets_base/versions" "$root/shared/incoming" "$state_dir"
 ensure_uid_read_directory "$imports"
-if [ "$mode" = bootstrap ]; then
-  [ ! -e "$catalog" ] && [ ! -L "$catalog" ] \
-    || fail 'bootstrap video catalog destination already exists; no catalog files were changed'
-else
-  ensure_uid_read_directory "$catalog"
-fi
+[ -d "$postgres_secret_root" ] && [ ! -L "$postgres_secret_root" ] \
+  || fail 'PostgreSQL credentials must be provisioned by administration in shared/postgresql/secrets'
+[ "$(stat -c '%a' -- "$postgres_secret_root" 2>/dev/null)" = 700 ] \
+  || fail 'shared/postgresql/secrets must be a private mode-0700 directory'
 
 [ -d "$release" ] && [ ! -L "$release" ] || fail 'code release directory is missing'
-[ -f "$release/compose.prod.yaml" ] || fail 'production Compose file is missing from the release'
-[ -f "$release/dashboard/scripts/restaurar-instalacion.sh" ] || fail 'restore script is missing from the release'
-[ -f "$release/video-service/data/videos.example.json" ] || fail 'empty video catalog fixture is missing'
+[ -f "$release/compose.prod.yaml" ] \
+  && [ -f "$release/compose.postgresql.yaml" ] \
+  && [ -f "$release/compose.postgresql.prod.yaml" ] \
+  || fail 'one or more PostgreSQL production Compose files are missing from the release'
 [ -d "$incoming" ] && [ ! -L "$incoming" ] || fail 'private configuration bundle is missing'
 
 if [ -f "$last_good" ]; then
@@ -226,6 +260,18 @@ if [ -f "$last_good" ]; then
   safe_link "$secrets_base" "$previous_secret_target" || fail 'last healthy secret version is missing'
   case "$previous_pipeline" in *[!0-9]*|'') fail 'last healthy pipeline identifier is invalid' ;; esac
   has_previous=1
+  previous_config_dir="$config_base/$previous_config_target"
+  previous_release_dir="$root/releases/$previous_release"
+  if [ -f "$previous_config_dir/.env.postgresql.prod" ] \
+      && [ -f "$previous_release_dir/compose.postgresql.yaml" ] \
+      && [ -f "$previous_release_dir/compose.postgresql.prod.yaml" ] \
+      && grep -Fqx 'database_family=postgresql' "$last_good" \
+      && grep -Fqx 'sports_schema_revision=pg0005' "$last_good" \
+      && grep -Fqx 'video_schema_revision=vg0002' "$last_good" \
+      && grep -Fqx 'PG_VOLUME_NAME=rja-sinbad2-postgresql-data' "$previous_config_dir/.env.postgresql.prod" \
+      && grep -Fqx 'PG_NETWORK_NAME=rja-sinbad2-prod-postgresql-private' "$previous_config_dir/.env.postgresql.prod"; then
+    previous_rollback_compatible=1
+  fi
   if [ "$pipeline_id" -lt "$previous_pipeline" ]; then
     printf 'Skipping stale pipeline %s; pipeline %s is already healthy.\n' "$pipeline_id" "$previous_pipeline"
     deployment_finalized=1
@@ -234,8 +280,11 @@ if [ -f "$last_good" ]; then
 fi
 
 bundle_env="$incoming/.env.prod"
+bundle_postgres_env="$incoming/.env.postgresql.prod"
 bundle_secrets="$incoming/secrets"
 [ -f "$bundle_env" ] && [ ! -L "$bundle_env" ] || fail 'ENV_PROD is missing from the private bundle'
+[ -f "$bundle_postgres_env" ] && [ ! -L "$bundle_postgres_env" ] \
+  || fail 'ENV_POSTGRESQL_PROD is missing from the private bundle'
 [ -d "$bundle_secrets" ] && [ ! -L "$bundle_secrets" ] || fail 'secret files are missing from the private bundle'
 for secret_file in access-password update-password control-token acquisition-token; do
   [ -f "$bundle_secrets/$secret_file" ] && [ ! -L "$bundle_secrets/$secret_file" ] \
@@ -256,21 +305,41 @@ require_line() {
   [ "$count" = 1 ] || fail "ENV_PROD critical setting $key does not match the required production value"
 }
 
+require_postgres_line() {
+  expected=$1
+  key=${expected%%=*}
+  declarations=$(grep -Ec "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$bundle_postgres_env" || true)
+  [ "$declarations" = 1 ] || fail "ENV_POSTGRESQL_PROD declares critical key $key more than once"
+  count=$(grep -Fxc "$expected" "$bundle_postgres_env" || true)
+  [ "$count" = 1 ] || fail "ENV_POSTGRESQL_PROD critical setting $key is invalid"
+}
+
 require_line 'COMPOSE_PROJECT_NAME=real-jaen-analytics-sinbad2-prod'
 require_line 'RJ_PROD_NETWORK_PREFIX=rja-sinbad2-prod'
-require_line 'RJ_PROD_SPORTS_STATE_VOLUME=rja-sinbad2-sports-state'
 require_line 'RJ_PROD_ACQUISITION_PROFILES_VOLUME=rja-sinbad2-acquisition-profiles'
 require_line 'RJ_PROD_ACQUISITION_JOBS_VOLUME=rja-sinbad2-acquisition-jobs'
-require_line 'RJ_PROD_VIDEO_STATE_VOLUME=rja-sinbad2-video-state'
 require_line 'RJ_DASHBOARD_BIND=127.0.0.1'
 require_line 'RJ_DASHBOARD_PORT=8090'
 require_line 'RJ_PROD_SECRET_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/secrets/current'
 require_line 'RJ_IMPORT_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/imports'
 require_line 'RJ_VIDEO_CATALOG_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/video-catalog'
-require_line 'RJ_BOOTSTRAP_BACKUP_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/imports/initial-backup'
-require_line 'RJ_VIDEO_MANIFEST=videos.json'
 if grep -Eq '^(APP_ACCESS_PASSWORD|APP_UPDATE_PASSWORD|APP_SESSION_SECRET|APP_CONTROL_TOKEN|APP_ACQUISITION_TOKEN)=' "$bundle_env"; then
   fail 'application credentials belong in File variables, not ENV_PROD'
+fi
+require_postgres_line 'PG_PROJECT_NAME=real-jaen-analytics-sinbad2-prod'
+require_postgres_line 'PG_NETWORK_NAME=rja-sinbad2-prod-postgresql-private'
+require_postgres_line 'PG_VOLUME_NAME=rja-sinbad2-postgresql-data'
+require_postgres_line 'PG_SECRET_DIR=${RJA_DEPLOY_ROOT:?Set by the deployment job}/shared/postgresql/secrets'
+require_postgres_line 'PG_TASK_IMAGE_TAG=prod'
+require_postgres_line 'RJ_PROD_SPORTS_OPERATIONAL_VOLUME=rja-sinbad2-sports-operational-state'
+require_postgres_line 'RJ_PROD_VIDEO_OPERATIONAL_VOLUME=rja-sinbad2-video-operational-state'
+secret_gid=$(sed -n 's/^RJ_APP_SECRET_GID=//p' "$bundle_postgres_env" | tail -n 1)
+secret_gid_count=$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?RJ_APP_SECRET_GID[[:space:]]*=' "$bundle_postgres_env" || true)
+[ "$secret_gid_count" = 1 ] || fail 'ENV_POSTGRESQL_PROD must declare the administrator-provisioned GID exactly once'
+case "$secret_gid" in ''|*[!0-9]*) fail 'ENV_POSTGRESQL_PROD must contain the GID provisioned by administration' ;; esac
+[ "$secret_gid" -gt 0 ] || fail 'the PostgreSQL runtime secret GID must be non-privileged and nonzero'
+if grep -Eq '^(POSTGRES_PASSWORD|SPORTS_DATA_(OWNER|APP)_PASSWORD|VIDEO_SERVICE_(OWNER|APP)_PASSWORD|SPORTS_DATA_.*DATABASE_URL|VIDEO_SERVICE_.*DATABASE_URL)=' "$bundle_postgres_env"; then
+  fail 'PostgreSQL credentials belong in administrator-provisioned files, not ENV_POSTGRESQL_PROD'
 fi
 
 config_current="$config_base/current"
@@ -297,7 +366,9 @@ if [ "$has_previous" -eq 1 ]; then
   [ -L "$secret_current" ] && [ "$(readlink "$secret_current")" = "$previous_secret_target" ] \
     || fail 'current secrets do not match last-good; inspect service and metadata state before retrying'
 fi
-if [ -L "$config_current" ] && cmp -s "$config_current/.env.prod" "$bundle_env"; then
+if [ -L "$config_current" ] \
+    && cmp -s "$config_current/.env.prod" "$bundle_env" \
+    && cmp -s "$config_current/.env.postgresql.prod" "$bundle_postgres_env"; then
   config_target=$(readlink "$config_current")
   config_changed=0
 else
@@ -306,7 +377,8 @@ else
   [ ! -e "$config_temp" ] || fail 'temporary config version already exists'
   mkdir -m 700 "$config_temp"
   cp "$bundle_env" "$config_temp/.env.prod"
-  chmod 600 "$config_temp/.env.prod"
+  cp "$bundle_postgres_env" "$config_temp/.env.postgresql.prod"
+  chmod 600 "$config_temp/.env.prod" "$config_temp/.env.postgresql.prod"
   mv "$config_temp" "$config_base/$config_target"
 fi
 
@@ -344,7 +416,9 @@ fi
 export RJA_DEPLOY_ROOT="$root"
 export RJ_IMAGE_TAG="$commit_sha"
 env_file="$config_base/$config_target/.env.prod"
+postgres_env_file="$config_base/$config_target/.env.postgresql.prod"
 secret_dir="$secrets_base/$secret_target"
+postgres_secret_dir="$postgres_secret_root"
 export RJ_PROD_SECRET_DIR="$secret_dir"
 
 service_list=
@@ -385,33 +459,38 @@ fi
 if [ -z "$service_list" ]; then
   service_list='dashboard sports-data acquisition video-service'
 fi
-case " $service_list " in *' acquisition '*) recreate_acquisition=1 ;; *) recreate_acquisition=0 ;; esac
-if [ "$force_recreate" -eq 0 ]; then
-  recreate_acquisition=0
-fi
 network_prefix=$(sed -n 's/^RJ_PROD_NETWORK_PREFIX=//p' "$env_file" | tail -n 1)
 case "$network_prefix" in *[!a-zA-Z0-9_.-]*|'') fail 'production network prefix is invalid' ;; esac
-control_network="$network_prefix-acquisition-control"
 
 compose_version=$(docker compose version --short 2>/dev/null) || fail 'Docker Compose is unavailable on the host'
 version=${compose_version#v}
 major=${version%%.*}
 rest=${version#*.}
 minor=${rest%%.*}
-case "$major:$minor" in *[!0-9:]*|:*) fail 'Docker Compose version could not be parsed' ;; esac
-if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 17 ]; }; then
-  fail 'Docker Compose 2.17 or newer is required'
+patch=${rest#*.}
+patch=${patch%%.*}
+case "$major:$minor:$patch" in *[!0-9:]*|:*|*::*|*:) fail 'Docker Compose version could not be parsed' ;; esac
+if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] \
+    && { [ "$minor" -lt 24 ] || { [ "$minor" -eq 24 ] && [ "$patch" -lt 4 ]; }; }; }; then
+  fail 'Docker Compose 2.24.4 or newer is required for !override and !reset'
 fi
 docker info >/dev/null 2>&1 || fail 'Docker daemon is unavailable to the SSH account'
+command -v python3 >/dev/null 2>&1 || fail 'python3 is required for production Compose and mount verification'
 
 dc() {
   compose_dir=$1
   shift
   docker compose --project-directory "$compose_dir" --env-file "$env_file" \
-    -f "$compose_dir/compose.prod.yaml" "$@"
+    --env-file "$postgres_env_file" \
+    -f "$compose_dir/compose.prod.yaml" \
+    -f "$compose_dir/compose.postgresql.yaml" \
+    -f "$compose_dir/compose.postgresql.prod.yaml" "$@"
 }
 
-dc "$release" config -q >/dev/null 2>&1 || fail 'production Compose configuration is invalid'
+dc "$release" config -q >/dev/null 2>&1 || fail 'PostgreSQL production Compose configuration is invalid'
+dc "$release" --profile migrations config --format json 2>/dev/null \
+  | python3 "$release/scripts/verify-postgresql-prod-compose.py" >/dev/null 2>&1 \
+  || fail 'effective production Compose does not preserve the PostgreSQL network, secret and loopback boundaries'
 
 volume_value() {
   value=$(sed -n "s/^$1=//p" "$env_file" | tail -n 1)
@@ -421,13 +500,22 @@ volume_value() {
   printf '%s' "$value"
 }
 
-sports_volume=$(volume_value RJ_PROD_SPORTS_STATE_VOLUME)
+volume_value_from_file() {
+  value=$(sed -n "s/^$2=//p" "$1" | tail -n 1)
+  case "$value" in
+    ''|*[!a-zA-Z0-9_.-]*) fail 'a persistent PostgreSQL volume name is missing or invalid' ;;
+  esac
+  printf '%s' "$value"
+}
+
+postgres_volume=$(volume_value_from_file "$postgres_env_file" PG_VOLUME_NAME)
+sports_operational_volume=$(volume_value_from_file "$postgres_env_file" RJ_PROD_SPORTS_OPERATIONAL_VOLUME)
+video_operational_volume=$(volume_value_from_file "$postgres_env_file" RJ_PROD_VIDEO_OPERATIONAL_VOLUME)
 profile_volume=$(volume_value RJ_PROD_ACQUISITION_PROFILES_VOLUME)
 jobs_volume=$(volume_value RJ_PROD_ACQUISITION_JOBS_VOLUME)
-video_volume=$(volume_value RJ_PROD_VIDEO_STATE_VOLUME)
 present=0
 missing=0
-for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume"; do
+for volume in "$postgres_volume" "$sports_operational_volume" "$video_operational_volume" "$profile_volume" "$jobs_volume"; do
   if docker volume inspect "$volume" >/dev/null 2>&1; then
     present=$((present + 1))
   else
@@ -435,22 +523,11 @@ for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume";
   fi
 done
 
-backup_dir="$imports/initial-backup"
-if [ "$mode" = bootstrap ]; then
-  [ "$present" -eq 0 ] || fail 'bootstrap refused: at least one target volume already exists; no volume was restored or removed'
-  [ -d "$backup_dir" ] || fail 'bootstrap backup is missing; place a verified backup in shared/imports/initial-backup before retrying'
-  for required in real-jaen.sqlite actualizaciones.tar acquisition-jobs.tar video-service-state.tar manifest.json SHA256SUMS; do
-    [ -f "$backup_dir/$required" ] || fail 'bootstrap backup is incomplete; no volume was created'
-  done
-  (cd "$backup_dir" && sha256sum -c SHA256SUMS >/dev/null 2>&1) \
-    || fail 'bootstrap backup checksum verification failed; no volume was created'
-else
-  if [ "$missing" -gt 0 ]; then
-    if [ "$present" -eq 0 ]; then
-      fail 'installation is not initialized; use the separate manual bootstrap after placing the verified backup under shared/imports/initial-backup; no volume was created'
-    fi
-    fail 'only some persistent volumes exist; deployment stopped without creating, restoring, or removing any volume'
+if [ "$missing" -gt 0 ]; then
+  if [ "$present" -eq 0 ]; then
+    fail 'PostgreSQL installation is not prepared; administration must provision all five persistent volumes before deployment'
   fi
+  fail 'PostgreSQL installation is incomplete; deployment stopped without creating, restoring, or removing any volume'
 fi
 
 if [ "$code_changed" -eq 1 ]; then
@@ -462,68 +539,123 @@ sports_image="local/real-jaen-analytics/sports-data:$commit_sha"
 acquisition_image="local/real-jaen-analytics/acquisition:$commit_sha"
 video_image="local/real-jaen-analytics/video-service:$commit_sha"
 dashboard_image="local/real-jaen-analytics/dashboard:$commit_sha"
+deployment_check="$release/scripts/postgresql-deployment-check.py"
+
+[ -f "$deployment_check" ] && [ ! -L "$deployment_check" ] \
+  || fail 'read-only PostgreSQL deployment checks are missing from the release'
+
+secret_mode_and_group() {
+  stat -c '%a:%g' -- "$1" 2>/dev/null
+}
+
+for secret_name in postgres_admin_password sports_data_owner_password sports_data_app_password \
+  video_service_owner_password video_service_app_password \
+  sports_data_migration_database_url video_service_migration_database_url; do
+  secret_path="$postgres_secret_dir/$secret_name"
+  [ -f "$secret_path" ] && [ ! -L "$secret_path" ] \
+    || fail 'an administrator-provisioned PostgreSQL credential file is missing'
+  metadata=$(secret_mode_and_group "$secret_path") || fail 'PostgreSQL credential metadata is unavailable'
+  case "$metadata" in 600:*) ;; *) fail 'PostgreSQL administrator and migration credentials must remain mode 0600' ;; esac
+done
+for secret_name in sports_data_database_url video_service_database_url; do
+  secret_path="$postgres_secret_dir/$secret_name"
+  [ -f "$secret_path" ] && [ ! -L "$secret_path" ] \
+    || fail 'an administrator-provisioned PostgreSQL application URL is missing'
+  metadata=$(secret_mode_and_group "$secret_path") || fail 'PostgreSQL application URL metadata is unavailable'
+  [ "$metadata" = "640:$secret_gid" ] \
+    || fail 'PostgreSQL application URLs must be mode 0640 and use the administrator-provisioned application GID'
+done
+
+pg_network_name=$(sed -n 's/^PG_NETWORK_NAME=//p' "$postgres_env_file" | tail -n 1)
+case "$pg_network_name" in *[!a-zA-Z0-9_.-]*|'') fail 'PostgreSQL private network name is invalid' ;; esac
+docker network inspect "$pg_network_name" >/dev/null 2>&1 \
+  || fail 'the prepared private PostgreSQL network is missing; deployment will not create it'
+postgres_container=$(dc "$release" ps -q postgresql)
+[ -n "$postgres_container" ] || fail 'the prepared PostgreSQL 18 service is not present in this Compose project'
+postgres_state=$(docker inspect --format '{{.State.Status}}' "$postgres_container") \
+  || fail 'could not inspect PostgreSQL state'
+postgres_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$postgres_container") \
+  || fail 'could not inspect PostgreSQL health'
+[ "$postgres_state" = running ] && [ "$postgres_health" = healthy ] \
+  || fail 'PostgreSQL must already be running and healthy; the deployment will not start or recreate it'
+postgres_mount=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}:{{.RW}}{{end}}{{end}}' "$postgres_container") \
+  || fail 'could not verify the PostgreSQL data-volume attachment'
+[ "$postgres_mount" = "$postgres_volume:true" ] \
+  || fail 'PostgreSQL is not using the administrator-prepared persistent data volume'
+postgres_bindings=$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$postgres_container") \
+  || fail 'could not verify PostgreSQL port publication'
+case "$postgres_bindings" in '{}'|'null'|'map[]'|'') ;; *) fail 'PostgreSQL must not publish a host port' ;; esac
+pg18=$(docker exec "$postgres_container" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+  --username postgres --dbname postgres --tuples-only --no-align \
+  --command "SELECT current_setting('server_version_num')::integer BETWEEN 180000 AND 189999" 2>/dev/null) \
+  || fail 'PostgreSQL version could not be verified'
+[ "$pg18" = t ] || fail 'the prepared database service is not PostgreSQL 18'
+
+check_postgresql() {
+  service=$1
+  mode=$2
+  case "$service:$mode" in
+    migrate-sports-data:sports-schema|migrate-sports-data:sports-active)
+      credential="$postgres_secret_dir/sports_data_migration_database_url"
+      variable=SPORTS_DATA_MIGRATION_DATABASE_URL_FILE
+      image=$sports_image
+      run_user='0:0'
+      extra_group=
+      ;;
+    migrate-video-service:video-schema|migrate-video-service:video-active)
+      credential="$postgres_secret_dir/video_service_migration_database_url"
+      variable=VIDEO_SERVICE_MIGRATION_DATABASE_URL_FILE
+      image=$video_image
+      run_user='0:0'
+      extra_group=
+      ;;
+    sports-app:sports-app)
+      credential="$postgres_secret_dir/sports_data_database_url"
+      variable=SPORTS_DATA_DATABASE_URL_FILE
+      image=$sports_image
+      run_user='10001:10001'
+      extra_group=$secret_gid
+      ;;
+    video-app:video-app)
+      credential="$postgres_secret_dir/video_service_database_url"
+      variable=VIDEO_SERVICE_DATABASE_URL_FILE
+      image=$video_image
+      run_user='10001:10001'
+      extra_group=$secret_gid
+      ;;
+    *) fail 'invalid internal PostgreSQL preflight check' ;;
+  esac
+  if [ -n "$extra_group" ]; then
+    docker run --rm --network "$pg_network_name" --user "$run_user" --group-add "$extra_group" \
+      -v "$credential:/run/secrets/database-url:ro" \
+      -v "$deployment_check:/rja-postgresql-check.py:ro" \
+      -e "$variable=/run/secrets/database-url" --entrypoint python "$image" -B \
+      /rja-postgresql-check.py "$mode"
+  else
+    docker run --rm --network "$pg_network_name" --user "$run_user" \
+      -v "$credential:/run/secrets/database-url:ro" \
+      -v "$deployment_check:/rja-postgresql-check.py:ro" \
+      -e "$variable=/run/secrets/database-url" --entrypoint python "$image" -B \
+      /rja-postgresql-check.py "$mode"
+  fi
+}
+
+sports_schema=$(check_postgresql migrate-sports-data sports-schema 2>/dev/null) \
+  || fail 'Sports Data PostgreSQL owner connection or pg0005 schema preflight failed'
+[ "$sports_schema" = ok ] || fail 'Sports Data PostgreSQL schema is not at pg0005'
+video_schema=$(check_postgresql migrate-video-service video-schema 2>/dev/null) \
+  || fail 'Video Service PostgreSQL owner connection or vg0002 schema preflight failed'
+[ "$video_schema" = ok ] || fail 'Video Service PostgreSQL schema is not at vg0002'
+app_db_check=$(check_postgresql sports-app sports-app 2>/dev/null) \
+  || fail 'Sports Data app credentials, database access or cross-database isolation preflight failed'
+[ "$app_db_check" = ok ] || fail 'Sports Data PostgreSQL runtime role failed its isolation check'
+app_db_check=$(check_postgresql video-app video-app 2>/dev/null) \
+  || fail 'Video Service app credentials, database access or cross-database isolation preflight failed'
+[ "$app_db_check" = ok ] || fail 'Video Service PostgreSQL runtime role failed its isolation check'
 
 docker run --rm --network none --user 10001:10001 -v "$imports:/imports:ro" \
-  --entrypoint python "$sports_image" -B -c \
-  "import os; os.listdir('/imports')" \
-  >/dev/null 2>&1 || fail 'shared/imports is not readable and traversable by UID 10001'
-
-if [ "$mode" = bootstrap ]; then
-  docker run --rm --network none --user 10001:10001 -v "$imports:/imports:ro" \
-    --entrypoint python "$sports_image" -B -c \
-    "import os; root='/imports'; backup=root+'/initial-backup'; os.listdir(root); os.listdir(backup); names=['real-jaen.sqlite','actualizaciones.tar','acquisition-jobs.tar','video-service-state.tar','manifest.json','SHA256SUMS']; names += ['procedencia.tar'] if os.path.isfile(backup+'/procedencia.tar') else []; [os.close(os.open(backup+'/'+name, os.O_RDONLY)) for name in names]" \
-    >/dev/null 2>&1 || fail 'bootstrap backup is not readable by UID 10001; no volume was restored'
-fi
-
-manifest="$catalog/videos.json"
-if [ "$mode" = bootstrap ]; then
-  # The fresh image contains the example catalog. Validate it without creating the external restore destination.
-  docker run --rm --network none --user 10001:10001 --entrypoint python "$video_image" -B -c \
-    "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
-    >/dev/null 2>&1 || fail 'the image example video catalog is invalid for a new bootstrap'
-else
-  docker run --rm --network none --user 10001:10001 -v "$catalog:/app/data:ro" \
-    --entrypoint python "$video_image" -B -c "import os; os.listdir('/app/data')" \
-    >/dev/null 2>&1 || fail 'shared/video-catalog is not readable and traversable by UID 10001'
-  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
-    [ -f "$manifest" ] && [ ! -L "$manifest" ] \
-      || fail 'existing video catalog manifest is not a regular file; existing catalog data was left untouched'
-  else
-    first_entry=$(find "$catalog" -mindepth 1 -print -quit)
-    [ -z "$first_entry" ] || fail 'video catalog has files but no videos.json; existing catalog data was left untouched'
-    temporary="$catalog/.videos.json-$release_id"
-    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || fail 'temporary video manifest path already exists'
-    cp "$release/video-service/data/videos.example.json" "$temporary"
-    chmod 444 "$temporary"
-    mv "$temporary" "$manifest"
-  fi
-  # VideoCatalog.load reads the manifest and its calibration files; it does not need state.
-  docker run --rm --network none --user 10001:10001 -v "$catalog:/app/data:ro" \
-    --entrypoint python "$video_image" -B -c \
-    "from pathlib import Path; from video_service.catalog import VideoCatalog; VideoCatalog.load(Path('/app/data'), 'videos.json')" \
-    >/dev/null 2>&1 || fail 'video catalog is invalid or unreadable by UID 10001; existing catalog data was left untouched'
-fi
-
-if [ "$mode" = bootstrap ]; then
-  for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume"; do
-    if docker volume inspect "$volume" >/dev/null 2>&1; then
-      fail 'bootstrap target volume appeared during preflight; restore was not started'
-    fi
-  done
-  if ! (cd "$release" && ENV_FILE="$env_file" COMPOSE_FILE=compose.prod.yaml \
-      RJ_IMAGE_TAG="$commit_sha" RJ_RESTORE_VIDEO_CATALOG_DIR="$catalog" \
-      sh dashboard/scripts/restaurar-instalacion.sh "$backup_dir"); then
-    fail 'bootstrap restore failed; volumes were not removed. Inspect every target volume before any retry'
-  fi
-  for volume in "$sports_volume" "$profile_volume" "$jobs_volume" "$video_volume"; do
-    docker volume inspect "$volume" >/dev/null 2>&1 \
-      || fail 'bootstrap did not create all expected volumes; no automatic cleanup was attempted'
-  done
-fi
-
-docker run --rm --network none --user 10001:10001 -v "$sports_volume:/state:ro" \
-  --entrypoint python "$sports_image" -B -m persistencia verificar --base /state/real-jaen.sqlite \
-  >/dev/null 2>&1 || fail 'sports database preflight failed; existing data was left untouched'
+  --entrypoint python "$sports_image" -B -c "import os; os.listdir('/imports')" \
+  >/dev/null 2>&1 || fail 'administrator-prepared shared/imports is not readable by UID 10001'
 
 docker run --rm --network none --user 10001:10001 -v "$profile_volume:/profiles:ro" \
   --entrypoint python "$acquisition_image" -B -c \
@@ -537,10 +669,8 @@ if [ -n "$acquisition_container" ]; then
     || fail 'could not inspect Acquisition health'
   [ "$acquisition_state" = running ] && [ "$acquisition_health" = healthy ] \
     || fail 'Acquisition is present but not healthy; profile verification cannot safely compete with its owner lock'
-  acquisition_was_running=1
   printf 'Acquisition is healthy and owns its profile; using its startup integrity check while it runs.\n'
 else
-  acquisition_was_running=0
   docker run --rm --network none --user 10001:10001 -v "$profile_volume:/profiles" \
     --entrypoint python "$acquisition_image" -B -m acquisition.admin verify-profile \
     >/dev/null 2>&1 || fail 'stopped Acquisition profile verification failed; existing profile data was left untouched'
@@ -550,22 +680,24 @@ docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-
   --entrypoint python "$acquisition_image" -B -c \
   "import sqlite3,sys; from pathlib import Path; db=Path('/acquisition-jobs/jobs.sqlite'); sys.exit(1) if not db.is_file() else None; c=sqlite3.connect(f'file:{db}?mode=ro',uri=True); ok=c.execute('PRAGMA integrity_check').fetchone()[0]=='ok' and c.execute(\"SELECT name FROM sqlite_master WHERE type='table' AND name='job'\").fetchone() is not None; sys.exit(0 if ok else 1)" \
   >/dev/null 2>&1 || fail 'acquisition jobs database is missing or invalid'
+maintenance_marker=$(docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-jobs:ro" \
+  --entrypoint python "$acquisition_image" -B -c \
+  "from pathlib import Path; p=Path('/acquisition-jobs/deployment-maintenance'); print('present' if p.exists() or p.is_symlink() else 'absent')" \
+  2>/dev/null) || fail 'could not inspect the Acquisition deployment-maintenance fence'
+[ "$maintenance_marker" = absent ] \
+  || fail 'an existing Acquisition maintenance fence requires administrator inspection before deployment'
 docker run --rm --network none --user 10001:10001 -v "$jobs_volume:/acquisition-jobs" \
   --entrypoint python "$acquisition_image" -B -c \
   "import os,sys; sys.exit(0 if os.access('/acquisition-jobs', os.W_OK | os.X_OK) else 1)" \
   >/dev/null 2>&1 || fail 'acquisition jobs volume is not writable by UID 10001'
-docker run --rm --network none --user 10001:10001 -v "$sports_volume:/state" \
+docker run --rm --network none --user 10001:10001 -v "$sports_operational_volume:/state" \
   --entrypoint python "$sports_image" -B -c \
   "import os,sys; sys.exit(0 if os.access('/state', os.W_OK | os.X_OK) else 1)" \
-  >/dev/null 2>&1 || fail 'sports state volume is not writable by UID 10001'
-docker run --rm --network none --user 10001:10001 -v "$video_volume:/state:ro" \
-  --entrypoint python "$video_image" -B -c \
-  "import sqlite3,sys; from pathlib import Path; db=Path('/state/video-service.sqlite'); sys.exit(1) if not db.is_file() else None; c=sqlite3.connect(f'file:{db}?mode=ro',uri=True); tables={r[0] for r in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")}; expected={'video_job','video_association','match_video_override'}; sys.exit(0 if c.execute('PRAGMA integrity_check').fetchone()[0]=='ok' and expected <= tables else 1)" \
-  >/dev/null 2>&1 || fail 'video state database is missing or invalid'
-docker run --rm --network none --user 10001:10001 -v "$video_volume:/state" \
+  >/dev/null 2>&1 || fail 'Sports Data operational volume is not writable by UID 10001'
+docker run --rm --network none --user 10001:10001 -v "$video_operational_volume:/state" \
   --entrypoint python "$video_image" -B -c \
   "import os,sys; sys.exit(0 if os.access('/state', os.W_OK | os.X_OK) else 1)" \
-  >/dev/null 2>&1 || fail 'video state volume is not writable by UID 10001'
+  >/dev/null 2>&1 || fail 'Video Service operational volume is not writable by UID 10001'
 
 docker run --rm --network none --user 10001:10001 -v "$secret_dir/control-token:/run/secrets/control-token:ro" \
   -v "$secret_dir/acquisition-token:/run/secrets/acquisition-token:ro" \
@@ -587,13 +719,20 @@ docker run --rm --network none --user node \
 
 check_health() {
   compose_dir=$1
-  for service in dashboard sports-data acquisition video-service; do
+  for service in dashboard sports-data acquisition video-service postgresql; do
     container_id=$(dc "$compose_dir" ps -q "$service")
     [ -n "$container_id" ] || return 1
     state=$(docker inspect --format '{{.State.Status}}' "$container_id") || return 1
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_id") || return 1
     [ "$state" = running ] && [ "$health" = healthy ] || return 1
   done
+}
+
+check_dashboard_endpoint() {
+  dashboard_image=$1
+  docker run --rm --network host --user node --entrypoint node "$dashboard_image" -e \
+    "fetch('http://127.0.0.1:8090/real-jaen/api/v1/session',{redirect:'manual'}).then(async r=>{const b=await r.json();if(!r.ok||b.required!==true)process.exit(1)}).catch(()=>process.exit(1))" \
+    >/dev/null 2>&1
 }
 
 up_services() {
@@ -640,40 +779,27 @@ active_jobs() {
     2>/dev/null
 }
 
-detach_sports_data() {
-  compose_dir=$1
-  sports_id=$(dc "$compose_dir" ps -q sports-data) || return 1
-  [ -n "$sports_id" ] || return 0
-  network_detached=1
-  if docker network disconnect "$control_network" "$sports_id" >/dev/null 2>&1; then
+resume_dashboard() {
+  [ "$admission_closed" -eq 1 ] || return 0
+  if [ "$dashboard_was_present" -eq 0 ]; then
+    admission_closed=0
     return 0
   fi
-  attached=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$sports_id" 2>/dev/null) || return 1
-  case "$attached" in
-    *"$control_network"*) network_detached=0; return 1 ;;
-  esac
-  return 0
-}
-
-resume_previous_sports_data() {
-  [ "$network_detached" -eq 1 ] || return 0
-  [ "$has_previous" -eq 1 ] || return 1
-  sports_id=$(dc "$root/releases/$previous_release" ps -q sports-data) || return 1
-  [ -n "$sports_id" ] || return 1
-  docker network connect "$control_network" "$sports_id" >/dev/null 2>&1 || {
-    attached=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$sports_id" 2>/dev/null) || return 1
-    case "$attached" in *"$control_network"*) ;; *) return 1 ;; esac
-  }
-  network_detached=0
+  dc "$release" start dashboard >/dev/null 2>&1 || return 1
+  check_service_health "$release" dashboard || return 1
+  check_dashboard_endpoint "local/real-jaen-analytics/dashboard:$RJ_IMAGE_TAG" || return 1
+  admission_closed=0
 }
 
 wait_for_idle_jobs() {
   elapsed=0
   idle=0
-  while [ "$elapsed" -lt 1500 ]; do
-    count=$(active_jobs) || return 1
-    case "$count" in ''|*[!0-9]*) return 1 ;; esac
-    if [ "$count" -eq 0 ]; then
+  while [ "$elapsed" -lt 1800 ]; do
+    sports_count=$(check_postgresql migrate-sports-data sports-active 2>/dev/null) || return 1
+    video_count=$(check_postgresql migrate-video-service video-active 2>/dev/null) || return 1
+    acquisition_count=$(active_jobs) || return 1
+    case "$sports_count:$video_count:$acquisition_count" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    if [ "$sports_count" -eq 0 ] && [ "$video_count" -eq 0 ] && [ "$acquisition_count" -eq 0 ]; then
       idle=$((idle + 1))
       [ "$idle" -ge 5 ] && return 0
     else
@@ -685,109 +811,78 @@ wait_for_idle_jobs() {
   return 1
 }
 
+close_admission() {
+  admission_closed=1
+  dashboard_id=$(dc "$release" ps -q dashboard) || return 1
+  if [ -z "$dashboard_id" ]; then
+    dashboard_was_present=0
+    return 0
+  fi
+  dashboard_was_present=1
+  dc "$release" stop dashboard >/dev/null 2>&1
+}
+
+create_maintenance_fence() {
+  create_maintenance || return 1
+  maintenance_active=1
+  wait_for_idle_jobs
+}
+
 rollback_candidate() {
-  [ "$has_previous" -eq 1 ] || return 1
+  [ "$has_previous" -eq 1 ] && [ "$previous_rollback_compatible" -eq 1 ] || return 1
   previous_dir="$root/releases/$previous_release"
   [ -d "$previous_dir" ] || return 1
   env_file="$config_base/$previous_config_target/.env.prod"
+  postgres_env_file="$config_base/$previous_config_target/.env.postgresql.prod"
   secret_dir="$secrets_base/$previous_secret_target"
   export RJ_PROD_SECRET_DIR="$secret_dir" RJ_IMAGE_TAG="$previous_commit"
-  acquisition_image="local/real-jaen-analytics/acquisition:$previous_commit"
-
-  if [ "$containers_mutated" -eq 0 ]; then
-    restore_previous_links || return 1
-    recovery_complete=1
-    return 0
+  export RJ_APP_SECRET_GID="$secret_gid"
+  dc "$previous_dir" stop dashboard >/dev/null 2>&1 || return 1
+  admission_closed=1
+  wait_for_idle_jobs || return 1
+  if [ "$maintenance_active" -eq 0 ]; then
+    create_maintenance || return 1
+    maintenance_active=1
   fi
+  sports_schema=$(check_postgresql migrate-sports-data sports-schema 2>/dev/null) || return 1
+  video_schema=$(check_postgresql migrate-video-service video-schema 2>/dev/null) || return 1
+  [ "$sports_schema" = ok ] && [ "$video_schema" = ok ] || return 1
 
-  if [ "$acquisition_drain" -eq 1 ]; then
-    detach_sports_data "$release" || {
-      preserve_candidate_state=1
-      recovery_complete=1
-      return 1
-    }
-    pre_services=
-    for service in $service_list; do
-      case "$service" in sports-data|dashboard) ;; *) pre_services="${pre_services}${pre_services:+ }$service" ;; esac
-    done
-    if [ -n "$pre_services" ]; then
-      # Intentional word splitting: service names are the fixed list above.
-      up_services "$previous_dir" 1 $pre_services || {
-        set_current_link "$config_base" "$config_target"
-        set_current_link "$secrets_base" "$secret_target"
-        preserve_candidate_state=1
-        recovery_complete=1
-        return 1
-      }
-    fi
-    check_service_health "$previous_dir" acquisition || {
-      set_current_link "$config_base" "$config_target"
-      set_current_link "$secrets_base" "$secret_target"
-      preserve_candidate_state=1
-      recovery_complete=1
-      return 1
-    }
-    clear_maintenance || {
-      set_current_link "$config_base" "$config_target"
-      set_current_link "$secrets_base" "$secret_target"
-      preserve_candidate_state=1
-      recovery_complete=1
-      return 1
-    }
-    post_services=
-    for service in $service_list; do
-      case "$service" in sports-data|dashboard) post_services="${post_services}${post_services:+ }$service" ;; esac
-    done
-    if [ -n "$post_services" ]; then
-      up_services "$previous_dir" 1 $post_services || {
-        set_current_link "$config_base" "$config_target"
-        set_current_link "$secrets_base" "$secret_target"
-        preserve_candidate_state=1
-        recovery_complete=1
-        return 1
-      }
-    fi
-    network_detached=0
-  else
-    up_services "$previous_dir" "$force_recreate" $service_list || {
-      set_current_link "$config_base" "$config_target"
-      set_current_link "$secrets_base" "$secret_target"
-      preserve_candidate_state=1
-      recovery_complete=1
-      return 1
-    }
+  pre_services=
+  post_services=
+  for service in $service_list; do
+    case "$service" in
+      sports-data|dashboard) post_services="${post_services}${post_services:+ }$service" ;;
+      *) pre_services="${pre_services}${pre_services:+ }$service" ;;
+    esac
+  done
+  if [ -n "$pre_services" ]; then
+    up_services "$previous_dir" 1 $pre_services || return 1
   fi
-
-  check_health "$previous_dir" || {
-    set_current_link "$config_base" "$config_target"
-    set_current_link "$secrets_base" "$secret_target"
-    preserve_candidate_state=1
-    recovery_complete=1
-    return 1
-  }
+  check_service_health "$previous_dir" acquisition || return 1
+  check_service_health "$previous_dir" video-service || return 1
+  clear_maintenance || return 1
+  if [ -n "$post_services" ]; then
+    up_services "$previous_dir" 1 $post_services || return 1
+  fi
+  check_health "$previous_dir" || return 1
+  check_dashboard_endpoint "local/real-jaen-analytics/dashboard:$previous_commit" || return 1
   restore_previous_links || return 1
+  admission_closed=0
   docker image tag "local/real-jaen-analytics/sports-data:$previous_commit" local/real-jaen-analytics/sports-data:prod >/dev/null 2>&1 || true
   docker image tag "local/real-jaen-analytics/acquisition:$previous_commit" local/real-jaen-analytics/acquisition:prod >/dev/null 2>&1 || true
   docker image tag "local/real-jaen-analytics/video-service:$previous_commit" local/real-jaen-analytics/video-service:prod >/dev/null 2>&1 || true
   docker image tag "local/real-jaen-analytics/dashboard:$previous_commit" local/real-jaen-analytics/dashboard:prod >/dev/null 2>&1 || true
   maintenance_active=0
-  network_detached=0
   containers_mutated=0
   recovery_complete=1
   return 0
 }
 
-if [ "$recreate_acquisition" -eq 1 ] && [ "$acquisition_was_running" -eq 1 ]; then
-  [ "$has_previous" -eq 1 ] || fail 'Acquisition is running without a last-good recovery target; no service or network was changed'
-  acquisition_drain=1
-  detach_sports_data "$release" || fail 'could not close the Sports Data admission path; active containers were left running'
-  maintenance_active=1
-  create_maintenance || fail 'could not establish the Acquisition deployment maintenance fence'
-  wait_for_idle_jobs || fail 'Acquisition did not become idle; the deployment was cancelled without restarting Acquisition'
-elif [ "$recreate_acquisition" -eq 1 ]; then
-  active_count=$(active_jobs) || fail 'could not inspect active Acquisition jobs'
-  case "$active_count" in ''|*[!0-9]*) fail 'active Acquisition job count was invalid' ;; esac
-  [ "$active_count" -eq 0 ] || fail 'Acquisition is stopped while jobs remain marked active; inspect before deployment'
+if [ "$needs_update" -eq 1 ]; then
+  close_admission || fail 'could not stop Dashboard to close update and video-job admission'
+  wait_for_idle_jobs || fail 'active PostgreSQL or Acquisition jobs did not drain; deployment cancelled without replacing services'
+  create_maintenance_fence || fail 'could not establish and verify the Acquisition deployment maintenance fence'
 fi
 
 # All non-mutating preflights have completed. Promote changed pointers only
@@ -803,8 +898,11 @@ fi
 
 candidate_ok=0
 if [ "$needs_update" -eq 0 ]; then
-  if check_health "$release"; then candidate_ok=1; fi
-elif [ "$acquisition_drain" -eq 1 ]; then
+  if check_health "$release" \
+      && check_dashboard_endpoint "local/real-jaen-analytics/dashboard:$commit_sha"; then
+    candidate_ok=1
+  fi
+else
   pre_services=
   post_services=
   for service in $service_list; do
@@ -816,15 +914,11 @@ elif [ "$acquisition_drain" -eq 1 ]; then
   containers_mutated=1
   if { [ -z "$pre_services" ] || up_services "$release" "$force_recreate" $pre_services; } \
       && check_service_health "$release" acquisition \
+      && check_service_health "$release" video-service \
       && clear_maintenance \
       && { [ -z "$post_services" ] || up_services "$release" "$force_recreate" $post_services; } \
-      && check_health "$release"; then
-    network_detached=0
-    candidate_ok=1
-  fi
-else
-  containers_mutated=1
-  if up_services "$release" "$force_recreate" $service_list && check_health "$release"; then
+      && check_health "$release" \
+      && check_dashboard_endpoint "$dashboard_image"; then
     candidate_ok=1
   fi
 fi
@@ -839,6 +933,9 @@ if [ "$candidate_ok" -eq 1 ] \
     printf 'release_id=%s\n' "$release_id"
     printf 'commit_sha=%s\n' "$commit_sha"
     printf 'image_tag=%s\n' "$commit_sha"
+    printf 'database_family=postgresql\n'
+    printf 'sports_schema_revision=pg0005\n'
+    printf 'video_schema_revision=vg0002\n'
     printf 'config_target=%s\n' "$config_target"
     printf 'secret_target=%s\n' "$secret_target"
   } > "$metadata_tmp"
@@ -847,16 +944,18 @@ if [ "$candidate_ok" -eq 1 ] \
   if mv -f "$metadata_tmp" "$last_good"; then
     deployment_finalized=1
     maintenance_active=0
-    network_detached=0
+    admission_closed=0
     prune_old_releases
     printf 'Deployment %s is healthy; persistent data volumes were preserved.\n' "$commit_sha"
     exit 0
   fi
-  if rollback_candidate; then
-    fail 'last-good metadata could not be committed; the previous code/config and services were restored'
+  if [ "$previous_rollback_compatible" -eq 1 ] && rollback_candidate; then
+    fail 'last-good metadata could not be committed; the previous PostgreSQL-compatible code/config and services were restored'
   fi
+  preserve_candidate_state=1
+  recovery_complete=1
   if [ "$has_previous" -eq 1 ]; then
-    fail 'last-good metadata could not be committed and prior-code recovery failed; candidate paths remain current for inspection'
+    fail 'last-good metadata could not be committed; candidate paths remain current for inspection and no SQLite fallback was started'
   fi
   fail 'last-good metadata could not be committed and no prior release exists; the healthy candidate remains current for inspection'
 fi
@@ -865,10 +964,12 @@ if [ "$containers_mutated" -eq 0 ]; then
   fail 'deployment health check failed; active services and current configuration were not changed'
 fi
 
-if [ "$has_previous" -eq 1 ]; then
+if [ "$has_previous" -eq 1 ] && [ "$previous_rollback_compatible" -eq 1 ]; then
   if rollback_candidate; then
-    fail 'deployment failed; previous code/config was restarted and no volume was deleted or automatically restored. Data compatibility depends on schema changes'
+    fail 'deployment failed; previous PostgreSQL-compatible code/config was restarted. Database schemas and volumes were left unchanged'
   fi
+  preserve_candidate_state=1
+  recovery_complete=1
   fail 'deployment and prior-code recovery both failed; candidate paths remain current for inspection. Database volumes were not removed'
 fi
-fail 'deployment failed and no previous healthy release is recorded; inspect services before retrying. No volume was removed'
+fail 'deployment failed and no PostgreSQL-compatible previous release is recorded; Dashboard remains stopped for inspection. PostgreSQL was not restarted or modified'

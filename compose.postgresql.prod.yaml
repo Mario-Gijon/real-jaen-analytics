@@ -43,9 +43,6 @@ services:
     secrets: !override [sports_data_database_url]
     networks: [sports-data-internal, acquisition-control, postgresql-private]
 
-  acquisition:
-    group_add: ["${RJ_APP_SECRET_GID:?Set the private GID printed by prepare-postgresql-app-secrets.sh}"]
-
   video-service:
     entrypoint: !override [python, -B, -m, video_service]
     command: !override []
@@ -76,9 +73,9 @@ networks:
 
 volumes:
   sports-operational-state:
-    name: ${RJ_PROD_NETWORK_PREFIX:-rja-prod}-sports-operational-state
+    name: ${RJ_PROD_SPORTS_OPERATIONAL_VOLUME:?Set the administrator-prepared Sports Data volume}
   video-operational-state:
-    name: ${RJ_PROD_NETWORK_PREFIX:-rja-prod}-video-operational-state
+    name: ${RJ_PROD_VIDEO_OPERATIONAL_VOLUME:?Set the administrator-prepared Video Service volume}
 
 secrets:
   sports_data_database_url:
