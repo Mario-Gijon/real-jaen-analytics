@@ -267,6 +267,13 @@ def planificar_evidencia(c, filas, p, t):
             continue
         t.ids['observation'][d['id']] = actual['id']
         cambios = distintos(actual, fila)
+        # A source observation retains the internal entity it was associated with when captured. After an
+        # explicit PostgreSQL identity merge, the desired state maps that external ID to the canonical entity,
+        # while the historical observation may still point at the now-merged entity. This is equivalent only
+        # when the persisted decision graph resolves both IDs to the same active root; do not rewrite provenance.
+        if ('player_id' in cambios and actual['player_id'] is not None and fila.get('player_id') is not None
+                and misma_identidad_jugador_postgresql(c, actual['player_id'], fila['player_id'])):
+            cambios.pop('player_id')
         asociar = {k: v for k, v in cambios.items() if k in ('match_id', 'player_id') and actual[k] is None}
         if set(cambios) - set(asociar):
             raise CargaRechazada(f'La observación {actual["id"]} guardada no coincide con su evidencia: {sorted(cambios)}')
@@ -277,6 +284,22 @@ def planificar_evidencia(c, filas, p, t):
                if r['status'] == 'active'}
     p.insertar('file_team_declaration', [f for f in map(t, filas.de('file_team_declaration'))
                                          if (f['source_file_id'], f['external_team_id']) not in activas])
+
+
+def misma_identidad_jugador_postgresql(c, anterior_id, siguiente_id):
+    """Only forgive a player FK difference when an explicit identity decision joins the same PostgreSQL root."""
+    if c.dialect.name != 'postgresql' or anterior_id is None or siguiente_id is None:
+        return False
+    cache_key = 'sincronizacion.player_identity_roots'
+    roots = c.info.get(cache_key)
+    if roots is None:
+        from persistencia.identidades import _players, _root
+
+        players = _players(c)
+        roots = {player_id: _root(player_id, players) for player_id in players}
+        c.info[cache_key] = roots
+    anterior, siguiente = roots.get(int(anterior_id)), roots.get(int(siguiente_id))
+    return anterior is not None and siguiente is not None and anterior == siguiente
 
 
 def conjuntos(c, filas, p, t, tabla, padre, padres=None):
