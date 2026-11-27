@@ -2,7 +2,6 @@
 
 import { AlertTriangle, CheckCircle2, ChevronDown } from "lucide-react";
 import Link from "next/link";
-import { useEffect } from "react";
 import { Button } from "@/ui/Button";
 import { PageHeader } from "@/ui/PageHeader";
 import { LoadingState } from "@/ui/LoadingState";
@@ -30,8 +29,7 @@ function reviewIssueCount(coverage: UpdateCoverage | null | undefined): number {
 
 /** Compact update summary; budgets and detailed coverage stay in the closed disclosure. */
 export function OperatorView() {
-  const { status, statusFresh, job, busy, problem, publishedNow, start, cancel, reload, registerStatusReader } = useUpdates();
-  useEffect(() => registerStatusReader(), [registerStatusReader]);
+  const { status, statusFresh, job, busy, problem, publishedNow, start, cancel, reload } = useUpdates();
 
   if (status === null) {
     return <>

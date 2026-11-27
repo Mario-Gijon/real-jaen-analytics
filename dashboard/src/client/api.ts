@@ -43,6 +43,13 @@ export class ApiRequestError extends Error {
 /** Options of every call; `signal` cancels it (e.g. when a screen unmounts). */
 export type RequestOptions = { signal?: AbortSignal };
 
+/** Notifies mounted access controls that the signed session cookie has changed. */
+export const SESSION_CHANGED_EVENT = "rj:session-changed";
+
+function notifySessionChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(SESSION_CHANGED_EVENT));
+}
+
 /**
  * A session that expired or was revoked while a screen was open: back to the access page, returning here after.
  * The access page itself never redirects to itself.
@@ -310,8 +317,10 @@ export function getSession(options?: RequestOptions) {
 /** Opens a 90-day session with the shared password; the browser keeps only the HttpOnly cookie. */
 export async function signIn(password: string) {
   await send<null>("POST", "/session", { body: { password } });
+  notifySessionChanged();
 }
 
 export async function signOut() {
   await send<null>("DELETE", "/session");
+  notifySessionChanged();
 }

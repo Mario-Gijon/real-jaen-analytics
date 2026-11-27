@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccessView } from "@/features/access/AccessView";
 import { SessionControl } from "@/features/access/SessionControl";
 
+const { router } = vi.hoisted(() => ({ router: { replace: vi.fn() } }));
+vi.mock("next/navigation", () => ({ useRouter: () => router }));
+
 type Handler = (url: string, init?: RequestInit) => { status?: number; body?: unknown };
 function api(handler: Handler) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -16,6 +19,7 @@ function api(handler: Handler) {
 
 const assign = vi.fn();
 beforeEach(() => {
+  router.replace.mockReset();
   assign.mockReset();
   vi.stubGlobal("location", { ...window.location, assign, pathname: "/acceso", search: "" });
 });
@@ -43,7 +47,8 @@ describe("AccessView (/acceso)", () => {
     await user.clear(field);
     await user.type(field, "la-buena-contrasena");
     await user.click(screen.getByRole("button", { name: "Entrar" }));
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("http://localhost:3000/teams"));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/teams"));
+    expect(assign).not.toHaveBeenCalled();
     expect(fetch.mock.calls.every(([url]) => String(url) === "/api/v1/session")).toBe(true);
     expect(JSON.stringify(window.localStorage)).not.toContain("la-buena-contrasena");
     expect(JSON.stringify(window.sessionStorage)).not.toContain("la-buena-contrasena");
@@ -66,11 +71,12 @@ describe("AccessView (/acceso)", () => {
 });
 
 describe("SessionControl (top bar)", () => {
-  it("closes the session and goes to the access screen", async () => {
+  it("closes the session and navigates to access without a full page load", async () => {
     const fetch = api((url, init) => init?.method === "DELETE" ? { status: 204 } : { body: { required: true, signedIn: true, canUpdate: false } });
     render(<SessionControl />);
     await userEvent.setup().click(await screen.findByRole("button", { name: "Cerrar sesión" }));
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("http://localhost:3000/acceso"));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/acceso"));
+    expect(assign).not.toHaveBeenCalled();
     expect(fetch.mock.calls.some(([url, init]) => String(url) === "/api/v1/session" && init?.method === "DELETE")).toBe(true);
   });
 

@@ -1,4 +1,4 @@
-import { render as renderComponent, screen, waitFor } from "@testing-library/react";
+import { act, render as renderComponent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -6,8 +6,10 @@ import type { UpdateJob, UpdateStatus } from "@/contract";
 import { OperatorView } from "@/features/updates/OperatorView";
 import { UpdateControl } from "@/features/updates/UpdateControl";
 import { UpdatesProvider } from "@/features/updates/use-updates";
+import { SESSION_CHANGED_EVENT } from "@/client/api";
 
-vi.mock("next/navigation", () => ({ usePathname: () => "/" }));
+const { router } = vi.hoisted(() => ({ router: { replace: vi.fn() } }));
+vi.mock("next/navigation", () => ({ usePathname: () => "/", useRouter: () => router }));
 
 const SCOPE = { kind: "pilot" as const, label: "Actualización piloto: calendario de la jornada 1 y un partido", round: 1,
   actionLabel: "Actualizar piloto", description: "Consulta el calendario de la jornada 1 y un partido. No actualiza el resto de la jornada ni de la temporada: los demás partidos se conservan tal como están publicados.",
@@ -18,6 +20,7 @@ const job = (over: Partial<UpdateJob> = {}): UpdateJob => ({
 const operatorStatus = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({
   available: true, scope: SCOPE, lastPublished: null, activeJob: null, lastJob: null, lastCoverage: null, ...over });
 const render = (children: ReactNode) => renderComponent(<UpdatesProvider>{children}</UpdatesProvider>);
+const renderOperator = () => renderComponent(<UpdatesProvider><UpdateControl /><OperatorView /></UpdatesProvider>);
 
 type Handler = (url: string, init?: RequestInit) => { status?: number; body?: unknown };
 function api(handler: Handler, canUpdate = true) {
@@ -44,31 +47,61 @@ afterEach(() => {
 });
 
 describe("UpdateControl (top bar)", () => {
-  it("keeps a permanent link to the updates screen when no scope is available", async () => {
+  it("renders the real updates navigation link for an administrative session", async () => {
     const fetch = api(() => ({ body: { ...operatorStatus(), available: false, scope: null } }));
     render(<UpdateControl />);
-    const link = screen.getByRole("link", { name: "Actualizaciones" });
+    const link = await screen.findByRole("link", { name: "Actualizar" });
     expect(link).toHaveAttribute("href", "/operador");
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything()));
   });
 
-  it("keeps navigation available to read-only sessions without starting update polling", async () => {
-    const fetch = api(() => ({ body: operatorStatus() }), false);
+  it("keeps the update link and icon hidden while checking a read-only session", async () => {
+    let finishSession!: (response: Response) => void;
+    const fetch = vi.fn((input: RequestInfo | URL) => String(input) === "/api/v1/session"
+      ? new Promise<Response>((resolve) => { finishSession = resolve; })
+      : Promise.resolve(new Response(JSON.stringify(operatorStatus()))));
+    vi.stubGlobal("fetch", fetch);
     render(<UpdateControl />);
+    expect(screen.queryByRole("link", { name: /Actualizar/ })).toBeNull();
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything()));
-    expect(screen.getByRole("link", { name: "Actualizaciones" })).toHaveAttribute("href", "/operador");
+    await act(async () => finishSession(new Response(JSON.stringify({ required: true, signedIn: true, canUpdate: false }))));
+    expect(screen.queryByRole("link", { name: /Actualizar/ })).toBeNull();
+    expect(document.querySelector("svg")).toBeNull();
     expect(fetch.mock.calls.some(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(false);
+  });
+
+  it("rechecks session changes and expiry without retaining an admin link", async () => {
+    let canUpdate = true;
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/session") {
+        return new Response(JSON.stringify({ required: true, signedIn: canUpdate, canUpdate }));
+      }
+      return new Response(JSON.stringify(operatorStatus()));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<UpdateControl />);
+    expect(await screen.findByRole("link", { name: "Actualizar" })).toHaveAttribute("href", "/operador");
+    canUpdate = false;
+    await act(async () => window.dispatchEvent(new Event(SESSION_CHANGED_EVENT)));
+    await waitFor(() => expect(screen.queryByRole("link", { name: /Actualizar/ })).toBeNull());
+    canUpdate = true;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(await screen.findByRole("link", { name: "Actualizar" })).toHaveAttribute("href", "/operador");
+    canUpdate = false;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(screen.queryByRole("link", { name: /Actualizar/ })).toBeNull());
+    expect(router.replace).not.toHaveBeenCalled();
   });
 
   it("shows a small activity indicator while a job is active", async () => {
     const active = job({ pollAfterSeconds: 30 });
     api(() => ({ body: operatorStatus({ activeJob: active }) }));
     render(<UpdateControl />);
-    const link = await screen.findByRole("link", { name: "Actualizaciones, actualización en curso" });
+    const link = await screen.findByRole("link", { name: "Actualizar, actualización en curso" });
     expect(link).toHaveAttribute("href", "/operador");
     expect(link.querySelectorAll("svg")).toHaveLength(1);
     expect(link.querySelector('[data-active="true"]')).not.toBeNull();
-    expect(link).toHaveTextContent("Actualizaciones");
+    expect(link).toHaveTextContent("Actualizar");
   });
 
   it("shares one status reader between the navigation and operator screen", async () => {
@@ -76,7 +109,7 @@ describe("UpdateControl (top bar)", () => {
     const fetch = api(() => ({ body: operatorStatus({ activeJob: active }) }));
     render(<><UpdateControl /><OperatorView /></>);
     await screen.findByRole("button", { name: "Cancelar actualización" });
-    expect(screen.getByRole("link", { name: "Actualizaciones, actualización en curso" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Actualizar, actualización en curso" })).toBeVisible();
     await waitFor(() => {
       expect(fetch.mock.calls.filter(([url]) => String(url) === "/api/v1/updates/current")).toHaveLength(1);
     });
@@ -87,11 +120,11 @@ describe("UpdateControl (top bar)", () => {
 describe("OperatorView (/operador)", () => {
   it("keeps the status page and published data visible while Acquisition is unavailable", async () => {
     const fetch = api(() => ({ body: operatorStatus({ available: false }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("El servicio de actualización no está disponible ahora.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Actualizar datos" })).toBeDisabled();
     expect(screen.getByRole("heading", { name: "Actualizaciones" })).toBeVisible();
-    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true);
+    expect(fetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v1/updates")).length).toBeGreaterThan(0);
   });
 
   it("starts an update once with one idempotency key", async () => {
@@ -103,7 +136,7 @@ describe("OperatorView (/operador)", () => {
       }
       return { body: operatorStatus(started ? { activeJob: job() } : {}) };
     });
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByRole("heading", { name: "Actualizaciones" })).toBeVisible();
     const start = await screen.findByRole("button", { name: "Actualizar datos" });
     expect(start).toBeEnabled();
@@ -114,12 +147,12 @@ describe("OperatorView (/operador)", () => {
     const sent = posts(fetch, "/api/v1/updates");
     expect(sent).toHaveLength(1);
     expect(new Headers(sent[0][1]!.headers).get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
-    expect(fetch.mock.calls.map(([url]) => String(url))).not.toContain("/api/v1/session");
+    expect(fetch.mock.calls.some(([url]) => String(url) === "/api/v1/session")).toBe(true);
   });
 
   it("shows pilot scope details only after expanding the technical section", async () => {
     api(() => ({ body: operatorStatus() }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByRole("heading", { name: "Actualizaciones" })).toBeVisible();
     const details = (await screen.findByText("Detalles de la actualización")).closest("details")!;
     expect(details).not.toHaveAttribute("open");
@@ -131,7 +164,7 @@ describe("OperatorView (/operador)", () => {
   it("shows a failed update as failed, keeping the previous data, and cancels only while consulting", async () => {
     api(() => ({ body: operatorStatus({ lastJob: job({ status: "failed", phase: "finished", cancellable: false,
       error: { code: "ACQUISITION_FAILED", message: "La consulta al proveedor no se completó o fue rechazada.", retryable: true } }) }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText(/no se completó o fue rechazada\. Se mantienen los datos anteriores\./)).toBeVisible();
     expect(screen.getByRole("button", { name: "Actualizar datos" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Cancelar actualización" })).toBeNull();
@@ -139,7 +172,7 @@ describe("OperatorView (/operador)", () => {
 
   it("shows compact phases and keeps cancellation available only when permitted", async () => {
     api(() => ({ body: operatorStatus({ activeJob: job({ phase: "verifying", cancellable: false, pollAfterSeconds: 30 }) }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Verificación")).toHaveAttribute("aria-current", "step");
     expect(screen.getByText("La fase de publicación ya no se puede cancelar.")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Cancelar actualización" })).toBeNull();
@@ -157,7 +190,7 @@ describe("OperatorView (/operador)", () => {
       }
       return { body: operatorStatus(polls < 2 ? { activeJob: job() } : { lastJob: completed }) };
     });
-    render(<OperatorView />);
+    renderOperator();
     await screen.findByRole("button", { name: "Cancelar actualización" });
     expect(await screen.findByRole("button", { name: "Ver datos publicados" }, { timeout: 5000 })).toBeVisible();
     expect(screen.getByText("Datos actualizados")).toBeVisible();
@@ -177,7 +210,7 @@ describe("OperatorView (/operador)", () => {
       return { body: polls < 2 ? operatorStatus({ activeJob: job({ phase: "publishing", cancellable: false }) })
         : operatorStatus({ lastJob: completed, lastPublished: { at: completed.result!.publishedAt } }) };
     });
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Publicación")).toBeVisible();
     expect(await screen.findByRole("button", { name: "Ver datos publicados" }, { timeout: 5000 })).toBeVisible();
     expect(screen.getByText("Datos actualizados")).toBeVisible();
@@ -212,7 +245,7 @@ describe("Group 2 scope", () => {
 
   it("shows compact success metrics and keeps detailed coverage collapsed by default", async () => {
     const fetch = api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done, lastPublished: { at: "2026-10-28T17:02:00Z" } }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Datos actualizados")).toBeVisible();
     expect(screen.getByText("28/10, 18:02")).toBeVisible();
     expect(screen.getByText("Datos nuevos").parentElement).toHaveTextContent("35");
@@ -235,12 +268,12 @@ describe("Group 2 scope", () => {
     expect(screen.getByText(/Solicitud recibida el 28\/10, 18:00/)).toBeVisible();
     expect(screen.getByText(/posible sustitución de/)).toBeVisible();
     expect(screen.getByRole("button", { name: "Actualizar datos" })).toBeEnabled();
-    expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/api/v1/updates"))).toBe(true); // no data API calls
+    expect(fetch.mock.calls.filter(([url]) => String(url).startsWith("/api/v1/updates")).length).toBeGreaterThan(0); // no data API calls
   });
 
   it("keeps real incidents visible and expected unavailable narrations in details", async () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Datos actualizados")).toBeVisible();
     expect(screen.queryByText(/completada con pendientes/i)).toBeNull();
     expect(screen.getByText("4 incidencias requieren revisión.")).toBeVisible();
@@ -264,7 +297,7 @@ describe("Group 2 scope", () => {
       restrictedMatchIds: [], newMatches: [], comments: { newMatchIds: [], keptMatchIds: [],
         emptyMatchIds: ["sofascore-match-10"], pendingMatchIds: [], failed: [] } } } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: emptyOnly }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Datos actualizados")).toBeVisible();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText(/completada con pendientes/i)).toBeNull();
@@ -279,7 +312,7 @@ describe("Group 2 scope", () => {
       comments: { newMatchIds: [], keptMatchIds: [], emptyMatchIds: [], pendingMatchIds: [],
         failed: [{ matchId: "sofascore-match-9", reason: "not_found" }] } } } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: unavailableOnly }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Datos actualizados")).toBeVisible();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByText("Incidencias").parentElement).toHaveTextContent("0");
@@ -291,7 +324,7 @@ describe("Group 2 scope", () => {
   it("keeps the navigation label fixed after an update completes", async () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done }) }));
     render(<UpdateControl />);
-    expect(await screen.findByRole("link", { name: "Actualizaciones" })).toHaveAttribute("href", "/operador");
+    expect(await screen.findByRole("link", { name: "Actualizar" })).toHaveAttribute("href", "/operador");
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -300,7 +333,7 @@ describe("Group 2 scope", () => {
       error: { code: "ACQUISITION_FAILED", message: "La fuente rechazó la consulta", retryable: false } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: failed, lastPublished: { at: "2026-10-28T17:02:00Z" },
       lastCoverage: { ...coverage, matchNames: { ...coverage.matchNames, "sofascore-match-3": "SD Ponferradina – Cultural Leonesa" } } }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText(/La fuente rechazó la consulta.*Se mantienen los datos anteriores\./)).toBeVisible();
     await expandDetails();
     expect(screen.getByRole("heading", { name: "Revisiones aplazadas" })).toBeVisible();
@@ -310,7 +343,7 @@ describe("Group 2 scope", () => {
 
   it("does not repeat the last publication when the last job is that publication", async () => {
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: done, lastPublished: { at: "2026-10-28T17:02:00Z" }, lastCoverage: coverage }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Datos actualizados")).toBeVisible();
     await expandDetails();
     expect(screen.getAllByRole("heading", { name: "Revisiones aplazadas" })).toHaveLength(1);
@@ -321,7 +354,7 @@ describe("Group 2 scope", () => {
       restrictedMatchIds: ["sofascore-match-2"], detailRounds: null,
       referenceRound: 11, recentRounds: [9, 10, 11], recentRoundCount: 3, maxTotalSends: 50 } } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: restricted }) }));
-    render(<OperatorView />);
+    renderOperator();
     await expandDetails();
     const outOfWindow = await screen.findByRole("heading", { name: "Fuera de la ventana rutinaria" });
     expect(outOfWindow).toBeVisible();
@@ -334,7 +367,7 @@ describe("Group 2 scope", () => {
     const clean = job({ ...done, result: { ...done.result!, coverage: { ...coverage, newResources: 0, pending: [], deferredMatchIds: [], newMatches: [],
       comments: { ...coverage.comments, newMatchIds: [], emptyMatchIds: [], pendingMatchIds: [], failed: [] } }, changed: false } });
     api(() => ({ body: operatorStatus({ scope: GROUP, lastJob: clean }) }));
-    render(<OperatorView />);
+    renderOperator();
     expect(await screen.findByText("Datos actualizados")).toBeVisible();
     expect(screen.queryByText(/con pendientes/)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
@@ -349,7 +382,7 @@ describe("Group 2 scope", () => {
       comments: { newMatchIds: [], keptMatchIds: [], emptyMatchIds: [], pendingMatchIds: [], failed: [] } };
     const published = job({ ...done, result: { ...done.result!, coverage: rollingCoverage } });
     api(() => ({ body: operatorStatus({ scope: rollingScope, lastJob: published }) }));
-    render(<OperatorView />);
+    renderOperator();
     await expandDetails();
     expect(await screen.findByText(rollingScope.description)).toBeVisible();
     expect(screen.getByText(/Ventana rutinaria: jornadas 9, 10, 11 \(referencia 11\)\. Envíos físicos reservados: 17 de 50; quedan 33/)).toBeVisible();

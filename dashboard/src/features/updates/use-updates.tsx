@@ -35,7 +35,6 @@ export const isActive = (job: UpdateJob | null) => job !== null && (job.status =
 type UpdatesValue = {
   authorized: boolean;
   setAuthorized: (value: boolean) => void;
-  registerStatusReader: () => () => void;
   status: UpdateStatus | null;
   statusFresh: boolean;
   job: UpdateJob | null;
@@ -62,11 +61,8 @@ export function UpdatesProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [publishedNow, setPublishedNow] = useState(false);
-  const [statusReaders, setStatusReaders] = useState(0);
 
-  const authorizedRef = useRef(false);
   const statusReadEnabledRef = useRef(false);
-  const statusReaderCount = useRef(0);
   const mountedRef = useRef(false);
   const actionInFlight = useRef(false);
   const statusInFlight = useRef(false);
@@ -76,23 +72,15 @@ export function UpdatesProvider({ children }: { children: ReactNode }) {
   const jobRequestVersion = useRef(0);
   const statusFreshRef = useRef(false);
   const refreshStatusRef = useRef<() => Promise<void>>(async () => {});
-  const statusReadEnabled = authorized || statusReaders > 0;
+  const statusReadEnabled = authorized;
 
   const setAuthorizedState = useCallback((value: boolean) => {
-    authorizedRef.current = value;
+    if (!value) {
+      statusReadEnabledRef.current = false;
+      statusController.current?.abort();
+      statusRefreshPending.current = false;
+    }
     setAuthorized(value);
-  }, []);
-
-  const registerStatusReader = useCallback(() => {
-    statusReaderCount.current += 1;
-    setStatusReaders(statusReaderCount.current);
-    let registered = true;
-    return () => {
-      if (!registered) return;
-      registered = false;
-      statusReaderCount.current = Math.max(0, statusReaderCount.current - 1);
-      setStatusReaders(statusReaderCount.current);
-    };
   }, []);
 
   const refreshStatus = useCallback(async () => {
@@ -143,7 +131,6 @@ export function UpdatesProvider({ children }: { children: ReactNode }) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      authorizedRef.current = false;
       statusController.current?.abort();
     };
   }, []);
@@ -262,7 +249,6 @@ export function UpdatesProvider({ children }: { children: ReactNode }) {
   const value: UpdatesValue = {
     authorized,
     setAuthorized: setAuthorizedState,
-    registerStatusReader,
     status,
     statusFresh,
     job,

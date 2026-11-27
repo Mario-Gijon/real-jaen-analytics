@@ -2,22 +2,44 @@
 
 import { LogOut } from "lucide-react";
 import { useEffect, useState } from "react";
-import { getSession, signOut } from "@/client/api";
-import { appPath } from "@/contract/base-path";
+import { useRouter } from "next/navigation";
+import { getSession, SESSION_CHANGED_EVENT, signOut } from "@/client/api";
 import css from "./Access.module.css";
 
 /** «Cerrar sesión» in the top bar, only where the installation asks for the password and this browser has a session. */
 export function SessionControl() {
+  const router = useRouter();
   const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    const controller = new AbortController();
-    getSession({ signal: controller.signal })
-      .then((session) => setShown(session.required && session.signedIn))
-      .catch(() => {
-        // Without an answer there is nothing to close here.
-      });
-    return () => controller.abort();
+    let controller: AbortController | null = null;
+    let disposed = false;
+    const refreshSession = async () => {
+      controller?.abort();
+      const request = new AbortController();
+      controller = request;
+      setShown(false);
+      try {
+        const session = await getSession({ signal: request.signal });
+        if (!disposed && !request.signal.aborted) setShown(session.required && session.signedIn);
+      } catch {
+        // No logout control is shown until the current session is confirmed.
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshSession();
+    };
+    window.addEventListener(SESSION_CHANGED_EVENT, refreshSession);
+    window.addEventListener("focus", refreshSession);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    void refreshSession();
+    return () => {
+      disposed = true;
+      controller?.abort();
+      window.removeEventListener(SESSION_CHANGED_EVENT, refreshSession);
+      window.removeEventListener("focus", refreshSession);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
   if (!shown) return null;
   const close = async () => {
@@ -25,7 +47,8 @@ export function SessionControl() {
     try {
       await signOut();
     } finally {
-      window.location.assign(new URL(appPath("/acceso"), window.location.origin).href);  // a full load: nothing left on screen
+      setShown(false);
+      router.replace("/acceso");
     }
   };
   return (

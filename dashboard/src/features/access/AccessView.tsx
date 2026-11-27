@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
 import { ApiRequestError, getSession, signIn } from "@/client/api";
-import { appPath } from "@/contract/base-path";
 import { Button } from "@/ui/Button";
 import css from "./Access.module.css";
 
@@ -16,6 +16,7 @@ const MESSAGES: Record<number, string> = {
  * once and never stored here; after signing in the page returns to where the analyst was going (`next`).
  */
 export function AccessView({ next }: { next: string }) {
+  const router = useRouter();
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -45,7 +46,7 @@ export function AccessView({ next }: { next: string }) {
     try {
       await signIn(password);
       setPassword("");
-      window.location.assign(new URL(appPath(next), window.location.origin).href);  // a full load: no state from before
+      router.replace(next);
     } catch (error) {
       setProblem(error instanceof ApiRequestError ? MESSAGES[error.status] ?? "No se pudo iniciar sesión." : "No se pudo iniciar sesión.");
       setBusy(false);
