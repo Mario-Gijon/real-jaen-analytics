@@ -24,6 +24,65 @@ class _CapturedStdout:
 
 
 class PostgreSQLBackupTests(unittest.TestCase):
+    def test_ordinary_backup_rejects_runtime_image_mismatch(self):
+        container = {"image_id": "sha256:" + "a" * 64}
+        with patch.object(workflow, "_text", return_value="sha256:" + "b" * 64):
+            with self.assertRaises(workflow.OperationError):
+                workflow._check_runtime_image_identity("sports-data", "sports-data:runtime", container, set())
+
+    def test_recovery_image_mismatch_requires_missing_original_object(self):
+        container = {"image_id": "sha256:" + "a" * 64}
+        allowed = {"sports-data", "video-service"}
+        with patch.object(workflow, "_text", return_value="sha256:" + "b" * 64), \
+                patch.object(workflow, "_image_object_available", return_value=False):
+            workflow._check_runtime_image_identity("sports-data", "sports-data:runtime", container, allowed)
+        with patch.object(workflow, "_text", return_value="sha256:" + "b" * 64), \
+                patch.object(workflow, "_image_object_available", return_value=True):
+            with self.assertRaises(workflow.OperationError):
+                workflow._check_runtime_image_identity("sports-data", "sports-data:runtime", container, allowed)
+
+    def test_recovery_rejects_an_unlisted_service_or_unrelated_admin_image(self):
+        container = {"image_id": "sha256:" + "a" * 64}
+        with patch.object(workflow, "_text", return_value="sha256:" + "b" * 64):
+            with self.assertRaises(workflow.OperationError):
+                workflow._check_runtime_image_identity("dashboard", "dashboard:runtime", container,
+                                                       {"sports-data", "video-service"})
+        valid = "sha256:" + "c" * 64 + "|rja-project|migrate-sports-data"
+        self.assertEqual(workflow._parse_admin_image_identity(valid, "rja-project", "migrate-sports-data")[0],
+                         "sha256:" + "c" * 64)
+        with self.assertRaises(workflow.OperationError):
+            workflow._parse_admin_image_identity(
+                "sha256:" + "c" * 64 + "|rja-project|sports-data", "rja-project", "migrate-sports-data")
+
+    def test_recovery_manifest_requires_verified_admin_provenance(self):
+        runtime = {service: {"container_id": "a" * 64, "configured_reference": f"local/{service}:runtime",
+                             "image_id": "sha256:" + "b" * 64, "image_object_available": True}
+                   for service in workflow.SERVICES}
+        for service, algorithm in (("sports-data", "sports-data-reference-v1"),
+                                   ("video-service", "video-service-src-tree-v1")):
+            runtime[service].update(image_object_available=False, code_fingerprint_algorithm=algorithm,
+                                    code_sha256="c" * 64)
+        administrative = {}
+        for kind, service in (("sports", "migrate-sports-data"), ("video", "migrate-video-service")):
+            administrative[kind] = {
+                "reference": f"local/{kind}:admin", "image_id": "sha256:" + "d" * 64,
+                "compose_project": "rja-project", "compose_service": service,
+                "code_fingerprint_algorithm": ("sports-data-reference-v1" if kind == "sports"
+                                                else "video-service-src-tree-v1"),
+                "code_sha256": "e" * 64,
+            }
+        manifest = {
+            "backup_tool": {"version": workflow.BACKUP_TOOL_VERSION, "commit": "f" * 40,
+                            "working_tree_dirty": True, "script_sha256": "1" * 64,
+                            "helper_sha256": "2" * 64},
+            "source": {"project": "rja-project", "runtime_images": runtime,
+                       "administrative_images": administrative},
+        }
+        workflow._verify_backup_provenance(manifest)
+        manifest["source"]["administrative_images"]["sports"]["compose_project"] = "another-project"
+        with self.assertRaises(workflow.OperationError):
+            workflow._verify_backup_provenance(manifest)
+
     def test_run_streams_open_file_as_stdin(self):
         payload = b"custom archive stream"
         with tempfile.TemporaryFile() as stream:

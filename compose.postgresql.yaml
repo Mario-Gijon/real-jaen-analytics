@@ -52,7 +52,7 @@ services:
     build:
       context: ./sports-data
       dockerfile: Dockerfile
-    image: local/real-jaen-analytics/sports-data:${PG_TASK_IMAGE_TAG:-self-hosted-pg}
+    image: local/real-jaen-analytics/sports-data:${PG_ADMIN_SPORTS_IMAGE_TAG:-self-hosted-sports-admin}
     restart: "no"
     user: "0:0"
     entrypoint: [python, -B]
@@ -73,7 +73,7 @@ services:
     build:
       context: ./video-service
       dockerfile: Dockerfile
-    image: local/real-jaen-analytics/video-service:${PG_TASK_IMAGE_TAG:-self-hosted-pg}
+    image: local/real-jaen-analytics/video-service:${PG_ADMIN_VIDEO_IMAGE_TAG:-self-hosted-video-admin}
     restart: "no"
     user: "0:0"
     entrypoint: [python, -B]

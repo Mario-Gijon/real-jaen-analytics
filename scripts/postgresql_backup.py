@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import hashlib
 import json
@@ -33,6 +34,7 @@ REQUIRED_VOLUMES = {
     "acquisition-profiles": ("acquisition", "/profiles"),
 }
 FORMAT_VERSION = 3
+BACKUP_TOOL_VERSION = "1.1.0"
 MANIFEST_NAME = "manifest.json"
 PAYLOADS = ("sports_data.dump", "video_service.dump", "acquisition-history.tar")
 ACTIVE_STATES = {"queued", "running", "cancelling"}
@@ -177,6 +179,14 @@ def _service_image(service: dict) -> str:
     return image
 
 
+def _image_object_available(image_id: str) -> bool:
+    try:
+        _text(["docker", "image", "inspect", "--format", "{{.Id}}", image_id])
+    except OperationError:
+        return False
+    return True
+
+
 def _service_volume_map(service: dict) -> dict[str, str]:
     result = {}
     for mount in service.get("volumes", []):
@@ -200,21 +210,21 @@ def _service_network_names(service: dict, names: dict) -> set[str]:
 
 def _inspect_container(container_id: str) -> dict:
     raw = _text(["docker", "inspect", "--format",
-                 '{{.Id}}|{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|'
+                 '{{.Id}}|{{.Config.Image}}|{{.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|'
                  '{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|'
                  '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{json .Mounts}}|'
                  '{{json .HostConfig.PortBindings}}|{{json .NetworkSettings.Networks}}', container_id])
-    parts = raw.split("|", 8)
-    if len(parts) != 9:
+    parts = raw.split("|", 9)
+    if len(parts) != 10:
         fail("No se pudo comprobar un contenedor de la instalación")
     try:
-        mounts = json.loads(parts[6])
-        ports = json.loads(parts[7])
-        networks = json.loads(parts[8])
+        mounts = json.loads(parts[7])
+        ports = json.loads(parts[8])
+        networks = json.loads(parts[9])
     except json.JSONDecodeError:
         fail("No se pudo comprobar los montajes de un contenedor")
-    return {"id": parts[0], "image": parts[1], "project": parts[2], "service": parts[3],
-            "state": parts[4], "health": parts[5], "mounts": mounts, "ports": ports,
+    return {"id": parts[0], "image": parts[1], "image_id": parts[2], "project": parts[3],
+            "service": parts[4], "state": parts[5], "health": parts[6], "mounts": mounts, "ports": ports,
             "networks": networks}
 
 
@@ -247,9 +257,34 @@ def _network_check(network: str, project: str, *, must_be_internal: bool = False
         fail("La red de PostgreSQL no es interna")
 
 
+def _check_runtime_image_identity(service: str, expected_image: str, container: dict,
+                                 allow_missing_image_object_for: set[str]) -> None:
+    configured_id = _text(["docker", "image", "inspect", "--format", "{{.Id}}", expected_image])
+    if configured_id == container["image_id"]:
+        return
+    if service not in allow_missing_image_object_for:
+        fail(f"La imagen de {service} fue sustituida desde su arranque")
+    if _image_object_available(container["image_id"]):
+        fail(f"La imagen de {service} aún existe; la excepción solo admite el objeto ausente")
+
+
+def _parse_admin_image_identity(raw: str, project: str, compose_service: str) -> tuple[str, str, str]:
+    parts = raw.split("|", 2)
+    if (len(parts) != 3 or not re.fullmatch(r"sha256:[0-9a-f]{64}", parts[0])
+            or parts[1] != project or parts[2] != compose_service):
+        fail("La imagen administrativa no pertenece al servicio esperado")
+    return parts[0], parts[1], parts[2]
+
+
 def _validate_compose_installation(config: dict, names: dict, containers: dict[str, list[dict]], *,
                                    require_running: bool, require_all: bool,
-                                   require_networks: bool = True) -> dict:
+                                   require_networks: bool = True,
+                                   allow_missing_image_object_for: set[str] | None = None) -> dict:
+    allow_missing_image_object_for = allow_missing_image_object_for or set()
+    for runtime, administrative in (("sports-data", "migrate-sports-data"),
+                                    ("video-service", "migrate-video-service")):
+        if _service_image(config["services"][runtime]) == _service_image(config["services"][administrative]):
+            fail(f"La imagen administrativa de {runtime} comparte etiqueta con la imagen de ejecución")
     for key in REQUIRED_VOLUMES:
         _volume_check(names["volumes"][key], names["project"])
     for key, network in names["networks"].items():
@@ -269,10 +304,7 @@ def _validate_compose_installation(config: dict, names: dict, containers: dict[s
             fail(f"El contenedor de {service} no pertenece al proyecto Compose resuelto")
         if container["image"] != expected_image:
             fail(f"El contenedor de {service} usa otra etiqueta de imagen")
-        image_id = _text(["docker", "image", "inspect", "--format", "{{.Id}}", expected_image])
-        running_id = _text(["docker", "inspect", "--format", "{{.Image}}", container["id"]])
-        if image_id != running_id:
-            fail(f"La imagen de {service} fue sustituida desde su arranque")
+        _check_runtime_image_identity(service, expected_image, container, allow_missing_image_object_for)
         if require_running and (container["state"] != "running" or container["health"] != "healthy"):
             fail(f"El servicio {service} no está saludable")
         if not require_running and service in APP_SERVICES and container["state"] == "running":
@@ -470,6 +502,102 @@ def _acquisition_check(acquisition_image: str, volume: str) -> dict:
         return json.loads(_text(command, timeout=120))
     except json.JSONDecodeError:
         fail("La SQLite operativa de Acquisition no se pudo verificar")
+
+
+def _tree_fingerprint(root: Path) -> str:
+    if root.is_symlink() or not root.is_dir():
+        fail("No se pudo calcular la huella del código")
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file()
+                   and "__pycache__" not in path.parts and path.suffix != ".pyc")
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        _, file_hash = _digest_file(path)
+        digest.update(f"{file_hash}  {relative}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _sports_code_fingerprint(root: Path) -> str:
+    carga = root / "sports-data/persistencia/carga.py"
+    try:
+        parsed = ast.parse(carga.read_text(encoding="utf-8"))
+        constants = {}
+        for node in parsed.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in {
+                            "ARCHIVOS_ENRIQUECIMIENTO", "ARCHIVOS_IDENTIDAD"}:
+                        constants[target.id] = ast.literal_eval(node.value)
+        if set(constants) != {"ARCHIVOS_ENRIQUECIMIENTO", "ARCHIVOS_IDENTIDAD"}:
+            fail("No se pudo reproducir la huella de código de Sports Data")
+        base = root / "sports-data"
+        paths = {"api.py", "queries.py", "importar.py", "alembic.ini", "requirements-sql.txt"}
+        paths.update(constants["ARCHIVOS_ENRIQUECIMIENTO"])
+        paths.update(constants["ARCHIVOS_IDENTIDAD"])
+        paths.update(path.relative_to(base).as_posix()
+                     for path in (base / "persistencia").rglob("*")
+                     if path.is_file() and "__pycache__" not in path.parts
+                     and path.suffix in {".py", ".mako"})
+        digest = hashlib.sha256()
+        for relative in sorted(paths):
+            _, file_hash = _digest_file(base / relative)
+            digest.update(f"{file_hash}  {relative}\n".encode("utf-8"))
+        return digest.hexdigest()
+    except (OSError, SyntaxError, ValueError):
+        fail("No se pudo reproducir la huella de código de Sports Data")
+
+
+def _code_fingerprint_command(kind: str) -> str:
+    if kind == "sports":
+        return ("import sys;sys.path.insert(0,'/app');from persistencia.carga import referencia_del_codigo;"
+                "print(referencia_del_codigo()['sha256_agregada'])")
+    return ("import hashlib,pathlib;root=pathlib.Path('/app/src');"
+            "files=sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts "
+            "and p.suffix!='.pyc');d=hashlib.sha256();"
+            "[d.update((hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.relative_to(root).as_posix()+'\\n').encode()) "
+            "for p in files];print(d.hexdigest())")
+
+
+def _container_code_fingerprint(container: dict, kind: str) -> str:
+    command = ["docker", "exec", container["id"], "python", "-B", "-c", _code_fingerprint_command(kind)]
+    value = _text(command, timeout=120)
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        fail(f"No se pudo identificar la huella del código activo de {container['service']}")
+    return value
+
+
+def _image_code_fingerprint(image_id: str, kind: str) -> str:
+    command = ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python", image_id,
+               "-B", "-c", _code_fingerprint_command(kind)]
+    value = _text(command, timeout=180)
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        fail("La imagen administrativa no expone una huella de código válida")
+    return value
+
+
+def _verified_admin_helpers(config: dict, names: dict, runtime_refs: dict[str, str]) -> dict:
+    mapping = {"sports": ("migrate-sports-data", "sports-data", "migrate-sports-data"),
+               "video": ("migrate-video-service", "video-service", "migrate-video-service")}
+    expected_fingerprints = {"sports": _sports_code_fingerprint(ROOT),
+                             "video": _tree_fingerprint(ROOT / "video-service/src")}
+    result = {}
+    for kind, (service_name, runtime_service, expected_compose_service) in mapping.items():
+        image_ref = _service_image(config["services"][service_name])
+        raw = _text(["docker", "image", "inspect", "--format",
+                     '{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|'
+                     '{{index .Config.Labels "com.docker.compose.service"}}', image_ref])
+        image_id, project, compose_service = _parse_admin_image_identity(
+            raw, names["project"], expected_compose_service)
+        if image_ref == runtime_refs[runtime_service]:
+            fail(f"La imagen administrativa de {runtime_service} comparte etiqueta con su imagen de ejecución")
+        fingerprint = _image_code_fingerprint(image_id, kind)
+        if fingerprint != expected_fingerprints[kind]:
+            fail(f"La imagen administrativa de {runtime_service} no contiene el código de este checkout")
+        result[kind] = {"reference": image_ref, "image_id": image_id,
+                        "compose_project": project, "compose_service": compose_service,
+                        "code_fingerprint_algorithm": "sports-data-reference-v1" if kind == "sports"
+                        else "video-service-src-tree-v1", "code_sha256": fingerprint}
+    return result
 
 
 def _source_fixture_marker(sports_image: str, volume: str) -> bool:
@@ -725,7 +853,60 @@ def _verify_files(backup: Path, *, inspect_dump=None) -> dict:
                 "file_inventory"):
         if archive_summary.get(key) != expected_acq.get(key):
             fail("El historial de Acquisition no coincide con el manifiesto")
+    _verify_backup_provenance(manifest)
     return manifest
+
+
+def _verify_backup_provenance(manifest: dict) -> None:
+    tool = manifest.get("backup_tool")
+    source = manifest.get("source", {})
+    runtime = source.get("runtime_images")
+    administrative = source.get("administrative_images")
+    if tool is None and runtime is None and administrative is None:
+        return  # Compatible with earlier v3 manifests that predate explicit image provenance.
+    if not isinstance(tool, dict) or not isinstance(runtime, dict) or not isinstance(administrative, dict):
+        fail("La procedencia de imágenes del backup está incompleta")
+    if (tool.get("version") != BACKUP_TOOL_VERSION
+            or not isinstance(tool.get("commit"), str) or not re.fullmatch(r"[0-9a-f]{40,64}", tool["commit"])
+            or type(tool.get("working_tree_dirty")) is not bool
+            or any(not re.fullmatch(r"[0-9a-f]{64}", tool.get(key, ""))
+                   for key in ("script_sha256", "helper_sha256"))):
+        fail("La procedencia de la herramienta de backup no es válida")
+    if set(runtime) != set(SERVICES):
+        fail("El manifiesto no identifica todas las imágenes de ejecución")
+    for service, item in runtime.items():
+        if (not isinstance(item, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", item.get("container_id", ""))
+                or not isinstance(item.get("configured_reference"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item.get("image_id", ""))
+                or type(item.get("image_object_available")) is not bool):
+            fail(f"La procedencia de la imagen de {service} no es válida")
+        fingerprint = item.get("code_sha256")
+        algorithm = item.get("code_fingerprint_algorithm")
+        if (fingerprint is None) != (algorithm is None) or (fingerprint is not None and
+                (not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or not isinstance(algorithm, str))):
+            fail(f"La huella de código de {service} no es válida")
+    if administrative:
+        if set(administrative) != {"sports", "video"}:
+            fail("El manifiesto no identifica ambas imágenes administrativas")
+        for kind, expected_service in (("sports", "migrate-sports-data"),
+                                       ("video", "migrate-video-service")):
+            item = administrative[kind]
+            if (not isinstance(item, dict)
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", item.get("image_id", ""))
+                    or item.get("compose_project") != source.get("project")
+                    or item.get("compose_service") != expected_service
+                    or not isinstance(item.get("reference"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", item.get("code_sha256", ""))
+                    or item.get("code_fingerprint_algorithm") != (
+                        "sports-data-reference-v1" if kind == "sports" else "video-service-src-tree-v1")):
+                fail(f"La procedencia de la imagen administrativa {kind} no es válida")
+        for service in ("sports-data", "video-service"):
+            expected_algorithm = "sports-data-reference-v1" if service == "sports-data" else "video-service-src-tree-v1"
+            if (runtime[service].get("image_object_available")
+                    or runtime[service].get("code_fingerprint_algorithm") != expected_algorithm
+                    or not re.fullmatch(r"[0-9a-f]{64}", runtime[service].get("code_sha256", ""))):
+                fail("La excepción de recuperación no registró un objeto de imagen ausente")
 
 
 def _restore_dump(pg_id: str, database: str, owner: str, path: Path) -> None:
@@ -802,11 +983,14 @@ def _verify_manifest_identity(manifest: dict, names: dict):
         fail("El destino comparte una red con la instalación de origen")
 
 
-def backup(destination: Path):
+def backup(destination: Path, *, recovery_unavailable_runtime_images: bool = False):
     config = _config()
     names = _names(config)
     containers = _service_containers(names, required=True)
-    mount_info = _validate_compose_installation(config, names, containers, require_running=True, require_all=True)
+    unavailable_image_services = {"sports-data", "video-service"} if recovery_unavailable_runtime_images else set()
+    mount_info = _validate_compose_installation(
+        config, names, containers, require_running=True, require_all=True,
+        allow_missing_image_object_for=unavailable_image_services)
     _assert_no_foreign_volume_attachments(names, containers)
     pg_id = _pg_id(containers)
     pg = _pg_json(pg_id)
@@ -817,7 +1001,35 @@ def backup(destination: Path):
     if (acq_env.get("ACQ_PROVIDER") != "sofascore" or acq_env.get("ACQ_ENABLE_REAL") != "1"
             or sports_env.get("RJ_ACQUISITION_TEST") in {"1", 1, True}):
         fail("El backup v3 de origen requiere Acquisition en modo real y sin overlay de fixtures")
-    if _source_fixture_marker(_service_image(config["services"]["sports-data"]),
+    runtime_refs = {service: _service_image(config["services"][service])
+                    for service in ("sports-data", "video-service")}
+    helper_config = config
+    administrative_images = {}
+    runtime_code = {}
+    if recovery_unavailable_runtime_images:
+        # This opt-in recovery path is limited to two containers whose exact image objects are absent.
+        # All recovery helpers run from separately tagged, project-labeled images whose source fingerprints
+        # must match this checkout. The live containers and their code fingerprints remain recorded as-is.
+        administrative_images = _verified_admin_helpers(config, names, runtime_refs)
+        runtime_code = {
+            "sports-data": _container_code_fingerprint(containers["sports-data"][0], "sports"),
+            "video-service": _container_code_fingerprint(containers["video-service"][0], "video"),
+        }
+        stored_code = _pg_sql(pg_id, "sports_data", """
+            SELECT coalesce(code_sha256, '') FROM sports_data_publication_state WHERE singleton_id=1
+        """)
+        if not stored_code or stored_code != runtime_code["sports-data"]:
+            fail("La huella deportiva activa no coincide con la generación publicada; no se suspende el servicio")
+        helper_config = dict(config)
+        helper_config["services"] = dict(config["services"])
+        helper_config["services"]["sports-data"] = {
+            **config["services"]["sports-data"], "image": administrative_images["sports"]["image_id"]}
+        helper_config["services"]["video-service"] = {
+            **config["services"]["video-service"], "image": administrative_images["video"]["image_id"]}
+    sports_helper_image = (_service_image(config["services"]["sports-data"])
+                           if not recovery_unavailable_runtime_images
+                           else administrative_images["sports"]["image_id"])
+    if _source_fixture_marker(sports_helper_image,
                               names["volumes"]["sports-operational-state"]):
         fail("El origen contiene el marcador de seguridad de instalación fixture")
 
@@ -853,8 +1065,8 @@ def backup(destination: Path):
         idle_since = None
         deadline = time.monotonic() + 1800
         while time.monotonic() < deadline:
-            sports_active = int(_migration_check(config, names, "sports", "sports-active"))
-            video_active = int(_migration_check(config, names, "video", "video-active"))
+            sports_active = int(_migration_check(helper_config, names, "sports", "sports-active"))
+            video_active = int(_migration_check(helper_config, names, "video", "video-active"))
             acq = _acquisition_check(acq_image, jobs_volume)
             if sports_active == 0 and video_active == 0 and acq["active_jobs"] == 0:
                 idle_since = idle_since or time.monotonic()
@@ -867,8 +1079,8 @@ def backup(destination: Path):
             fail("Los trabajos activos no se drenaron; no se generó el backup")
         fenced = True
         _fence(acq_image, jobs_volume, "create", token)
-        if int(_migration_check(config, names, "sports", "sports-active")) != 0 \
-                or int(_migration_check(config, names, "video", "video-active")) != 0 \
+        if int(_migration_check(helper_config, names, "sports", "sports-active")) != 0 \
+                or int(_migration_check(helper_config, names, "video", "video-active")) != 0 \
                 or _acquisition_check(acq_image, jobs_volume)["active_jobs"] != 0:
             fail("Apareció un trabajo tras cerrar admisión; se cancela el backup")
 
@@ -881,8 +1093,8 @@ def backup(destination: Path):
             fail("Cambió el contenedor PostgreSQL durante la operación")
 
         # All workers are stopped, so the two databases and local operational history describe one coherent point.
-        sports = _snapshot(config, names, "sports")
-        video = _snapshot(config, names, "video")
+        sports = _snapshot(helper_config, names, "sports")
+        video = _snapshot(helper_config, names, "video")
         if sports["uncertain_publication_jobs"] or sports["dangling_publication_state"]:
             fail("El estado de publicación deportiva es incierto; no se genera el backup")
         _dump(pg_id, "sports_data", work / "sports_data.dump")
@@ -935,20 +1147,51 @@ def backup(destination: Path):
 
         # Source recovery must be complete before publication of the archive as a finished backup.
         recovered = _service_containers(names, required=True)
-        _validate_compose_installation(config, names, recovered, require_running=True, require_all=True)
+        _validate_compose_installation(
+            config, names, recovered, require_running=True, require_all=True,
+            allow_missing_image_object_for=unavailable_image_services)
+        if {service: recovered[service][0]["id"] for service in SERVICES} != {
+                service: containers[service][0]["id"] for service in SERVICES}:
+            fail("La recuperación sustituyó uno o más contenedores originales")
+        if recovery_unavailable_runtime_images:
+            recovered_code = {
+                "sports-data": _container_code_fingerprint(recovered["sports-data"][0], "sports"),
+                "video-service": _container_code_fingerprint(recovered["video-service"][0], "video"),
+            }
+            if recovered_code != runtime_code:
+                fail("El código observado tras reiniciar no coincide con el de los contenedores originales")
         if _check_marker(mount_info["import_dir"], ".real-jaen-restore-incomplete") != marker:
             fail("Cambió el marcador de restauración del origen")
 
-        head = _text(["git", "rev-parse", "HEAD"])
+        tool_commit = _text(["git", "rev-parse", "HEAD"])
+        tool_dirty = bool(_text(["git", "status", "--porcelain", "--",
+                                 "scripts/postgresql_backup.py", "scripts/postgresql_backup_helper.py"]))
+        runtime_images = {}
+        for service in SERVICES:
+            container = containers[service][0]
+            runtime_images[service] = {
+                "container_id": container["id"], "configured_reference": container["image"],
+                "image_id": container["image_id"],
+                "image_object_available": _image_object_available(container["image_id"]),
+            }
+        for service, fingerprint in runtime_code.items():
+            runtime_images[service]["code_fingerprint_algorithm"] = (
+                "sports-data-reference-v1" if service == "sports-data" else "video-service-src-tree-v1")
+            runtime_images[service]["code_sha256"] = fingerprint
+        tool_info = {"version": BACKUP_TOOL_VERSION, "commit": tool_commit,
+                     "working_tree_dirty": tool_dirty,
+                     "script_sha256": _digest_file(Path(__file__))[1],
+                     "helper_sha256": _digest_file(HELPER)[1]}
         manifest = {
             "format": "real-jaen-postgresql-backup",
             "format_version": FORMAT_VERSION,
             "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-            "application_commit": head,
+            "backup_tool": tool_info,
             "postgresql_version": "18",
             "schema_revisions": {"sports_data": "pg0005", "video_service": "vg0002"},
             "source": {"project": names["project"], "networks": names["networks"],
-                       "volumes": names["volumes"]},
+                       "volumes": names["volumes"], "runtime_images": runtime_images,
+                       "administrative_images": administrative_images},
             "databases": {"sports_data": sports, "video_service": video},
             "acquisition": acquisition,
             "operational_state": {
@@ -1084,6 +1327,9 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     backup_cmd = sub.add_parser("backup")
     backup_cmd.add_argument("destination", type=Path)
+    backup_cmd.add_argument(
+        "--recovery-unavailable-runtime-images", action="store_true",
+        help="Exceptional recovery: use verified admin images only when sports-data and video-service image objects are absent")
     verify_cmd = sub.add_parser("verify")
     verify_cmd.add_argument("backup", type=Path)
     restore_cmd = sub.add_parser("restore")
@@ -1091,7 +1337,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.action == "backup":
-            backup(args.destination)
+            backup(args.destination,
+                   recovery_unavailable_runtime_images=args.recovery_unavailable_runtime_images)
         elif args.action == "verify":
             config = _config()
             names = _names(config)

@@ -127,7 +127,7 @@ Los overrides opt-in no cambian los archivos SQLite habituales. Compose 2.24.4 o
 
 ### DEV autónomo: aplicaciones y PostgreSQL local
 
-1. Copia `.env.dev.example` a `.env.dev` y `.env.postgresql.dev.example` a `.env.postgresql.dev`. Ajusta los nombres de proyecto, red, volúmenes y las etiquetas `RJ_DEV_IMAGE_TAG`/`PG_TASK_IMAGE_TAG` para que sean únicos respecto a cualquier instalación SQLite activa. `PG_SECRET_DIR` debe señalar un directorio privado fuera del repositorio. `RJ_DEV_SECRET_DIR` puede usar el directorio `.rja-private/secrets` ya ignorado por Git o una ruta privada externa. La ruta de importación se conserva montada en solo lectura para la protección de restauración incompleta. Las variables antiguas de semilla/catálogo aún deben estar definidas para que Compose pueda interpolar `compose.dev.yaml`, aunque el override elimina esos mounts.
+1. Copia `.env.dev.example` a `.env.dev` y `.env.postgresql.dev.example` a `.env.postgresql.dev`. Ajusta los nombres de proyecto, red, volúmenes y la etiqueta de ejecución `RJ_DEV_IMAGE_TAG` para que sean únicos respecto a cualquier instalación SQLite activa. Las tareas administrativas usan etiquetas independientes: `PG_ADMIN_SPORTS_IMAGE_TAG` y `PG_ADMIN_VIDEO_IMAGE_TAG`. Nunca asignes a una etiqueta administrativa la etiqueta de una imagen de ejecución. `PG_SECRET_DIR` debe señalar un directorio privado fuera del repositorio. `RJ_DEV_SECRET_DIR` puede usar el directorio `.rja-private/secrets` ya ignorado por Git o una ruta privada externa. La ruta de importación se conserva montada en solo lectura para la protección de restauración incompleta. Las variables antiguas de semilla/catálogo aún deben estar definidas para que Compose pueda interpolar `compose.dev.yaml`, aunque el override elimina esos mounts.
 2. Prepara los tokens y las contraseñas de Dashboard en el directorio privado de desarrollo como para el modo SQLite. Crea los secretos de PostgreSQL y el acceso de solo lectura a los secretos que usan los procesos UID `10001`:
 
    ```bash
@@ -244,7 +244,7 @@ En el camino PostgreSQL, `/state` de Sports Data conservó únicamente `jobs.sql
 
 ### Instalación real local (Hito 08C.1)
 
-La instalación permanente usa los tres archivos Compose del modo DEV, con proyecto, prefijo de volúmenes, red, puerto y etiquetas de imagen propios. Guarda los env files, secretos y copias de importación fuera del repositorio. `RJ_DEV_IMAGE_TAG` y `PG_TASK_IMAGE_TAG` mantienen las imágenes aisladas de cualquier contenedor SQLite activo.
+La instalación permanente usa los tres archivos Compose del modo DEV, con proyecto, prefijo de volúmenes, red, puerto y etiquetas de imagen de ejecución propias. Guarda los env files, secretos y copias de importación fuera del repositorio. `RJ_DEV_IMAGE_TAG` identifica las imágenes runtime por defecto; `RJ_DEV_SPORTS_IMAGE_TAG`, `RJ_DEV_ACQUISITION_IMAGE_TAG`, `RJ_DEV_VIDEO_IMAGE_TAG` y `RJ_DEV_DASHBOARD_IMAGE_TAG` permiten fijarlas por servicio. `PG_ADMIN_SPORTS_IMAGE_TAG` y `PG_ADMIN_VIDEO_IMAGE_TAG` identifican exclusivamente las imágenes de migración y tareas administrativas; sus etiquetas no se comparten con ningún servicio permanente.
 
 Acquisition está configurado para SofaScore en modo real mediante `RJ_ACQUISITION_ENABLE_REAL=1`. No definas `RJ_ACQUISITION_TEST`, `ACQ_TEST_MODE` ni `ACQ_FIXTURE_ROUTES` en esta instalación. **No incluyas `compose.acquisition-fixture.yaml` en los comandos de la instalación permanente**: ese overlay fuerza `fixture-site` y modo de prueba, lo que no coincide con el modo real de Sports Data y deja `available=false`. El overlay privado se conserva únicamente para ensayos fixture aislados.
 
@@ -317,6 +317,32 @@ COMPOSE_FILES="compose.dev.yaml:compose.postgresql.yaml:compose.postgresql.dev.y
 ```
 
 Los dumps usan `pg_dump -Fc --no-owner`; la restauración crea cada objeto bajo su rol owner nuevo con `pg_restore --no-owner --role=<owner>`, manteniendo las ACL de los roles runtime. No restaura contraseñas/roles de origen, no usa `--no-acl`, `--clean`, `DROP DATABASE` ni vuelve a aplicar Alembic. Antes de toda futura migración de esquema, genera y verifica un backup v3. Este hito no programa backups periódicos.
+
+### Recuperación excepcional si falta el objeto de imagen activo
+
+El backup ordinario mantiene el preflight estricto: exige que cada contenedor use el ID de imagen que resuelve su referencia Compose. Si el objeto de imagen de Sports Data o Video Service ya no existe en el daemon, no reconstruyas ni retaggees esa imagen para fingir coincidencia. El camino excepcional se habilita con `--recovery-unavailable-runtime-images` y solo tolera la ausencia comprobada del objeto original para esos dos servicios; todas las demás comprobaciones del backup v3 se mantienen.
+
+La excepción usa las imágenes independientes `migrate-sports-data` y `migrate-video-service`, con `PG_ADMIN_SPORTS_IMAGE_TAG` y `PG_ADMIN_VIDEO_IMAGE_TAG`. Antes de cerrar admisión, verifica su ID inmutable, las etiquetas Compose de proyecto/servicio y la huella de código contra este checkout. Captura desde cada contenedor activo su ID real, referencia configurada y huella del código; exige además que la huella activa de Sports Data coincida con la generación publicada. El manifiesto distingue esas imágenes runtime de las imágenes administrativas y registra versión, commit y hashes de la herramienta de backup. No atribuye el código activo al commit del checkout.
+
+El flujo cierra el Dashboard, drena Sports Data, Video Service y Acquisition, establece el fence durable de Acquisition, suspende los tres workers y deja PostgreSQL ejecutándose durante los dumps. Luego reinicia los contenedores existentes por ID, sin recrearlos, comprueba que quedan saludables y compara de nuevo sus IDs y huellas. Si falla cualquier paso tras cerrar admisión, el bloque `finally` intenta recuperar los mismos contenedores y retirar el fence. La operación debe detenerse si no se verificaron de antemano las imágenes administrativas o no existe la huella activa esperada.
+
+Para el caso excepcional, construye únicamente las imágenes administrativas usando los tags separados de los env files y, después de comprobar que no coinciden con las etiquetas runtime, genera y verifica el backup así:
+
+```bash
+CONFIG="$HOME/.config/real-jaen-analytics/postgresql/dev-08c1"
+docker compose --project-directory "$PWD" \
+  --env-file "$CONFIG/.env.dev" --env-file "$CONFIG/.env.postgresql.dev" \
+  -f compose.dev.yaml -f compose.postgresql.yaml -f compose.postgresql.dev.yaml \
+  --profile migrations build migrate-sports-data migrate-video-service
+
+ENV_FILES="$CONFIG/.env.dev:$CONFIG/.env.postgresql.dev" \
+COMPOSE_FILES="compose.dev.yaml:compose.postgresql.yaml:compose.postgresql.dev.yaml" \
+  scripts/backup-postgresql.sh \
+  "$HOME/.local/share/real-jaen-analytics/postgresql/backups/$(date -u +%Y%m%dT%H%M%SZ)" \
+  --recovery-unavailable-runtime-images
+```
+
+El comando no modifica ni reemplaza etiquetas runtime. La verificación incluye los hashes del manifiesto, los dumps, el inventario y el journal de Acquisition. Antes de volver a usar las bases, restaura en un proyecto aislado y compara inventarios lógicos y respuestas de lectura con el origen. El modo excepcional no es una opción rutinaria ni autoriza cambios en los datos.
 
 ## Preparación inicial administrada de SINBAD²
 

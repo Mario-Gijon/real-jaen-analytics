@@ -31,6 +31,10 @@ def main() -> None:
     }
     if not expected.issubset(services):
         fail("production Compose is missing a required service")
+    for runtime, administrative in (("sports-data", "migrate-sports-data"),
+                                    ("video-service", "migrate-video-service")):
+        if services[runtime].get("image") == services[administrative].get("image"):
+            fail(f"{runtime} execution and administrative images must have separate tags")
 
     db = services["postgresql"]
     if db.get("image") != "postgres:18-bookworm" or db.get("ports"):
