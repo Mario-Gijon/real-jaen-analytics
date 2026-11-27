@@ -16,6 +16,6 @@ COPY --chown=10001:10001 enrichment ./enrichment
 COPY --chown=10001:10001 scripts ./scripts
 USER 10001:10001
 EXPOSE 8002
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3).close()"
+HEALTHCHECK --interval=10s --timeout=5s --start-period=240s --retries=6 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3).close()"
 ENTRYPOINT ["python", "-B"]
 CMD ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]
