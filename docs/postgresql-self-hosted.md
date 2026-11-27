@@ -2,6 +2,8 @@
 
 Esta es la guía para PostgreSQL 18 autogestionado. DEV y PROD usan proyectos Compose, volúmenes, redes y credenciales distintos. El arranque habitual de desarrollo en `compose.dev.yaml` sigue usando SQLite; el despliegue de producción combina los tres Compose PostgreSQL y conserva la infraestructura estable fuera de los cambios de código.
 
+Para una primera lectura administrativa, use la [guía breve de preparación PROD](prepare-production.md). Esta página conserva el procedimiento técnico completo y las condiciones de seguridad de cada paso.
+
 ## Bases y roles
 
 Cada instancia contiene dos bases independientes:
