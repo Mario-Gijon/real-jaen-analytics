@@ -5,6 +5,7 @@
 !queries.py
 !control.py
 !importar.py
+!identidad.py
 !ambito.json
 !Dockerfile.dev
 !productores-adquisicion.json

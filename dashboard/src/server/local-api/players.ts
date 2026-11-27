@@ -54,10 +54,12 @@ function parsePlayers(body: unknown): { players: PlayerRef[]; scope: string } {
  * name, the download time `fetched_at`) are ignored: the download time says
  * nothing about when the profile itself changed.
  */
-function parseProfile(body: unknown, sourceId: number): PlayerProfile["player"] {
+function parseProfile(body: unknown): PlayerProfile["player"] {
   if (!isRecord(body) || !isRecord(body.data)) throw invalid("se esperaba { data: {} }");
   const row = body.data;
-  if (row.player_id !== sourceId) throw invalid("player_id no coincide con el solicitado");
+  // Sports Data may resolve an explicitly verified external alias and return
+  // the canonical source ID, which can differ from the ID in the requested URL.
+  const canonicalSourceId = positiveId(row.player_id, "player_id");
   if (typeof row.name !== "string" || !row.name.trim()) throw invalid("name");
 
   const birthDate = optionalText(row.birth_date, "birth_date");
@@ -68,10 +70,10 @@ function parseProfile(body: unknown, sourceId: number): PlayerProfile["player"] 
   }
   const foot = optionalText(row.preferred_foot, "preferred_foot");
   return {
-    id: playerIdFromSource(sourceId),
+    id: playerIdFromSource(canonicalSourceId),
     name: row.name.trim(),
     position: position(row.usual_position, "usual_position"),
-    photoUrl: parsePhotoUrl(row.photo_url, sourceId),
+    photoUrl: parsePhotoUrl(row.photo_url, canonicalSourceId),
     birthDate,
     heightCm: typeof height === "number" ? height : null,
     preferredFoot: (foot && FEET[foot.toLowerCase()]) || null,
@@ -102,7 +104,7 @@ export function createLocalApiPlayerProfile(options: Options) {
     if (sourceId === null) return null;
     const body = await getJson(options, `${baseOf(options)}/api/v1/players/${sourceId}`);
     if (body === null) return null;
-    return { player: parseProfile(body, sourceId), scope: PROFILE_SCOPE, source: PROVENANCE };
+    return { player: parseProfile(body), scope: PROFILE_SCOPE, source: PROVENANCE };
   };
 }
 

@@ -205,6 +205,20 @@ describe("local API adapter: player profile", () => {
     );
   });
 
+  it("accepts the canonical profile returned for an explicitly merged alias", async () => {
+    const fetch = answer({ data: moha });
+    const result = await profileSource(fetch)("sofascore-player-966304");
+    expect(result!.player).toMatchObject({
+      id: "sofascore-player-966303",
+      name: "Moha Keita",
+      photoUrl: "/api/v1/players/sofascore-player-966303/photo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8001/api/v1/players/966304",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+  });
+
   it("keeps absent, null, empty or unknown values as unknown", async () => {
     const fetch = answer({
       data: { player_id: 1, name: "Sin Datos", usual_position: "X", country: "", height_cm: null, birth_date: null, preferred_foot: "Ambidiestro" },
@@ -240,7 +254,7 @@ describe("local API adapter: player profile", () => {
 
   it.each([
     ["no data object", { player_id: 966303 }],
-    ["another player", { data: { ...moha, player_id: 1 } }],
+    ["invalid player ID", { data: { ...moha, player_id: 0 } }],
     ["no name", { data: { ...moha, name: "" } }],
     ["a malformed birth date", { data: { ...moha, birth_date: "18/09/1999" } }],
     ["a non-integer height", { data: { ...moha, height_cm: "165" } }],
@@ -358,6 +372,16 @@ describe("local API adapter: observed matches", () => {
     expect(result!.ratingSource).toBe("SofaScore");
     expect(result!.source).toEqual({ synthetic: false, label: "Datos reales" });
     expect(fetch).toHaveBeenCalledWith("http://127.0.0.1:8001/api/v1/players/966303/matches", expect.anything());
+  });
+
+  it("accepts canonical match rows when the requested player ID is an explicit alias", async () => {
+    const fetch = matchesApi([callUp({ player_id: 966303 })]);
+    const result = await matchesSource(fetch)("sofascore-player-966304");
+    expect(result!.matches).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8001/api/v1/players/966304/matches",
+      expect.anything(),
+    );
   });
 
   it("maps each metric from the service's normalization, keeping real zeros", async () => {

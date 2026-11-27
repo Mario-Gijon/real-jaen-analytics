@@ -165,10 +165,12 @@ function normalizedStat(value: unknown, key: ObservedMatchStatKey, field: string
  * stat (`normalized.stats`) come from it, so the service's rules are never
  * repeated here. Only a confirmed appearance shows stats.
  */
-function parseMatchRow(row: unknown, index: number, playerSourceId: number, scope: readonly SourceCompetition[]): RawObservedMatch {
+function parseMatchRow(row: unknown, index: number, scope: readonly SourceCompetition[]): RawObservedMatch {
   const at = (field: string) => `data[${index}].${field}`;
   if (!isRecord(row) || !isRecord(row.match)) throw invalid(`data[${index}]`);
-  if (row.player_id !== playerSourceId) throw invalid(at("player_id"));
+  // The route filters by the requested ID, but rows use the canonical source
+  // ID after an explicit identity decision.
+  positiveId(row.player_id, at("player_id"));
   const id = positiveId(row.match_id, at("match_id"));
   if (row.side !== "home" && row.side !== "away") throw invalid(at("side"));
   for (const flag of ["substitute", "played"] as const) {
@@ -229,7 +231,7 @@ export function createLocalApiObservedMatches(options: Options) {
     const body = await getJson(options, `${baseOf(options)}/api/v1/players/${playerSourceId}/matches`);
     if (body === null) return null;
     if (!isRecord(body) || !Array.isArray(body.data)) throw invalid("se esperaba { data: [] }");
-    const rows = body.data.map((row, index) => parseMatchRow(row, index, playerSourceId, scope));
+    const rows = body.data.map((row, index) => parseMatchRow(row, index, scope));
     const matches = await withTeamNames(options, rows.sort(byKickoff(true)));
     return { playerId, matches, scope: MATCHES_SCOPE, ratingSource: RATING_SOURCE, source: PROVENANCE };
   };
