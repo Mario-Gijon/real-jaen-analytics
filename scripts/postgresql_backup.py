@@ -901,12 +901,14 @@ def _verify_backup_provenance(manifest: dict) -> None:
                     or item.get("code_fingerprint_algorithm") != (
                         "sports-data-reference-v1" if kind == "sports" else "video-service-src-tree-v1")):
                 fail(f"La procedencia de la imagen administrativa {kind} no es válida")
-        for service in ("sports-data", "video-service"):
+        recovery_services = ("sports-data", "video-service")
+        if all(runtime[service].get("image_object_available") for service in recovery_services):
+            fail("La excepción de recuperación requiere al menos un objeto runtime de imagen ausente")
+        for service in recovery_services:
             expected_algorithm = "sports-data-reference-v1" if service == "sports-data" else "video-service-src-tree-v1"
-            if (runtime[service].get("image_object_available")
-                    or runtime[service].get("code_fingerprint_algorithm") != expected_algorithm
+            if (runtime[service].get("code_fingerprint_algorithm") != expected_algorithm
                     or not re.fullmatch(r"[0-9a-f]{64}", runtime[service].get("code_sha256", ""))):
-                fail("La excepción de recuperación no registró un objeto de imagen ausente")
+                fail("La excepción de recuperación no registró la huella de código runtime")
 
 
 def _restore_dump(pg_id: str, database: str, owner: str, path: Path) -> None:

@@ -79,6 +79,12 @@ class PostgreSQLBackupTests(unittest.TestCase):
                        "administrative_images": administrative},
         }
         workflow._verify_backup_provenance(manifest)
+        runtime["sports-data"]["image_object_available"] = True
+        workflow._verify_backup_provenance(manifest)
+        runtime["video-service"]["image_object_available"] = True
+        with self.assertRaises(workflow.OperationError):
+            workflow._verify_backup_provenance(manifest)
+        runtime["video-service"]["image_object_available"] = False
         manifest["source"]["administrative_images"]["sports"]["compose_project"] = "another-project"
         with self.assertRaises(workflow.OperationError):
             workflow._verify_backup_provenance(manifest)
