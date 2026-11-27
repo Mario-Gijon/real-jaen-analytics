@@ -290,14 +290,12 @@ def misma_identidad_jugador_postgresql(c, anterior_id, siguiente_id):
     """Only forgive a player FK difference when an explicit identity decision joins the same PostgreSQL root."""
     if c.dialect.name != 'postgresql' or anterior_id is None or siguiente_id is None:
         return False
-    cache_key = 'sincronizacion.player_identity_roots'
-    roots = c.info.get(cache_key)
-    if roots is None:
-        from persistencia.identidades import _players, _root
+    # Do not cache this projection on Connection.info: identity apply/revert changes the graph inside the same
+    # transaction, and pooled connections can otherwise retain a stale map across later publication checks.
+    from persistencia.identidades import _players, _root
 
-        players = _players(c)
-        roots = {player_id: _root(player_id, players) for player_id in players}
-        c.info[cache_key] = roots
+    players = _players(c)
+    roots = {player_id: _root(player_id, players) for player_id in players}
     anterior, siguiente = roots.get(int(anterior_id)), roots.get(int(siguiente_id))
     return anterior is not None and siguiente is not None and anterior == siguiente
 

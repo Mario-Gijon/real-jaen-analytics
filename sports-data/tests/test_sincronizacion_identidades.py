@@ -105,6 +105,17 @@ class SynchronizationIdentityAliases(unittest.TestCase):
         self.assertTrue(sincronizacion.misma_identidad_jugador_postgresql(connection, 479, 419))
         self.assertFalse(sincronizacion.misma_identidad_jugador_postgresql(connection, 479, 480))
 
+    def test_identity_roots_are_refreshed_after_a_later_merge_in_the_same_session(self):
+        connection = _RootConnection([
+            {'id': 419, 'status': 'active', 'merged_into_id': None},
+            {'id': 479, 'status': 'merged', 'merged_into_id': 419},
+            {'id': 515, 'status': 'active', 'merged_into_id': None},
+            {'id': 529, 'status': 'active', 'merged_into_id': None},
+        ])
+        self.assertFalse(sincronizacion.misma_identidad_jugador_postgresql(connection, 515, 529))
+        connection.players[2] = {'id': 515, 'status': 'merged', 'merged_into_id': 529}
+        self.assertTrue(sincronizacion.misma_identidad_jugador_postgresql(connection, 515, 529))
+
     def test_historical_profile_fk_is_retained_when_roots_match(self):
         plan, translation = sincronizacion.Plan(), sincronizacion.Traduccion(1)
         translation.ids['player'][42] = 419
