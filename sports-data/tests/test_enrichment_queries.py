@@ -201,6 +201,57 @@ class EnrichmentQueryTests(unittest.TestCase):
         self.assertIsNone(foul_participant["role"])
         self.assertEqual(foul_participant["normalizer_role"], "foul_committer")
 
+    def test_explicit_player_alias_filter_keeps_raw_participants_and_no_duplicate_comments(self):
+        self.connection.close()
+        connection = sqlite3.connect(self.database)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO player (id, uid, status, created_in_run) VALUES (42, ?, 'active', 1)",
+            ("00000000-0000-4000-8000-000000000042",),
+        )
+        connection.execute(
+            "INSERT INTO player (id, uid, status, merged_into_id, created_in_run) "
+            "VALUES (43, ?, 'merged', 42, 1)",
+            ("00000000-0000-4000-8000-000000000043",),
+        )
+        connection.execute(
+            """INSERT INTO identity_decision
+               (id, uid, kind, entity_type, reason, decided_by, decided_on, evidence, run_id)
+               VALUES (1, '00000000-0000-4000-8000-000000000099', 'merge', 'player',
+                       'synthetic test', 'test', '2026-11-01', 'synthetic evidence', 1)"""
+        )
+        connection.execute(
+            """INSERT INTO player_external_id
+               (id, provider, namespace, external_id, status, entity_id, decision_id, created_in_run)
+               VALUES (1, 'sofascore', '', '42', 'origin', 42, NULL, 1),
+                      (2, 'sofascore', '', '43', 'verified', 42, 1, 1)"""
+        )
+        self._comment(
+            connection, 7, 10, "alias-goal", "scoreChange", "Gol anotado por el alias.",
+            {"player": {"id": 43, "name": "Juan Pérez"}}, "goal",
+            {"goal_status": "valid", "goal_kind": "ordinary"},
+            [("player", "scorer", "43", "scorer"), ("assist1", "assistant", "42", "assist")],
+        )
+        connection.commit()
+        connection.close()
+        self.connection = open_readonly_connection(self.database)
+        self.addCleanup(self.connection.close)
+
+        canonical = query_enriched_comments(self.connection, match_id=1, player_id=42, limit=10)
+        alias = query_enriched_comments(self.connection, match_id=1, player_id=43, limit=10)
+        self.assertEqual(canonical["total"], alias["total"])
+        self.assertEqual(
+            {item["comment"]["source_comment_id"] for item in canonical["items"]},
+            {item["comment"]["source_comment_id"] for item in alias["items"]},
+        )
+        alias_comment = next(item for item in alias["items"]
+                             if item["comment"]["source_comment_id"] == "alias-goal")
+        self.assertEqual(alias_comment["enrichment"]["participants"][0]["source_id"], 43)
+        self.assertEqual(alias_comment["comment"]["participants"]["player"]["id"], 43)
+        self.assertEqual(query_enriched_comments(
+            self.connection, match_id=1, player_id=42, role="scorer"
+        )["total"], 1)
+
     def test_category_type_attribute_filters_and_pagination(self):
         shot = query_enriched_comments(
             self.connection, match_id=1, category="shot", attributes={"surface": "right_foot"}

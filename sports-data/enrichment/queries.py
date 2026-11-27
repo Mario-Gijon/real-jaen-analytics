@@ -101,6 +101,54 @@ def _player_id_literals(value: Any) -> tuple[str, ...]:
     return (string_literal,)
 
 
+def _identity_player_literals(connection: Any, dialect: str, value: Any) -> tuple[str, ...]:
+    """Resolve an explicit player identity decision to all of its source-ID JSON literals.
+
+    Enriched participant rows stay immutable and retain their original IDs. The EXISTS filter below can match
+    any accepted external ID for the same player entity, while still returning one comment and the raw IDs.
+    If an older SQLite database has no external-ID inventory, retain the historical exact-ID behavior.
+    """
+    requested = _positive_id(value, "player_id")
+    if dialect == "postgresql":
+        available = connection.exec_driver_sql(
+            "SELECT to_regclass('public.player_external_id') IS NOT NULL"
+        ).scalar_one()
+        if not available:
+            return _player_id_literals(value)
+        rows = connection.execute(sqlalchemy_text("""
+            SELECT DISTINCT alias.external_id
+            FROM player_external_id AS requested
+            JOIN player_external_id AS alias
+              ON alias.provider=requested.provider AND alias.namespace=requested.namespace
+             AND alias.entity_id=requested.entity_id
+            WHERE requested.provider='sofascore' AND requested.namespace=''
+              AND requested.status <> 'rejected' AND requested.external_id=:external_id
+              AND alias.status <> 'rejected'
+            ORDER BY alias.external_id
+        """), {"external_id": requested}).fetchall()
+    else:
+        available = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='player_external_id'"
+        ).fetchone()
+        if not available:
+            return _player_id_literals(value)
+        rows = connection.execute("""
+            SELECT DISTINCT alias.external_id
+            FROM player_external_id AS requested
+            JOIN player_external_id AS alias
+              ON alias.provider=requested.provider AND alias.namespace=requested.namespace
+             AND alias.entity_id=requested.entity_id
+            WHERE requested.provider='sofascore' AND requested.namespace=''
+              AND requested.status <> 'rejected' AND requested.external_id=?
+              AND alias.status <> 'rejected'
+            ORDER BY alias.external_id
+        """, (requested,)).fetchall()
+    literals = set()
+    for row in rows:
+        literals.update(_player_id_literals(row[0]))
+    return tuple(sorted(literals)) or _player_id_literals(value)
+
+
 def _decode_json(value: str, field: str) -> Any:
     try:
         return json.loads(value)
@@ -116,6 +164,7 @@ def _execute(connection, dialect: str, statement: str, parameters):
 
 def _filters(
     *,
+    connection: Any,
     match_id: Any,
     source_event_id: Any,
     player_id: Any,
@@ -140,7 +189,7 @@ def _filters(
     if source_event_id is not None:
         clauses.append(f"capture.source_event_id = {bind(_positive_id(source_event_id, 'source_event_id'))}")
 
-    id_literals = _player_id_literals(player_id) if player_id is not None else None
+    id_literals = _identity_player_literals(connection, dialect, player_id) if player_id is not None else None
     role_text = _required_text(role, "role") if role is not None else None
 
     if id_literals is not None and role_text is not None:
@@ -256,8 +305,10 @@ def query_enriched_comments(
     """Return one page of currently selected Spanish comments and their labels.
 
     ``match_id`` is the internal SQLite match key; ``source_event_id`` is the
-    original SofaScore event ID. ``player_id`` matches both integer and
-    canonical decimal-string storage while preserving leading-zero IDs exactly.
+    original SofaScore event ID. ``player_id`` follows explicit SofaScore
+    identity decisions and matches integer or canonical decimal-string storage
+    while preserving leading-zero IDs exactly. Returned participant IDs remain
+    the original source IDs.
     When both a player and role are requested, they must belong to the same
     participant row. Role filters use only the effective enriched role:
     ambiguous foul roles and own goals therefore do not appear as confirmed
@@ -281,6 +332,7 @@ def query_enriched_comments(
         raise EnrichmentQueryError("offset must be a non-negative integer")
 
     clauses, parameters = _filters(
+        connection=connection,
         match_id=match_id,
         source_event_id=source_event_id,
         player_id=player_id,

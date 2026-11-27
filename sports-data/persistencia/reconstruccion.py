@@ -161,7 +161,7 @@ def partidos(c):
     return sorted(salida, key=lambda x: x['match_id'])
 
 
-def jugador_partido(c):
+def jugador_partido(c, aliases=None):
     """Las convocatorias vigentes. Se leen solo de la vista call_up_vigente: una retirada no cuenta en ningún partido,
     acumulado ni ficha (sus estadísticas siguen en call_up_stat, pero no se leen)."""
     estadisticas = {}
@@ -186,8 +186,9 @@ def jugador_partido(c):
             stats = entradas[u['entry_index']]['statistics']
         else:
             stats = None
+        source_player_id = int(u['external_player_id'])
         salida.append({'source': 'Sofascore', 'match_id': int(u['external_match_id']), 'team_id': int(u['external_side_team_id']),
-                       'player_id': int(u['external_player_id']), 'side': u['side'],
+                       'player_id': (aliases or {}).get(source_player_id, source_player_id), 'side': u['side'],
                        'source_team_id': _entero(u['external_team_id']), 'substitute': _json(u['substitute']),
                        'match_position': _json(u['match_position']), 'shirt_number': _json(u['shirt_number']),
                        'minutes_played': _json(u['minutes_played']),
@@ -196,7 +197,7 @@ def jugador_partido(c):
     return sorted(salida, key=lambda x: (x['match_id'], x['team_id'], x['player_id']))
 
 
-def jugadores(c):
+def jugadores(c, aliases=None):
     """La ficha combinada de cada jugador observado en alineaciones, con las mismas observaciones y en el mismo orden
     que el importador (alineaciones en orden de ingestión y, después, fichas de jugadores ya observados)."""
     fichas = {}
@@ -218,7 +219,14 @@ def jugadores(c):
                     **{campo: ficha['campos'].get(campo) for campo in importar.CAMPOS_FICHA},
                     'fetched_at': ficha['fetched_at']}
         observaciones.setdefault(jugador, []).append((ficha['fetched_at'], completa))
-    return sorted((importar.ficha_combinada(obs)[0] for obs in observaciones.values()), key=lambda x: x['player_id'])
+    fichas_por_identidad = {}
+    for source_id, obs in observaciones.items():
+        ficha, _discrepancias = importar.ficha_combinada(obs)
+        canonical = (aliases or {}).get(source_id, source_id)
+        fichas_por_identidad.setdefault(canonical, {})[source_id] = ficha
+    from identidad import combinar_fichas
+    return sorted((combinar_fichas(canonical, fichas) for canonical, fichas in fichas_por_identidad.items()),
+                  key=lambda x: x['player_id'])
 
 
 def discrepancias(c):
@@ -268,8 +276,11 @@ def discrepancias(c):
 
 def salida_desde_base(c, con_fichas=True):
     """Los JSON del importador (resumen aparte) tal como los reconstruye la base."""
-    salida = {'equipos': equipos(c), 'jugadores': jugadores(c), 'partidos': partidos(c),
-              'jugador_partido': jugador_partido(c), 'originales': originales(c), 'discrepancias': discrepancias(c),
+    from persistencia.identidades import aliases_publicos
+    aliases = aliases_publicos(c)
+    salida = {'equipos': equipos(c), 'jugadores': jugadores(c, aliases), 'partidos': partidos(c),
+              'jugador_partido': jugador_partido(c, aliases),
+              'originales': originales(c), 'discrepancias': discrepancias(c),
               'exportaciones': exportaciones(c), 'resumen': resumen_vigente(c)}
     if con_fichas:
         salida['fichas_originales'] = fichas_originales(c)

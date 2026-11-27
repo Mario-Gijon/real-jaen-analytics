@@ -25,7 +25,8 @@ from persistencia.decisiones import sustituciones_guardadas
 from persistencia.sincronizacion import reglas_desfasadas
 
 # Lo que la API necesita de la base: los mismos archivos que lee el modo JSON (resumen aparte).
-DATOS = ('equipos', 'jugadores', 'partidos', 'jugador_partido', 'exportaciones', 'discrepancias', 'fichas_originales')
+DATOS = ('equipos', 'jugadores', 'partidos', 'jugador_partido', 'exportaciones', 'discrepancias', 'fichas_originales',
+         'jugadores_alias')
 
 
 class BaseNoUtilizable(Exception):
@@ -60,12 +61,15 @@ def _leer_base(ruta):
                 reconstruida = reconstruccion.salida_desde_base(c)
             except ValueError as e:
                 raise BaseNoUtilizable(f'{ruta}: {e}') from e
+            from persistencia.identidades import aliases_publicos
+            aliases = aliases_publicos(c)
             sustituciones = sustituciones_guardadas(c)
     except SQLAlchemyError as e:
         raise BaseNoUtilizable(f'No se puede leer {ruta}: {getattr(e, "orig", e)}') from e
     finally:
         motor.dispose()
-    datos = {n: reconstruida[n] for n in DATOS}
+    datos = {n: reconstruida[n] for n in DATOS if n != 'jugadores_alias'}
+    datos['jugadores_alias'] = aliases
     datos['originales'] = api.indexar(reconstruida['originales'])
     return datos, sustituciones
 
@@ -117,7 +121,9 @@ def cargar_desde_postgresql(conexion, ambito):
             raise BaseNoUtilizable('El estado PostgreSQL usa reglas que no son las de este código')
         reconstruida = reconstruccion.salida_desde_base(conexion)
         sustituciones = sustituciones_guardadas(conexion)
-        datos = {n: reconstruida[n] for n in DATOS}
+        datos = {n: reconstruida[n] for n in DATOS if n != 'jugadores_alias'}
+        from persistencia.identidades import aliases_publicos
+        datos['jugadores_alias'] = aliases_publicos(conexion)
         datos['originales'] = api.indexar(reconstruida['originales'])
         try:
             return api.componer(datos, api.leer_ambito(ambito), sustituciones)

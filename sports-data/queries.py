@@ -4,6 +4,7 @@ import math
 from datetime import datetime
 
 from importar import rasgos_evento
+from identidad import jugador_canonico
 
 # Secciones de detalle de partido: ruta -> clave `key` de originales.json.
 SECCIONES = {'statistics': 'statistics', 'lineups': 'lineups', 'incidents': 'incidents'}
@@ -353,8 +354,9 @@ def contexto_partido(datos, ident):
         incidencias = None  # de los equipos anteriores: ni entradas ni goles del partido vigente
     confirmada = isinstance(alineacion, dict) and alineacion.get('confirmed') is True
     lista = [i for i in incidencias if isinstance(i, dict)] if isinstance(incidencias, list) and incidencias else None
+    aliases = datos.get('jugadores_alias', {})
     def jugador(valor):
-        return valor.get('id') if isinstance(valor, dict) else None
+        return jugador_canonico(aliases, valor.get('id')) if isinstance(valor, dict) else None
     entradas = {lado: set() for lado in ('home', 'away')}
     con_eventos = set()
     goles, asistencias, clases = {}, {}, []
@@ -411,11 +413,13 @@ def desacuerdos_de_alineacion(datos, ident):
     if len(comparables) < 2:
         return {}
     dichos = {}
+    aliases = datos.get('jugadores_alias', {})
     for r in comparables:
         vistos = {}
         for e in jugadores_de_alineacion(r.get('payload')):
             stats = e.get('statistics') if isinstance(e.get('statistics'), dict) else {}
-            vistos[e['player'].get('id')] = {'substitute': e.get('substitute'), 'minutesPlayed': stats.get('minutesPlayed'),
+            player_id = jugador_canonico(aliases, e['player'].get('id'))
+            vistos[player_id] = {'substitute': e.get('substitute'), 'minutesPlayed': stats.get('minutesPlayed'),
                                              'individual_statistics': sorted(set(stats) - ESTADISTICAS_DE_BANQUILLO - {'minutesPlayed'})}
         for jugador in set(vistos) | set(dichos):
             dichos.setdefault(jugador, []).append(dict(version(r), **(vistos.get(jugador) or {'listed': False})))
@@ -452,10 +456,12 @@ def conflictos_de_estadisticas(datos, ident):
     if len(comparables) < 2:
         return {}
     vistas = {}
+    aliases = datos.get('jugadores_alias', {})
     for r in comparables:
         for e in jugadores_de_alineacion(r.get('payload')):
             stats = e.get('statistics') if isinstance(e.get('statistics'), dict) else {}
-            vistas.setdefault(e['player'].get('id'), []).append((version(r), stats))
+            player_id = jugador_canonico(aliases, e['player'].get('id'))
+            vistas.setdefault(player_id, []).append((version(r), stats))
     conflictos = {}
     for jugador, dichas in vistas.items():
         if len(dichas) < len(comparables):
@@ -859,11 +865,12 @@ def consultar(datos, ruta):
     tipo = partes[2]
     if tipo == 'matches':
         return detalle_partido(datos, ident, partes)
+    canonical_ident = jugador_canonico(datos.get('jugadores_alias', {}), ident) if tipo == 'players' else ident
     registros = datos['equipos' if tipo == 'teams' else 'jugadores']
     campo = 'team_id' if tipo == 'teams' else 'player_id'
-    entidad = next((r for r in registros if r[campo] == ident), None)
+    entidad = next((r for r in registros if r[campo] == canonical_ident), None)
     if entidad is None:
-        fuera = tipo == 'players' and ident in datos['jugadores_excluidos']
+        fuera = tipo == 'players' and canonical_ident in datos['jugadores_excluidos']
         return 404, {'error':'Jugador fuera del ámbito de esta versión' if fuera else 'Entidad no encontrada'}
     if len(partes) == 4:
         return 200, {'data':entidad}
@@ -885,8 +892,11 @@ def consultar(datos, ruta):
     elif tipo == 'players' and sub == 'matches':
         partidos = {m['match_id']:m for m in datos['partidos']}
         # Cada convocatoria con su versión normalizada (las mismas reglas que acumulados y alineaciones).
-        normalizadas = {m: actuaciones_del_partido(datos, m).get(ident) for m in {r['match_id'] for r in datos['jugador_partido'] if r['player_id']==ident}}
-        resultado = [dict(r,match=partidos[r['match_id']],normalized=normalizadas[r['match_id']]) for r in datos['jugador_partido'] if r['player_id']==ident]
+        normalizadas = {m: actuaciones_del_partido(datos, m).get(canonical_ident)
+                        for m in {r['match_id'] for r in datos['jugador_partido']
+                                  if r['player_id'] == canonical_ident}}
+        resultado = [dict(r, match=partidos[r['match_id']], normalized=normalizadas[r['match_id']])
+                     for r in datos['jugador_partido'] if r['player_id'] == canonical_ident]
     else:
         return 404, {'error':'Ruta inexistente'}
     return 200, {'data':resultado,'meta':{'count':len(resultado)}}

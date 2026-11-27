@@ -5,6 +5,7 @@ from pathlib import Path
 
 # Las reglas de versiones y de datos maestros son las del importador: una sola implementación.
 from importar import ficha_combinada, ficha_de_entrada, rasgos_evento, validar_ficha
+from identidad import combinar_fichas, jugador_canonico
 from queries import (
     CAMPOS_AMBITO,
     CLASES_DE_GOL,
@@ -129,22 +130,31 @@ def competicion_de(originales, partido, competiciones):
         return None
     return c
 
-def ficha_de_alineaciones(originales, ident, fichas=()):
+def ficha_de_alineaciones(originales, ident, fichas=(), aliases=None):
     """Ficha del jugador como la construye el importador (`ficha_combinada`: campo a campo, el valor conocido más
     reciente), pero sólo desde las versiones de estas alineaciones."""
-    observaciones = []
+    observaciones = {}
+    aliases = aliases or {}
     for (_, key), entrada in originales.items():
         if key != 'lineups':
             continue
         for r in entrada['todas']:
             for lado in ('home', 'away'):
                 for e in ((r.get('payload') or {}).get(lado) or {}).get('players', []):
-                    if (e.get('player') or {}).get('id') == ident:
-                        observaciones.append((r.get('fetched_at'), ficha_de_entrada(e, r.get('fetched_at'))))
+                    source_id = (e.get('player') or {}).get('id')
+                    if jugador_canonico(aliases, source_id) == ident:
+                        observaciones.setdefault(source_id, []).append(
+                            (r.get('fetched_at'), ficha_de_entrada(e, r.get('fetched_at'))))
     # Las fichas personales no dependen del equipo/competición, pero no acreditan pertenencia.
-    observaciones.extend((r['fetched_at'], ficha_de_entrada(r['payload'], r['fetched_at']))
-                         for r in fichas if r['player_id'] == ident)
-    return ficha_combinada(observaciones)[0] if observaciones else None
+    # La equivalencia se toma del conjunto del jugador servido para permitir fichas de todos sus alias.
+    for r in fichas:
+        if jugador_canonico(aliases, r['player_id']) == ident:
+            observaciones.setdefault(r['player_id'], []).append(
+                (r['fetched_at'], ficha_de_entrada(r['payload'], r['fetched_at'])))
+    if not observaciones:
+        return None
+    por_alias = {player_id: ficha_combinada(items)[0] for player_id, items in observaciones.items()}
+    return combinar_fichas(ident, por_alias)
 
 def aplicar_ambito(datos, competiciones):
     """Los datos que sirve la API, limitados a las competiciones permitidas; todas las rutas parten de aquí:
@@ -161,7 +171,8 @@ def aplicar_ambito(datos, competiciones):
             continue
         # La ficha guardada es la de la última alineación observada, quizá excluida: se rehace con las incluidas.
         if p['player_id'] in fuera:
-            p = ficha_de_alineaciones(originales, p['player_id'], datos.get('fichas_originales', []))
+            aliases = datos.get('jugadores_alias', {})
+            p = ficha_de_alineaciones(originales, p['player_id'], datos.get('fichas_originales', []), aliases)
             if p is None:
                 continue
         jugadores.append(p)

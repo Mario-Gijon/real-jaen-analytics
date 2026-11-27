@@ -82,6 +82,25 @@ def main():
     q.add_argument('--receta', default='sofascore-pilot-16599363-v1')
     q.add_argument('--url', default=os.environ.get('RJ_ACQUISITION_URL', 'http://acquisition:8002'))
     q.add_argument('--secreto', type=Path, default=os.environ.get('RJ_ACQUISITION_SECRET_FILE', '/run/secrets/acquisition-token'))
+    identidad = sub.add_parser('identidad', help='decisiones explícitas y reversibles de identidad (PostgreSQL)')
+    acciones_identidad = identidad.add_subparsers(dest='accion_identidad', required=True)
+    ip = acciones_identidad.add_parser('previsualizar', help='valida una fusión sin modificar datos')
+    ip.add_argument('--canonico', type=int, required=True, help='ID SofaScore que conservará la identidad pública')
+    ip.add_argument('--alias', type=int, action='append', required=True, help='ID SofaScore que se asociará al canónico')
+    ia = acciones_identidad.add_parser('aplicar', help='registra, aplica y publica una decisión de fusión')
+    ia.add_argument('--canonico', type=int, required=True)
+    ia.add_argument('--alias', type=int, action='append', required=True)
+    ia.add_argument('--responsable', required=True)
+    ia.add_argument('--motivo', required=True)
+    ia.add_argument('--evidencia', required=True)
+    ia.add_argument('--ambito', type=Path, default=Path(__file__).resolve().parent.parent / 'ambito.json')
+    acciones_identidad.add_parser('listar', help='consulta las decisiones de identidad registradas')
+    ir = acciones_identidad.add_parser('revertir', help='revierte una fusión si su estado no ha cambiado')
+    ir.add_argument('--decision-id', type=int, required=True)
+    ir.add_argument('--responsable', required=True)
+    ir.add_argument('--motivo', required=True)
+    ir.add_argument('--evidencia', required=True)
+    ir.add_argument('--ambito', type=Path, default=Path(__file__).resolve().parent.parent / 'ambito.json')
     args = ap.parse_args()
     comando = ' '.join(sys.argv)
     try:
@@ -107,6 +126,50 @@ def main():
             from persistencia.adquisicion import Cliente
             with Coordinador(args.base, args.ambito) as coordinador:
                 informe = Cliente(args.url, args.secreto).publicar(coordinador, args.solicitud, args.receta)
+        elif args.orden == 'identidad':
+            from sqlalchemy import create_engine
+            from sqlalchemy.pool import NullPool
+            from persistencia.identidades import aplicar as aplicar_identidad
+            from persistencia.identidades import listar as listar_identidades
+            from persistencia.identidades import previsualizar as previsualizar_identidad
+            from persistencia.identidades import revertir as revertir_identidad
+            from persistencia.identidades import _check_admin_environment
+            from persistencia.postgresql import url_postgresql
+
+            try:
+                motor = create_engine(url_postgresql('SPORTS_DATA_MIGRATION_DATABASE_URL'), poolclass=NullPool,
+                                      hide_parameters=True, connect_args={'connect_timeout': 10})
+                try:
+                    with motor.connect() as connection:
+                        if args.accion_identidad == 'previsualizar':
+                            with connection.begin():
+                                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+                                _check_admin_environment(connection, None)
+                                informe = previsualizar_identidad(connection, args.canonico, args.alias)
+                            informe = {k: v for k, v in informe.items() if not k.startswith('_')}
+                        elif args.accion_identidad == 'aplicar':
+                            informe = aplicar_identidad(connection, args.canonico, args.alias,
+                                actor=args.responsable, reason=args.motivo, evidence=args.evidencia,
+                                scope_path=args.ambito, command='persistencia identidad aplicar')
+                        elif args.accion_identidad == 'listar':
+                            with connection.begin():
+                                connection.exec_driver_sql('SET TRANSACTION READ ONLY')
+                                informe = listar_identidades(connection)
+                        else:
+                            informe = revertir_identidad(connection, args.decision_id, actor=args.responsable,
+                                reason=args.motivo, evidence=args.evidencia, scope_path=args.ambito,
+                                command='persistencia identidad revertir')
+                finally:
+                    motor.dispose()
+            except CargaRechazada:
+                raise
+            except RuntimeError:
+                raise
+            except Exception as error:
+                from sqlalchemy.exc import SQLAlchemyError
+                if isinstance(error, SQLAlchemyError):
+                    ap.exit(1, 'Rechazado: no se pudo completar la operación PostgreSQL de identidad.\n')
+                raise
         else:
             if not args.confirmar:
                 ap.error('restaurar sustituye la base: añade --confirmar')

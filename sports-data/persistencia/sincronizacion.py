@@ -212,7 +212,7 @@ def planificar_entidades(c, filas, p, t):
     """Por id externo: nunca se borran; las nuevas reciben el siguiente id y su uid (determinista, una vez)."""
     for tipo in ENTIDADES:
         externo = {r['entity_id']: r['external_id'] for r in filas.de(f'{tipo}_external_id')}
-        en_bd = {r['external_id']: r['entity_id'] for r in filas_bd(c, f'{tipo}_external_id')
+        en_bd = {r['external_id']: r for r in filas_bd(c, f'{tipo}_external_id')
                  if r['provider'] == carga.PROVEEDOR and r['namespace'] == '' and r['status'] != 'rejected'}
         actuales = {r['id']: r for r in filas_bd(c, tipo)}
         siguiente = siguiente_id(c, tipo)
@@ -220,10 +220,16 @@ def planificar_entidades(c, filas, p, t):
             fila = t({k: v for k, v in d.items() if k != 'id'})
             ext = externo[d['id']]
             if ext in en_bd:
-                t.ids[tipo][d['id']] = en_bd[ext]
-                cambios = distintos(actuales[en_bd[ext]], fila, ignorar=('uid',))
+                guardado = en_bd[ext]
+                t.ids[tipo][d['id']] = guardado['entity_id']
+                # An explicitly verified player alias now shares the canonical entity. Its source profile
+                # remains evidence, but synchronization must never overwrite the canonical profile with
+                # whichever alias happened to arrive last.
+                if tipo == 'player' and guardado['status'] != 'origin':
+                    continue
+                cambios = distintos(actuales[guardado['entity_id']], fila, ignorar=('uid',))
                 if cambios:
-                    p.actualizar(tipo, {'id': en_bd[ext]}, cambios)
+                    p.actualizar(tipo, {'id': guardado['entity_id']}, cambios)
                 continue
             t.ids[tipo][d['id']] = siguiente
             p.insertar(tipo, [dict(fila, id=siguiente)])
@@ -382,18 +388,32 @@ def planificar_discrepancias(c, filas, p, t):
     motivos_bd = hijas('reason', filas_bd(c, 'discrepancy_reason'))
     obs_bd = hijas('observation_id', filas_bd(c, 'discrepancy_observation'))
     valores_bd = valores(filas_bd(c, 'discrepancy_value'))
-    vigentes = {(r['kind'], r['match_id'], r['player_id'], r['key'], r['sub']): r
-                for r in filas_bd(c, 'discrepancy', 'id') if r['superseded_in_run'] is None}
+    actuales = [r for r in filas_bd(c, 'discrepancy', 'id') if r['superseded_in_run'] is None]
+    fuentes_actuales = defaultdict(set)
+    for discrepancy_id, external_player_id in c.exec_driver_sql("""
+        SELECT child.discrepancy_id, attribute.external_player_id
+        FROM discrepancy_observation child
+        JOIN discrepancy parent ON parent.id=child.discrepancy_id AND parent.kind='player_attribute'
+        JOIN player_attribute_observation attribute
+          ON attribute.observation_id=child.observation_id AND attribute.player_id=parent.player_id
+        ORDER BY child.discrepancy_id, attribute.external_player_id
+    """):
+        fuentes_actuales[discrepancy_id].add(str(external_player_id))
+    vigentes = {(r['kind'], r['match_id'], r['player_id'], r['key'], r['sub'],
+                 tuple(sorted(fuentes_actuales.get(r['id'], ()) )) if r['kind'] == 'player_attribute' else ()): r
+                for r in actuales}
     obs_d = agrupar(map(t_sin_discrepancia(t), filas.de('discrepancy_observation')), 'discrepancy_id')
     motivos_d = agrupar(filas.de('discrepancy_reason'), 'discrepancy_id')
     valores_d = agrupar(filas.de('discrepancy_value'), 'discrepancy_id')
+    externo_por_entidad = {row['entity_id']: str(row['external_id']) for row in filas.de('player_external_id')}
     siguiente = siguiente_id(c, 'discrepancy')
     firma = lambda f, m, o, v: (bool(f['integrity']), f['selected_observation_id'], f['changed_fields'], f['rule_set_id'],
                                 m, o, v)
     vistas = set()
     for d in filas.de('discrepancy'):
         fila = t({k: v for k, v in d.items() if k != 'id'})
-        clave = (fila['kind'], fila['match_id'], fila['player_id'], fila['key'], fila['sub'])
+        fuente = (externo_por_entidad.get(d['player_id']),) if d['kind'] == 'player_attribute' else ()
+        clave = (fila['kind'], fila['match_id'], fila['player_id'], fila['key'], fila['sub'], fuente)
         vistas.add(clave)
         m = sorted((x['reason'], x['ordinal']) for x in motivos_d.get(d['id'], []))
         o = sorted((x['observation_id'], 0) for x in obs_d.get(d['id'], []))
@@ -567,6 +587,14 @@ def problemas_de_estado(c):
     desfasadas = reglas_desfasadas(c)
     if desfasadas:
         problemas.append(f'el estado usa reglas que no son las del código: {desfasadas}')
+    try:
+        from persistencia.identidades import conflictos_identidad
+        conflictos_identidad_actuales = conflictos_identidad(c)
+        if conflictos_identidad_actuales:
+            problemas.append('IDs de identidad canónica simultáneos en convocatorias vigentes: '
+                             f'{conflictos_identidad_actuales[:10]}')
+    except RuntimeError as error:
+        problemas.append(f'grafo de identidades de jugadores incoherente: {error}')
     plan = None
     try:
         filas, salida = estado_deseado(c)

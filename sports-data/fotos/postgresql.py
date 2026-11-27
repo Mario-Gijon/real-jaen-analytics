@@ -213,23 +213,36 @@ class PostgreSQLPhotoReader:
             with self.engine.connect() as connection:
                 for start in range(0, len(wanted), serving.BATCH):
                     chunk = wanted[start:start + serving.BATCH]
-                    player_params = {f'player_{i}': player for i, player in enumerate(chunk)}
+                    player_params = {f'player_{i}': str(player) for i, player in enumerate(chunk)}
                     source_params = {f'source_{i}': source for i, source in enumerate(self.sources)}
                     query = (
-                        'SELECT p.sofascore_id AS player_id,p.source_id,p.sha256,b.media_type '
+                        'SELECT requested.external_id AS requested_player_id,p.sofascore_id AS photo_player_id,'
+                        'p.source_id,p.sha256,b.media_type '
                         'FROM sports_data_photo p JOIN sports_data_photo_blob b USING (sha256) '
-                        "WHERE p.status='active' AND p.sofascore_id IN (" +
+                        'JOIN player_external_id photo_alias ON CAST(p.sofascore_id AS text)=photo_alias.external_id '
+                        'JOIN player_external_id requested ON requested.entity_id=photo_alias.entity_id '
+                        'JOIN player_external_id canonical ON canonical.entity_id=requested.entity_id '
+                        "AND canonical.provider='sofascore' AND canonical.namespace='' AND canonical.status='origin' "
+                        "WHERE p.status='active' AND photo_alias.provider='sofascore' AND photo_alias.namespace='' "
+                        "AND photo_alias.status <> 'rejected' AND requested.provider='sofascore' "
+                        "AND requested.namespace='' AND requested.status <> 'rejected' AND requested.external_id IN (" +
                         ','.join(':' + key for key in player_params) + ') AND p.source_id IN (' +
-                        ','.join(':' + key for key in source_params) + ')'
+                        ','.join(':' + key for key in source_params) + ') '
+                        "ORDER BY requested.external_id, CASE p.source_id " +
+                        ' '.join(f'WHEN :source_{i} THEN {i}' for i in range(len(self.sources))) +
+                        " ELSE " + str(len(self.sources)) + " END, "
+                        'CASE WHEN CAST(p.sofascore_id AS text)=canonical.external_id THEN 0 ELSE 1 END, '
+                        'p.imported_at DESC,p.id DESC'
                     )
                     rows = connection.execute(text(query), {**player_params, **source_params}).mappings().all()
                     for row in rows:
+                        requested = int(row['requested_player_id'])
                         if row['media_type'] not in images.FORMATS or not _SHA.fullmatch(row['sha256']):
-                            raise serving.PhotoStoreFault(f"fila de fotografía no válida para {row['player_id']}")
-                        selected = serving.Selected(row['player_id'], row['source_id'], row['sha256'], row['media_type'])
+                            raise serving.PhotoStoreFault(f"fila de fotografía no válida para {requested}")
+                        selected = serving.Selected(requested, row['source_id'], row['sha256'], row['media_type'])
                         candidate = (rank[row['source_id']], selected)
-                        if row['player_id'] not in chosen or candidate[0] < chosen[row['player_id']][0]:
-                            chosen[row['player_id']] = candidate
+                        if requested not in chosen or candidate[0] < chosen[requested][0]:
+                            chosen[requested] = candidate
         except serving.PhotoStoreFault:
             raise
         except SQLAlchemyError as error:
@@ -270,16 +283,24 @@ class PostgreSQLPhotoReader:
         source_params = {f'source_{i}': source for i, source in enumerate(self.sources)}
         cases = ' '.join(f'WHEN :source_{i} THEN {i}' for i in range(len(self.sources)))
         query = text(
-            'SELECT p.sofascore_id AS player_id,p.source_id,p.sha256,b.media_type,b.byte_count,'
+            'SELECT p.sofascore_id AS photo_player_id,p.source_id,p.sha256,b.media_type,b.byte_count,'
             'b.content FROM sports_data_photo p JOIN sports_data_photo_blob b USING (sha256) '
-            "WHERE p.sofascore_id=:player AND p.status='active' AND p.source_id IN (" +
+            'JOIN player_external_id photo_alias ON CAST(p.sofascore_id AS text)=photo_alias.external_id '
+            'JOIN player_external_id requested ON requested.entity_id=photo_alias.entity_id '
+            'JOIN player_external_id canonical ON canonical.entity_id=requested.entity_id '
+            "AND canonical.provider='sofascore' AND canonical.namespace='' AND canonical.status='origin' "
+            "WHERE requested.external_id=:player AND requested.provider='sofascore' AND requested.namespace='' "
+            "AND requested.status <> 'rejected' AND photo_alias.provider='sofascore' AND photo_alias.namespace='' "
+            "AND photo_alias.status <> 'rejected' AND p.status='active' AND p.source_id IN (" +
             ','.join(':' + key for key in source_params) +
-            f') ORDER BY CASE p.source_id {cases} ELSE {len(rank)} END LIMIT 1'
+            f') ORDER BY CASE p.source_id {cases} ELSE {len(rank)} END, '
+            'CASE WHEN CAST(p.sofascore_id AS text)=canonical.external_id THEN 0 ELSE 1 END, '
+            'p.imported_at DESC,p.id DESC LIMIT 1'
         )
         try:
             # Selection and BYTEA come from one PostgreSQL statement snapshot.
             with self.engine.connect() as connection:
-                row = connection.execute(query, {'player': player_id, **source_params}).mappings().first()
+                row = connection.execute(query, {'player': str(player_id), **source_params}).mappings().first()
         except SQLAlchemyError as error:
             raise serving.PhotoStoreFault(f'catálogo PostgreSQL ilegible: {type(error).__name__}') from None
         if row is None or row['sha256'] != version:
